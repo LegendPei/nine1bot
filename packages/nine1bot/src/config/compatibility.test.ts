@@ -30,6 +30,17 @@ async function materializeFixture(relativePath: string): Promise<string> {
   return targetPath
 }
 
+async function createIsolatedUserDirs(): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'nine1bot-home-'))
+  tempDirs.push(root)
+
+  process.env.HOME = root
+  process.env.USERPROFILE = root
+  process.env.XDG_DATA_HOME = join(root, '.local', 'share')
+  process.env.LOCALAPPDATA = join(root, 'AppData', 'Local')
+  process.env.APPDATA = join(root, 'AppData', 'Roaming')
+}
+
 function snapshotEnv(): NodeJS.ProcessEnv {
   return { ...process.env }
 }
@@ -144,9 +155,17 @@ describe('legacy config compatibility', () => {
 
   for (const fixture of supportedFixtures) {
     it(`loads supported legacy fixture: ${fixture.name}`, async () => {
+      const envSnapshot = snapshotEnv()
       const configPath = await materializeFixture(fixture.path)
-      const config = await loadConfig(configPath)
-      fixture.assert(config)
+
+      try {
+        delete process.env.NINE1BOT_COMPAT_OPENAI_API_KEY
+
+        const config = await loadConfig(configPath)
+        fixture.assert(config)
+      } finally {
+        restoreEnv(envSnapshot)
+      }
     })
   }
 
@@ -188,6 +207,8 @@ describe('legacy config compatibility', () => {
     let result: Awaited<ReturnType<typeof launch>> | undefined
 
     try {
+      await createIsolatedUserDirs()
+
       result = await launch({
         configPath,
         port: 0,
