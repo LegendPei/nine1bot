@@ -30,6 +30,26 @@ async function materializeFixture(relativePath: string): Promise<string> {
   return targetPath
 }
 
+function snapshotEnv(): NodeJS.ProcessEnv {
+  return { ...process.env }
+}
+
+function restoreEnv(snapshot: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in snapshot)) {
+      delete process.env[key]
+    }
+  }
+
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+}
+
 describe('legacy config compatibility', () => {
   const supportedFixtures: Array<{
     name: string
@@ -163,19 +183,25 @@ describe('legacy config compatibility', () => {
   }
 
   it('starts with a supported minimal legacy config', async () => {
+    const envSnapshot = snapshotEnv()
     const configPath = await materializeFixture('supported/minimal-v1.jsonc')
-    const result = await launch({
-      configPath,
-      port: 0,
-      hostname: '127.0.0.1',
-      noBrowser: true,
-    })
+    let result: Awaited<ReturnType<typeof launch>> | undefined
 
     try {
+      result = await launch({
+        configPath,
+        port: 0,
+        hostname: '127.0.0.1',
+        noBrowser: true,
+      })
+
       expect(result.localUrl).toContain('http://127.0.0.1:')
       expect(result.configPath).toBe(configPath)
     } finally {
-      await shutdown(result)
+      if (result) {
+        await shutdown(result)
+      }
+      restoreEnv(envSnapshot)
     }
   })
 })
