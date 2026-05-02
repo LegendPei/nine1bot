@@ -61,6 +61,18 @@ describe('GitLab review foundation', () => {
     expect(manifest.skipped.map((file) => file.path)).toEqual(['package-lock.json', 'public/logo.svg'])
   })
 
+  test('blocks non-blacklisted source files when GitLab returns an empty diff', () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [
+        { old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '' },
+      ],
+    })
+
+    expect(manifest.blocked).toBe(true)
+    expect(manifest.blockReason).toContain('src/app.ts')
+    expect(manifest.files).toEqual([])
+  })
+
   test('validates inline positions against changed diff lines', () => {
     const response: GitLabRawChangesResponse = {
       diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },

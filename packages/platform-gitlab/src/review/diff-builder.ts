@@ -47,8 +47,7 @@ export function buildGitLabDiffManifest(
       continue
     }
     if (!change.diff?.trim()) {
-      skipped.push({ path, reason: 'empty-diff' })
-      continue
+      return blockedManifest(response, changes, `MR diff for ${path} is empty or unavailable.`)
     }
     const nextBytes = byteLength(change.diff)
     if (files.length >= maxFiles || includedBytes + nextBytes > maxDiffBytes) {

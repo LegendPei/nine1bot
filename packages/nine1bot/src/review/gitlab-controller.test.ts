@@ -400,6 +400,79 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('stores blocked runtime stage results as blocked after publishing summary', async () => {
+    const fetchMock = (async (url: string | URL | Request) => {
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          changes: [{
+            old_path: 'src/app.ts',
+            new_path: 'src/app.ts',
+            diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+          }],
+        })
+      }
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'blocked-result-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'blocked',
+        summary: 'Runtime review blocked by PM gate.',
+        findings: [],
+      },
+    })).resolves.toMatchObject({
+      published: true,
+    })
+
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'blocked',
+      publishedAt: expect.any(Number),
+    })
+  })
+
   test('loads live commit diff and publishes a commit summary comment', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {

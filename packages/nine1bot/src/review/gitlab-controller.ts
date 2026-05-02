@@ -256,7 +256,7 @@ export async function publishGitLabReviewRunResult(input: {
     warnings: parsed.nextActions,
   })
   ReviewRunStore.update(input.runId, {
-    status: parsed.status === 'failed' ? 'failed' : 'succeeded',
+    status: reviewRunStatusForStageResult(parsed.status),
     publishedAt: Date.now(),
     warnings: published.warnings,
   })
@@ -266,6 +266,12 @@ export async function publishGitLabReviewRunResult(input: {
     runId: input.runId,
     ...published,
   }
+}
+
+function reviewRunStatusForStageResult(status: ReturnType<typeof parseReviewStageResult>['status']) {
+  if (status === 'failed') return 'failed'
+  if (status === 'blocked') return 'blocked'
+  return 'succeeded'
 }
 
 async function loadLiveChanges(input: {

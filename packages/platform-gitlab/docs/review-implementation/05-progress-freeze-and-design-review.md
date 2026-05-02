@@ -19,7 +19,7 @@
   - Web UI 展开 warnings / error / session 详情。
   - 真实 Runtime task 输出接入 `subagent-result-compiler` 的边界测试。
 
-整体方向没有偏离最初“插件化、低耦合、多 agents、GitLab 包内聚”的设计，但有两个实现细节与设计文档存在偏差，建议下一轮先修。
+整体方向没有偏离最初“插件化、低耦合、多 agents、GitLab 包内聚”的设计。本文档初版指出过两个实现细节偏差；当前已按本文档完成修复并补测试。
 
 ## 当前冻结产出
 
@@ -116,7 +116,7 @@ bun run review:dry-run:subagents
 | Subagent failureMode | 类型、compiler、dry-run fixture 已有 | 部分符合，真实 runtime task 尚无原生 timeout/failureMode 参数 |
 | Dry-run 本地测试桩 | 已有 changes/webhook/runtime-output/subagents 模式 | 符合 |
 
-## 偏离点
+## 已修复偏离点
 
 ### 1. Runtime 输出 `blocked` 会被记录为 `succeeded`
 
@@ -125,29 +125,22 @@ bun run review:dry-run:subagents
 - `packages/nine1bot/src/review/gitlab-controller.ts`
 - `publishGitLabReviewRunResult`
 
-当前逻辑：
+原偏离逻辑：
 
 ```ts
 status: parsed.status === 'failed' ? 'failed' : 'succeeded'
 ```
 
-影响：
+原影响：
 
 - 如果 PM 最终输出 `status: "blocked"`，评论可以发布，但 run store 会显示 `succeeded`。
 - 这和设计中的 `accepted / blocked / failed / closed` 状态语义不一致。
 - Web UI、后续 retry 策略和运营排查会误判 blocked 为成功。
 
-建议：
+修复结果：
 
-```ts
-status: parsed.status === 'failed'
-  ? 'failed'
-  : parsed.status === 'blocked'
-    ? 'blocked'
-    : 'succeeded'
-```
-
-并补一个 controller 测试：PM 输出 `blocked` 时 run status 为 `blocked`，但 `publishedAt` 仍记录。
+- `publishGitLabReviewRunResult` 已把 `failed / blocked / ok` 分别映射为 `failed / blocked / succeeded`。
+- 已补 controller 测试：PM 输出 `blocked` 后 summary 仍发布，run status 记录为 `blocked`，`publishedAt` 仍保留。
 
 ### 2. 非黑名单空 diff 当前被跳过，而施工文档要求 blocked
 
@@ -155,7 +148,7 @@ status: parsed.status === 'failed'
 
 - `packages/platform-gitlab/src/review/diff-builder.ts`
 
-当前逻辑：
+原偏离逻辑：
 
 ```ts
 if (!change.diff?.trim()) {
@@ -164,16 +157,16 @@ if (!change.diff?.trim()) {
 }
 ```
 
-影响：
+原影响：
 
 - 如果 GitLab 因截断或异常返回非黑名单源码文件的空 diff，但未显式带 `overflow / too_large / collapsed`，系统会跳过该文件并继续审查剩余 diff。
 - 设计文档要求：源码文件显示有变更但 diff 为空时应 blocked，避免代理在缺证据场景下审查不完整 MR。
 
-建议：
+修复结果：
 
 - 黑名单、generated、too_large、collapsed 仍 skip。
 - 非黑名单源码文件空 diff 时返回 blocked manifest。
-- 补测试：`src/app.ts` 空 diff => `manifest.blocked === true`。
+- 已补测试：`src/app.ts` 空 diff => `manifest.blocked === true`。
 
 ### 3. `failureMode / timeoutMs` 尚未成为 Runtime task 原生参数
 
@@ -207,11 +200,16 @@ if (!change.diff?.trim()) {
 
 这些可以不用真实 GitLab：
 
-1. 修 `blocked` runtime result 的 run status 映射。
-2. 修非黑名单空 diff blocked 策略。
-3. 增加非法 JSON / 缺字段 JSON dry-run fixture。
-4. Web UI 展开 run warnings / error 详情。
-5. 用单元测试固定 retry 后 warnings 不无限重复的策略。
+1. Web UI 展开 run warnings / error 详情。
+2. 用单元测试固定 retry 后 warnings 不无限重复的策略。
+3. 增加更多 GitLab API 失败 fixture，例如 401、403、404、429。
+4. 为真实 Runtime task 输出接入 `subagent-result-compiler` 设计测试边界。
+
+已在本地完成：
+
+- 修 `blocked` runtime result 的 run status 映射。
+- 修非黑名单空 diff blocked 策略。
+- 增加非法 JSON / 缺字段 JSON dry-run fixture：`review:dry-run:invalid-runtime-output`。该命令预期以非零退出，证明坏 Runtime 输出不会被静默发布。
 
 ### 需要真实 GitLab / Runtime 验证
 
