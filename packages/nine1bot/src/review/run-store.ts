@@ -11,6 +11,7 @@ export type ReviewRunRecord = {
   trigger?: Record<string, unknown>
   sessionId?: string
   turnSnapshotId?: string
+  publishedAt?: number
   warnings?: string[]
   context?: unknown
 }

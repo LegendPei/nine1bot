@@ -8,7 +8,11 @@ import z from "zod"
 import { lazy } from "../../util/lazy"
 import { errors } from "../error"
 import { runAutomatedControllerSession, type AutomatedControllerResponse } from "./automated-controller"
-import { handleGitLabReviewWebhook, publishGitLabReviewRunResult } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
+import {
+  extractGitLabReviewStageResultFromRuntimeText,
+  handleGitLabReviewWebhook,
+  publishGitLabReviewRunResult,
+} from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
@@ -409,6 +413,7 @@ function isAcceptedGitLabReviewWithContext(
 
 async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithContext) {
   const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
+  let publishAttempted = false
   const entry = {
     source: "webhook",
     platform: "gitlab",
@@ -451,7 +456,28 @@ async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithConte
         ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
       })
     },
+    async onRuntimeOutput(output) {
+      if (publishAttempted || output.kind !== "part" || !output.text) return
+      const stageResult = extractGitLabReviewStageResultFromRuntimeText(output.text)
+      if (!stageResult) return
+      publishAttempted = true
+      const published = await publishGitLabReviewRunResult({
+        runId: result.runId,
+        stageResult,
+        platforms: await readPlatformManagerConfig(),
+        secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+      })
+      if (!published.published) {
+        ReviewRunStore.update(result.runId, {
+          status: "failed",
+          error: published.error,
+          warnings: published.warnings,
+        })
+      }
+    },
     async onFinished(finished) {
+      const current = ReviewRunStore.get(result.runId)
+      if (current?.publishedAt) return
       ReviewRunStore.update(result.runId, {
         status: finished.status === "succeeded" ? "succeeded" : "failed",
         ...(finished.error ? { error: finished.error } : {}),

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { handleGitLabReviewWebhook, publishGitLabReviewRunResult } from './gitlab-controller'
+import {
+  extractGitLabReviewStageResultFromRuntimeText,
+  handleGitLabReviewWebhook,
+  publishGitLabReviewRunResult,
+} from './gitlab-controller'
 import { ReviewRunStore } from './run-store'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -51,6 +55,28 @@ const platforms = {
 describe('GitLab review controller', () => {
   beforeEach(() => {
     ReviewRunStore.clearForTesting()
+  })
+
+  test('extracts runtime review results from fenced output', () => {
+    const extracted = extractGitLabReviewStageResultFromRuntimeText([
+      'Review complete.',
+      '```json',
+      'GITLAB_REVIEW_RESULT:',
+      JSON.stringify({
+        stage: 'verification',
+        status: 'ok',
+        summary: 'No blocking findings.',
+        findings: [],
+      }),
+      '```',
+    ].join('\n'))
+
+    expect(extracted).toEqual({
+      stage: 'verification',
+      status: 'ok',
+      summary: 'No blocking findings.',
+      findings: [],
+    })
   })
 
   test('rejects disabled GitLab review', async () => {
@@ -278,6 +304,30 @@ describe('GitLab review controller', () => {
       published: true,
       inlinePosted: 1,
       fallbackPosted: 0,
+    })
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'ok',
+        summary: 'Duplicate publish.',
+        findings: [],
+      },
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'review_run_already_published',
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',

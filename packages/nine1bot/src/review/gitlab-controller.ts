@@ -76,7 +76,22 @@ export function buildGitLabReviewRuntimePrompt(input: {
     input.trigger.headSha ? `Head SHA: ${input.trigger.headSha}` : undefined,
     '',
     'Use the declared GitLab review skills. Produce structured review findings only from the supplied diff context. If an inline position is uncertain, prefer a top-level finding without a guessed line.',
+    '',
+    'At the end, emit exactly one fenced json block tagged GITLAB_REVIEW_RESULT. The JSON must match the GitLab review finding schema.',
   ].filter(Boolean).join('\n')
+}
+
+export function extractGitLabReviewStageResultFromRuntimeText(text: string): unknown | undefined {
+  for (const candidate of extractJsonCandidates(text)) {
+    try {
+      const parsed = JSON.parse(candidate)
+      parseReviewStageResult(parsed)
+      return parsed
+    } catch {
+      continue
+    }
+  }
+  return undefined
 }
 
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
@@ -197,6 +212,9 @@ export async function publishGitLabReviewRunResult(input: {
 }): Promise<PublishGitLabReviewRunResult> {
   const run = ReviewRunStore.get(input.runId)
   if (!run) return { published: false, runId: input.runId, error: 'review_run_not_found' }
+  if (run.publishedAt) {
+    return { published: false, runId: input.runId, error: 'review_run_already_published' }
+  }
   const context = run.context as ReturnType<typeof buildGitLabReviewContext> | undefined
   const trigger = run.trigger as GitLabReviewTrigger | undefined
   if (!context || !trigger) return { published: false, runId: input.runId, error: 'review_run_context_missing' }
@@ -239,6 +257,7 @@ export async function publishGitLabReviewRunResult(input: {
   })
   ReviewRunStore.update(input.runId, {
     status: parsed.status === 'failed' ? 'failed' : 'succeeded',
+    publishedAt: Date.now(),
     warnings: published.warnings,
   })
 
@@ -326,4 +345,27 @@ function extractDryRunChanges(payload: unknown): GitLabRawChangesResponse | unde
 
 function isRawChangesResponse(input: unknown): input is GitLabRawChangesResponse {
   return Boolean(input && typeof input === 'object' && !Array.isArray(input))
+}
+
+function extractJsonCandidates(text: string): string[] {
+  const candidates: string[] = []
+  const fencePattern = /```(?:json)?\s*([\s\S]*?)```/gi
+  for (const match of text.matchAll(fencePattern)) {
+    const content = match[1]?.trim()
+    if (content) candidates.push(stripGitLabReviewResultTag(content))
+  }
+
+  const tagged = /GITLAB_REVIEW_RESULT\s*:?\s*(\{[\s\S]*\})/i.exec(text)
+  if (tagged?.[1]) candidates.push(tagged[1].trim())
+
+  const firstBrace = text.indexOf('{')
+  const lastBrace = text.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1).trim())
+  }
+  return [...new Set(candidates)]
+}
+
+function stripGitLabReviewResultTag(content: string) {
+  return content.replace(/^GITLAB_REVIEW_RESULT\s*:?\s*/i, '').trim()
 }

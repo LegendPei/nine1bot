@@ -92,6 +92,17 @@
   - GitLab review skills 作为 session resources
   - `GitLabReviewContext` 生成的 context blocks
 - automated webhook controller 已支持传入 `context.blocks`。
+- automated run monitor 已能监听 `message.updated` / `message.part.updated`，并通过通用 `onRuntimeOutput` 回调暴露文本输出；这个回调仍然不包含 GitLab 业务类型。
+
+### Runtime 结果捕获
+
+已实现：
+
+- PM runtime prompt 要求最终输出一个带 `GITLAB_REVIEW_RESULT` 标记的 fenced JSON。
+- 产品层提供 `extractGitLabReviewStageResultFromRuntimeText`，只在解析后通过 `parseReviewStageResult` 校验的 JSON 才会被接受。
+- GitLab webhook runtime run 会在文本输出中捕获合法结果，并自动调用 `publishGitLabReviewRunResult`。
+- `ReviewRunStore` 增加 `publishedAt`，防止同一 run 被 streaming 输出或手动 API 重复发布。
+- session idle 时如果已经发布过结果，不再把 run 状态覆盖成普通 `succeeded`。
 
 ### 结果发布
 
@@ -114,6 +125,7 @@
 - `bun test packages/nine1bot/src/review/gitlab-controller.test.ts`
 - `bun test packages/nine1bot/src/platform/manager.test.ts`
 - `bun run review:dry-run fixtures/review/sample-mr-overflow.json`
+- `bun run typecheck` in `opencode/packages/opencode` 已再次验证，仍只失败在 workspace 包 `@nine1bot/platform-protocol` 的 standalone 解析问题上。
 
 已知验证 caveat：
 
@@ -131,25 +143,14 @@
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
 | Inline 安全 | 校验 hunk，非法或 400 fallback | 已实现并测试 | 当前阶段无明显差距 |
 | Map-reduce findings | 代码侧聚合后交给 PM | aggregator 已实现 | 尚未接真实多 agent stage outputs |
-| Runtime 边界 | Runtime 只处理通用 schema/result | review 类型由 platform/controller 拥有 | 还需要接 PM 最终结构化结果捕获 |
+| Runtime 边界 | Runtime 只处理通用 schema/result | review 类型由 platform/controller 拥有，自动控制器只暴露通用 runtime output | 当前阶段无明显差距 |
+| Runtime 结果捕获 | PM 最终结构化结果自动发布 | 已从 `message.part.updated` 捕获 fenced JSON 并发布 | 还需要真实端到端 fixture 覆盖 streaming 与异常输出 |
 | Failure policy | subagent spec 包含 `failureMode` | 类型和初始 task specs 已有 | Runtime 内 PM 创建子代理的实际 tool contract 仍需确认/实现 |
 | Dry-run harness | 初期必须有 | 已实现 | 可继续扩展 webhook payload fixture 模式 |
 
 ## 下一步计划
 
-### 1. Runtime 结果捕获
-
-目标：Runtime 执行完成后，能产生结构化 review result，并自动调用 `publishGitLabReviewRunResult`。
-
-任务：
-
-- 确定 PM 最终结构化输出走 event、artifact 还是 controller response。
-- 要求 PM agent 输出符合 `reviewStageResultJsonSchema` 的 JSON。
-- 在 automated run monitor 或 controller event router 中捕获最终 payload。
-- completion 时调用 `publishGitLabReviewRunResult(runId, stageResult, ...)`。
-- 把发布结果写回 `ReviewRunStore`。
-
-### 2. PM 与 skills 适配
+### 1. PM 与 skills 适配
 
 目标：让迁移来的 prompts 真正适配当前项目和 runtime source 模型。
 
@@ -159,6 +160,16 @@
 - 收紧各 subagent prompt skill，让它们稳定输出统一 JSON schema。
 - 明确每个角色的 allowed tools 和 failure modes。
 - 除非未来配置显式开启 fix mode，否则代码修改类 agent 默认不执行写操作。
+
+### 2. Runtime 结果捕获加固
+
+目标：让结果捕获在真实 streaming、异常输出和重试场景下更稳。
+
+任务：
+
+- 为 `onRuntimeOutput` 增加更贴近真实 session event 的单元或集成测试。
+- 补充 PM 输出不合法 JSON 时的 run warning / failed policy。
+- 扩展 dry-run harness，使其能注入一段 PM 输出文本并验证自动发布链路。
 
 ### 3. GitLab Commit Review
 
