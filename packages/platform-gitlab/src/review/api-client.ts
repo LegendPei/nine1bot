@@ -45,10 +45,23 @@ export class GitLabApiClient {
     )
   }
 
+  async getCommitDiff(projectId: string | number, commitSha: string | number): Promise<GitLabRawChangesResponse> {
+    const changes = await this.request<GitLabRawChangesResponse['changes']>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/commits/${encodeURIComponent(String(commitSha))}/diff`,
+    )
+    return { changes: changes ?? [] }
+  }
+
   async createNote(input: GitLabCreateNoteInput): Promise<unknown> {
-    return await this.request(`/api/v4/projects/${encodeURIComponent(String(input.projectId))}/${input.resource}/${encodeURIComponent(String(input.resourceId))}/notes`, {
+    const notePath = input.resource === 'repository/commits'
+      ? `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/repository/commits/${encodeURIComponent(String(input.resourceId))}/comments`
+      : `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/merge_requests/${encodeURIComponent(String(input.resourceId))}/notes`
+    const body = input.resource === 'repository/commits'
+      ? new URLSearchParams({ note: input.body })
+      : new URLSearchParams({ body: input.body })
+    return await this.request(notePath, {
       method: 'POST',
-      body: new URLSearchParams({ body: input.body }),
+      body,
     })
   }
 

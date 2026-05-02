@@ -335,4 +335,95 @@ describe('GitLab review controller', () => {
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
   })
+
+  test('loads live commit diff and publishes a commit summary comment', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      if (String(url).includes('/diff')) {
+        return Response.json([{
+          old_path: 'src/commit.ts',
+          new_path: 'src/commit.ts',
+          diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+        }])
+      }
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'note',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          id: 99,
+          note: '@Nine1bot review commit',
+        },
+        commit: {
+          id: 'commit-sha',
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(accepted).toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      idempotencyKey: 'gitlab:gitlab.example.com:123:commit:commit-sha:note:99',
+    })
+    if (!accepted.accepted) throw new Error('expected accepted commit review run')
+
+    const published = await publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'ok',
+        summary: 'Commit review complete.',
+        findings: [{
+          title: 'Changed line',
+          body: 'Commit finding body',
+          severity: 'major',
+          file: 'src/commit.ts',
+          newLine: 2,
+        }],
+      },
+    })
+
+    expect(published).toMatchObject({
+      published: true,
+      inlinePosted: 0,
+      fallbackPosted: 0,
+    })
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/repository/commits/commit-sha/diff',
+      'https://gitlab.example.com/api/v4/projects/123/repository/commits/commit-sha/comments',
+    ])
+    expect(String(calls[1]?.init?.body)).toContain('note=')
+  })
 })

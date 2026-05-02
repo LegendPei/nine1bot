@@ -83,6 +83,7 @@
   - 计算 idempotency key
   - 对已 accepted 的 run 做幂等去重
   - 非 dry-run 时拉取真实 MR changes
+  - commit mention 触发时拉取真实 commit diff
   - 构建 review context
   - overflow 时阻断并向 MR 写 blocked 评论
   - 非 dry-run、未阻断时启动 Runtime session
@@ -119,6 +120,10 @@
   - 通过校验的 inline discussions
   - 最终 top-level summary note
   - inline fallback 详情
+- commit review 采用保守发布策略：
+  - 拉取 `/repository/commits/:sha/diff`
+  - 向 `/repository/commits/:sha/comments` 写顶层 summary
+  - 暂不使用 MR discussion position 生成 commit inline comment
 - dry-run 下不会触碰 GitLab，会返回拒绝发布结果。
 
 ## 已验证命令
@@ -143,7 +148,7 @@
 | GitLab 包边界 | GitLab 专属代码放在 `platform-gitlab` | parsing、diff、API、publishing、skills、agents 已放入 | Phase 0/1 无明显差距 |
 | Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
 | Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭 | 还没有 GitLab 专属引导 UI |
-| Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload | commit diff live fetch 还没接 |
+| Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload，commit mention 已能拉 diff 并写 summary | commit inline comment 暂未实现 |
 | 幂等性 | MR key 必须包含 `headSha` | 已实现并测试 | store 仍是内存实现 |
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
 | Inline 安全 | 校验 hunk，非法或 400 fallback | 已实现并测试 | 当前阶段无明显差距 |
@@ -166,16 +171,15 @@
 - 扩展 dry-run harness，使其能注入一段 PM 输出文本并验证自动发布链路。
 - 验证 PM 通过 runtime subagent/task 能力创建自定义子代理时，promptRef、skills、timeout、failureMode 能被正确传入。
 
-### 2. GitLab Commit Review
+### 2. Commit Inline Comment 增强
 
-目标：支持 commit 评论触发场景。
+目标：在保守 summary 发布之外，评估是否支持 GitLab commit 行级评论。
 
 任务：
 
-- 在 `GitLabApiClient` 增加 commit diff 拉取方法。
-- commit diff 复用当前 filter / overflow guard。
-- 通过 `repository/commits/:sha/notes` 发布 commit review note。
-- 增加 commit note webhook fixture 和测试。
+- 调研并验证 GitLab commit comments 的 `path`、`line`、`line_type` 参数在不同 GitLab 版本中的行为。
+- 设计与 MR inline position 分离的 commit line validator。
+- 仅在代码侧校验通过时启用 commit inline；否则继续 summary fallback。
 
 ### 3. ReviewRun 持久化
 

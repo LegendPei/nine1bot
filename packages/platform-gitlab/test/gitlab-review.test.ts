@@ -149,6 +149,39 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('parses commit mention note webhooks into review triggers', () => {
+    const result = parseGitLabWebhookEvent({
+      object_kind: 'note',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 778,
+        note: '@Nine1bot review commit',
+      },
+      commit: {
+        id: 'commit123',
+      },
+    }, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      allowedProjectIds: [123],
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      trigger: {
+        objectType: 'commit',
+        commitSha: 'commit123',
+        noteId: 778,
+        mode: 'mention',
+      },
+    })
+  })
+
   test('builds review context blocks from trigger and changes', () => {
     const context = buildGitLabReviewContext({
       trigger: {
@@ -283,5 +316,49 @@ describe('GitLab review foundation', () => {
 
     expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 1 })
     expect(result.warnings[0]).toContain('GitLab API returned 400')
+  })
+
+  test('publishes commit reviews as summary comments without inline discussions', async () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const calls: string[] = []
+    const result = await publishGitLabReviewResult({
+      client: {
+        async createDiscussion() {
+          calls.push('discussion')
+          return {}
+        },
+        async createNote() {
+          calls.push('note')
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'commit',
+      objectId: 'commit123',
+      manifest,
+      summary: 'Commit review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Changed line',
+        body: 'Commit finding body',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    })
+
+    expect(calls).toEqual(['note'])
+    expect(result).toMatchObject({
+      summaryPosted: true,
+      inlinePosted: 0,
+      fallbackPosted: 0,
+    })
+    expect(result.warnings[0]).toContain('Inline comments are skipped for commit review runs')
   })
 })

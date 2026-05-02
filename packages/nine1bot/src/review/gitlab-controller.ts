@@ -274,13 +274,18 @@ async function loadLiveChanges(input: {
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
 }): Promise<GitLabRawChangesResponse | undefined> {
-  if (input.trigger.objectType !== 'mr') return undefined
   if (input.settings.dryRun) return undefined
   const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
-  if (!token || !input.trigger.objectIid) return undefined
+  if (!token) return undefined
   const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
-  return await client.getMergeRequestChanges(input.trigger.projectId, input.trigger.objectIid)
+  if (input.trigger.objectType === 'mr' && input.trigger.objectIid) {
+    return await client.getMergeRequestChanges(input.trigger.projectId, input.trigger.objectIid)
+  }
+  if (input.trigger.objectType === 'commit' && input.trigger.commitSha) {
+    return await client.getCommitDiff(input.trigger.projectId, input.trigger.commitSha)
+  }
+  return undefined
 }
 
 async function maybeWriteBlockedComment(input: {

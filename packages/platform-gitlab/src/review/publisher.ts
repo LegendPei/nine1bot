@@ -31,7 +31,7 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
   let fallbackPosted = 0
   const fallbackMarkdown: string[] = []
 
-  if (input.inlineComments) {
+  if (input.inlineComments && input.objectType === 'mr') {
     for (const finding of aggregated) {
       const validation = validateGitLabInlinePosition(finding, input.manifest.files, input.manifest.diffRefs)
       if (!validation.ok) {
@@ -59,6 +59,8 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
         throw error
       }
     }
+  } else if (input.inlineComments && input.objectType === 'commit') {
+    warnings.push('Inline comments are skipped for commit review runs; findings are included in the summary comment.')
   }
 
   const summaryBody = [
