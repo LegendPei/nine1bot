@@ -580,11 +580,20 @@ export const WebhookRoutes = lazy(() =>
       ),
       async (c) => c.json(await Webhook.listRuns(c.req.valid("query"))),
     )
-    .get("/gitlab/runs", async (c) => {
-      return c.json({
-        runs: ReviewRunStore.list(),
-      })
-    })
+    .get(
+      "/gitlab/runs",
+      validator(
+        "query",
+        z.object({
+          limit: z.coerce.number().min(1).max(500).optional(),
+        }),
+      ),
+      async (c) => {
+        return c.json({
+          runs: ReviewRunStore.list({ limit: c.req.valid("query").limit }),
+        })
+      },
+    )
     .get(
       "/gitlab/runs/:runId",
       validator("param", z.object({ runId: z.string() })),

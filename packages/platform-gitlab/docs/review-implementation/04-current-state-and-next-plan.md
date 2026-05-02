@@ -81,6 +81,8 @@
   - 默认路径：Nine1Bot data dir 下的 `review-runs.json`
   - 支持按 `idempotencyKey` 跨进程重启去重
   - 持久化 trigger、context、sessionId、turnSnapshotId、warnings、publishedAt 等发布/重试所需上下文
+  - 默认最多保留最近 500 条记录，可通过 `NINE1BOT_REVIEW_RUN_STORE_LIMIT` 调整
+  - `GET /webhooks/gitlab/runs` 支持 `limit` 查询参数，默认 UI 拉取最近 50 条
 - webhook 当前链路：
   - 校验 GitLab webhook token
   - 解析 MR / note webhook
@@ -208,7 +210,7 @@
 
 - 增加 run 记录过期或最大数量清理策略，避免长期无限增长。
 - 为手动重试设计状态流转：允许 failed/blocked run 复制上下文后重新执行。
-- 在 Web UI 中展示持久化 run 的 sessionId、turnSnapshotId、publish status 和 warnings。
+- 在 Web UI 中进一步展示 sessionId、turnSnapshotId、warnings 和错误详情。
 
 ### 4. Web UX 增强
 

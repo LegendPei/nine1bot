@@ -2275,8 +2275,11 @@ export async function importAuthFromOpencode(): Promise<AuthImportResult> {
 }
 
 export const gitLabReviewApi = {
-  async runs(): Promise<GitLabReviewRun[]> {
-    const res = await fetchWithTimeout(`${BASE_URL}/webhooks/gitlab/runs`)
+  async runs(opts: { limit?: number } = {}): Promise<GitLabReviewRun[]> {
+    const params = new URLSearchParams()
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+    const suffix = params.toString() ? `?${params}` : ''
+    const res = await fetchWithTimeout(`${BASE_URL}/webhooks/gitlab/runs${suffix}`)
     if (!res.ok) {
       throw new Error(`Failed to list GitLab review runs: ${res.status}`)
     }

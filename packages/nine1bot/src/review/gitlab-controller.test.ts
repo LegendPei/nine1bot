@@ -66,6 +66,7 @@ describe('GitLab review controller', () => {
   })
 
   afterEach(async () => {
+    ReviewRunStore.setMaxRecordsForTesting(undefined)
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
   })
 
@@ -208,6 +209,29 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.findByIdempotencyKey('gitlab:example:123:commit:abc:auto:test')).toMatchObject({
       id: created.id,
     })
+  })
+
+  test('lists newest review runs first and prunes old records', () => {
+    ReviewRunStore.setMaxRecordsForTesting(2)
+    const first = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'first',
+    })
+    const second = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'second',
+    })
+    const third = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'third',
+    })
+
+    expect(ReviewRunStore.get(first.id)).toBeUndefined()
+    expect(ReviewRunStore.list().map((run) => run.id)).toEqual([third.id, second.id])
+    expect(ReviewRunStore.list({ limit: 1 }).map((run) => run.id)).toEqual([third.id])
   })
 
   test('loads live MR changes and writes blocked comments for overflow diffs', async () => {

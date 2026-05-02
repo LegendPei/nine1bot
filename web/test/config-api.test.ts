@@ -65,7 +65,7 @@ afterEach(() => {
 describe('web config APIs', () => {
   it('loads GitLab review runs from the dedicated webhook endpoint', async () => {
     installFetchMock((url) => {
-      if (url === '/webhooks/gitlab/runs') {
+      if (url === '/webhooks/gitlab/runs?limit=25') {
         return jsonResponse({
           runs: [{
             id: 'review_1',
@@ -80,7 +80,7 @@ describe('web config APIs', () => {
       throw new Error(`Unexpected request: ${url}`)
     })
 
-    await expect(gitLabReviewApi.runs()).resolves.toEqual([{
+    await expect(gitLabReviewApi.runs({ limit: 25 })).resolves.toEqual([{
       id: 'review_1',
       platform: 'gitlab',
       status: 'succeeded',
@@ -89,7 +89,7 @@ describe('web config APIs', () => {
       publishedAt: 3,
     }])
     expect(callSummary()).toEqual([
-      ['GET', '/webhooks/gitlab/runs'],
+      ['GET', '/webhooks/gitlab/runs?limit=25'],
     ])
   })
 

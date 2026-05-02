@@ -255,7 +255,7 @@ async function loadGitLabReviewRuns() {
   loadingGitLabRuns.value = true
   gitLabRunsError.value = ''
   try {
-    gitLabReviewRuns.value = await gitLabReviewApi.runs()
+    gitLabReviewRuns.value = await gitLabReviewApi.runs({ limit: 50 })
   } catch (error: any) {
     gitLabRunsError.value = error?.message || 'Failed to load GitLab review runs'
   } finally {

@@ -32,6 +32,7 @@ const runs = new Map<string, ReviewRunRecord>()
 let sequence = 0
 let loaded = false
 let storePathOverride: string | undefined
+let maxRecordsOverride: number | undefined
 
 function defaultStorePath() {
   return process.env.NINE1BOT_REVIEW_RUN_STORE_PATH || join(getDataDir(), 'review-runs.json')
@@ -39,6 +40,12 @@ function defaultStorePath() {
 
 function storePath() {
   return storePathOverride || defaultStorePath()
+}
+
+function maxRecords() {
+  if (maxRecordsOverride !== undefined) return maxRecordsOverride
+  const configured = Number(process.env.NINE1BOT_REVIEW_RUN_STORE_LIMIT)
+  return Number.isFinite(configured) && configured > 0 ? configured : 500
 }
 
 export namespace ReviewRunStore {
@@ -84,9 +91,11 @@ export namespace ReviewRunStore {
     return { ...next }
   }
 
-  export function list(): ReviewRunRecord[] {
+  export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
     load()
-    return [...runs.values()].map((run) => ({ ...run }))
+    const sorted = [...runs.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    const limit = options.limit && Number.isFinite(options.limit) && options.limit > 0 ? Math.floor(options.limit) : undefined
+    return (limit ? sorted.slice(0, limit) : sorted).map((run) => ({ ...run }))
   }
 
   export function clearForTesting() {
@@ -103,6 +112,10 @@ export namespace ReviewRunStore {
     runs.clear()
     sequence = 0
     loaded = false
+  }
+
+  export function setMaxRecordsForTesting(limit: number | undefined) {
+    maxRecordsOverride = limit
   }
 
   export function reloadForTesting() {
@@ -136,12 +149,27 @@ function load() {
 function save() {
   const filepath = storePath()
   mkdirSync(dirname(filepath), { recursive: true })
+  prune()
   const data: ReviewRunStoreFile = {
     version: 1,
     sequence,
     runs: [...runs.values()],
   }
   writeFileSync(filepath, JSON.stringify(data, null, 2), 'utf-8')
+}
+
+function prune() {
+  const limit = maxRecords()
+  if (runs.size <= limit) return
+  const keep = new Set(
+    [...runs.values()]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, limit)
+      .map((run) => run.id),
+  )
+  for (const id of runs.keys()) {
+    if (!keep.has(id)) runs.delete(id)
+  }
 }
 
 function inferSequence(records: ReviewRunRecord[]) {
