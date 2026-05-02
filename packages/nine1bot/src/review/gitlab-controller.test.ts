@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
@@ -52,9 +55,18 @@ const platforms = {
   },
 }
 
+const tempDirs: string[] = []
+
 describe('GitLab review controller', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nine1bot-review-runs-'))
+    tempDirs.push(dir)
+    ReviewRunStore.setPathForTesting(join(dir, 'review-runs.json'))
     ReviewRunStore.clearForTesting()
+  })
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
   })
 
   test('extracts runtime review results from fenced output', () => {
@@ -172,6 +184,30 @@ describe('GitLab review controller', () => {
     })
 
     expect(first.accepted && second.accepted && second.duplicateOf).toBe(first.accepted && first.runId)
+  })
+
+  test('persists review runs between store reloads', async () => {
+    const created = ReviewRunStore.create({
+      platform: 'gitlab',
+      idempotencyKey: 'gitlab:example:123:commit:abc:auto:test',
+      status: 'accepted',
+      trigger: { objectType: 'commit', commitSha: 'abc' },
+    })
+    ReviewRunStore.update(created.id, {
+      status: 'running',
+      sessionId: 'session_123',
+    })
+
+    ReviewRunStore.reloadForTesting()
+
+    expect(ReviewRunStore.get(created.id)).toMatchObject({
+      id: created.id,
+      status: 'running',
+      sessionId: 'session_123',
+    })
+    expect(ReviewRunStore.findByIdempotencyKey('gitlab:example:123:commit:abc:auto:test')).toMatchObject({
+      id: created.id,
+    })
   })
 
   test('loads live MR changes and writes blocked comments for overflow diffs', async () => {

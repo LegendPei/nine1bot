@@ -75,7 +75,10 @@
 - 产品层 controller：
   - `packages/nine1bot/src/review/gitlab-controller.ts`
   - `packages/nine1bot/src/review/run-store.ts`
-- 当前 `ReviewRunStore` 是进程内存实现，作为第一版最小闭环。
+- 当前 `ReviewRunStore` 已从纯内存实现升级为 JSON 文件持久化实现：
+  - 默认路径：Nine1Bot data dir 下的 `review-runs.json`
+  - 支持按 `idempotencyKey` 跨进程重启去重
+  - 持久化 trigger、context、sessionId、turnSnapshotId、warnings、publishedAt 等发布/重试所需上下文
 - webhook 当前链路：
   - 校验 GitLab webhook token
   - 解析 MR / note webhook
@@ -149,7 +152,7 @@
 | Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
 | Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭 | 还没有 GitLab 专属引导 UI |
 | Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload，commit mention 已能拉 diff 并写 summary | commit inline comment 暂未实现 |
-| 幂等性 | MR key 必须包含 `headSha` | 已实现并测试 | store 仍是内存实现 |
+| 幂等性 | MR key 必须包含 `headSha` | 已实现并测试，run store 已持久化 | 后续可增加过期/清理策略 |
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
 | Inline 安全 | 校验 hunk，非法或 400 fallback | 已实现并测试 | 当前阶段无明显差距 |
 | Map-reduce findings | 代码侧聚合后交给 PM | aggregator 已实现 | 尚未接真实多 agent stage outputs |
@@ -181,22 +184,15 @@
 - 设计与 MR inline position 分离的 commit line validator。
 - 仅在代码侧校验通过时启用 commit inline；否则继续 summary fallback。
 
-### 3. ReviewRun 持久化
+### 3. ReviewRun 运维增强
 
-目标：替换当前内存版 `ReviewRunStore`。
+目标：在已持久化的基础上补齐可运营能力。
 
 任务：
 
-- 复用项目已有存储模式。
-- 按 `idempotencyKey` 持久化 run record。
-- 保留发布/重试所需上下文：
-  - trigger
-  - diff refs
-  - manifest
-  - warnings
-  - sessionId
-  - turnSnapshotId
-  - publish status
+- 增加 run 记录过期或最大数量清理策略，避免长期无限增长。
+- 为手动重试设计状态流转：允许 failed/blocked run 复制上下文后重新执行。
+- 在 Web UI 中展示持久化 run 的 sessionId、turnSnapshotId、publish status 和 warnings。
 
 ### 4. Web UX
 
