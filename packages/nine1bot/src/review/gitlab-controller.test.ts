@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { handleGitLabReviewWebhook } from './gitlab-controller'
+import { handleGitLabReviewWebhook, publishGitLabReviewRunResult } from './gitlab-controller'
 import { ReviewRunStore } from './run-store'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -195,6 +195,93 @@ describe('GitLab review controller', () => {
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+    ])
+  })
+
+  test('publishes runtime stage results through GitLab publisher', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-sha' },
+          changes: [{
+            old_path: 'src/app.ts',
+            new_path: 'src/app.ts',
+            diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+          }],
+        })
+      }
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'publish-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(accepted).toMatchObject({ accepted: true, status: 'accepted' })
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    const published = await publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'ok',
+        summary: 'Runtime review complete.',
+        findings: [{
+          title: 'Changed line',
+          body: 'Inline body',
+          severity: 'major',
+          file: 'src/app.ts',
+          newLine: 2,
+        }],
+      },
+    })
+
+    expect(published).toMatchObject({
+      published: true,
+      inlinePosted: 1,
+      fallbackPosted: 0,
+    })
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
   })

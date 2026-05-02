@@ -12,6 +12,7 @@ export type ReviewRunRecord = {
   sessionId?: string
   turnSnapshotId?: string
   warnings?: string[]
+  context?: unknown
 }
 
 export type CreateReviewRunInput = Omit<ReviewRunRecord, 'id' | 'createdAt' | 'updatedAt'>
@@ -37,6 +38,11 @@ export namespace ReviewRunStore {
       if (run.idempotencyKey === idempotencyKey) return { ...run }
     }
     return undefined
+  }
+
+  export function get(id: string): ReviewRunRecord | undefined {
+    const run = runs.get(id)
+    return run ? { ...run } : undefined
   }
 
   export function update(id: string, patch: Partial<Omit<ReviewRunRecord, 'id' | 'createdAt'>>): ReviewRunRecord | undefined {

@@ -5,7 +5,9 @@ import {
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   defaultGitLabReviewSettings,
+  GitLabApiError,
   parseGitLabWebhookEvent,
+  publishGitLabReviewResult,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
@@ -167,5 +169,119 @@ describe('GitLab review foundation', () => {
       'platform.gitlab.review.trigger',
       'platform.gitlab.review.diff',
     ])
+  })
+
+  test('publishes valid inline comments and one summary note', async () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const calls: string[] = []
+    const result = await publishGitLabReviewResult({
+      client: {
+        async createDiscussion() {
+          calls.push('discussion')
+          return {}
+        },
+        async createNote() {
+          calls.push('note')
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Changed line',
+        body: 'Inline body',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    })
+
+    expect(result).toMatchObject({ summaryPosted: true, inlinePosted: 1, fallbackPosted: 0 })
+    expect(calls).toEqual(['discussion', 'note'])
+  })
+
+  test('falls back to summary note when inline line is outside diff hunks', async () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const notes: string[] = []
+    const result = await publishGitLabReviewResult({
+      client: {
+        async createDiscussion() {
+          throw new Error('should not post inline')
+        },
+        async createNote(input) {
+          notes.push(input.body)
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Context line',
+        body: 'Fallback body',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 1,
+      }],
+    })
+
+    expect(result.fallbackPosted).toBe(1)
+    expect(notes[0]).toContain('Inline Fallbacks')
+  })
+
+  test('falls back to summary note when GitLab rejects inline position', async () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const result = await publishGitLabReviewResult({
+      client: {
+        async createDiscussion() {
+          throw new GitLabApiError(400, 'Bad Request')
+        },
+        async createNote() {
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Changed line',
+        body: 'Inline body',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    })
+
+    expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 1 })
+    expect(result.warnings[0]).toContain('GitLab API returned 400')
   })
 })

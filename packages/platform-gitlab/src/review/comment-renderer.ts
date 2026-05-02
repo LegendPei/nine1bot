@@ -2,7 +2,7 @@ import type { AggregatedReviewFinding, GitLabDiffManifest } from './types'
 
 export function renderBlockedDiffComment(reason: string) {
   return [
-    '⚠️ GitLab review blocked',
+    'GitLab review blocked',
     '',
     reason,
     '',

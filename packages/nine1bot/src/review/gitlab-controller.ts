@@ -2,6 +2,8 @@ import {
   GitLabApiClient,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
+  parseReviewStageResult,
+  publishGitLabReviewResult,
   renderBlockedDiffComment,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
@@ -40,6 +42,22 @@ export type GitLabReviewWebhookResult =
       error: string
       httpStatus: number
       runId?: string
+    }
+
+export type PublishGitLabReviewRunResult =
+  | {
+      published: true
+      runId: string
+      summaryPosted: boolean
+      inlinePosted: number
+      fallbackPosted: number
+      warnings: string[]
+    }
+  | {
+      published: false
+      runId?: string
+      error: string
+      warnings?: string[]
     }
 
 export function buildGitLabReviewRuntimePrompt(input: {
@@ -128,6 +146,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       ReviewRunStore.update(run.id, {
         status: 'blocked',
         warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
+        context,
       })
       return {
         accepted: true,
@@ -139,7 +158,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
       }
     }
-    ReviewRunStore.update(run.id, { status: settings.dryRun ? 'succeeded' : 'running' })
+    ReviewRunStore.update(run.id, { status: settings.dryRun ? 'succeeded' : 'running', context })
     return {
       accepted: true,
       status: settings.dryRun ? 'dry-run' : 'accepted',
@@ -166,6 +185,67 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     warnings: settings.dryRun
       ? ['Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.']
       : ['Runtime review execution is not wired yet.'],
+  }
+}
+
+export async function publishGitLabReviewRunResult(input: {
+  runId: string
+  stageResult: unknown
+  platforms: PlatformManagerConfig
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+}): Promise<PublishGitLabReviewRunResult> {
+  const run = ReviewRunStore.get(input.runId)
+  if (!run) return { published: false, runId: input.runId, error: 'review_run_not_found' }
+  const context = run.context as ReturnType<typeof buildGitLabReviewContext> | undefined
+  const trigger = run.trigger as GitLabReviewTrigger | undefined
+  if (!context || !trigger) return { published: false, runId: input.runId, error: 'review_run_context_missing' }
+
+  const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
+  if (settings.dryRun) {
+    const warning = 'GitLab review result publishing skipped because dry-run is enabled.'
+    ReviewRunStore.update(input.runId, { status: 'succeeded', warnings: [warning] })
+    return { published: false, runId: input.runId, error: 'dry_run_enabled', warnings: [warning] }
+  }
+
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
+  if (!token) {
+    ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_token_missing' })
+    return { published: false, runId: input.runId, error: 'gitlab_token_missing' }
+  }
+
+  const parsed = parseReviewStageResult(input.stageResult)
+  const objectId = trigger.objectType === 'mr' ? trigger.objectIid : trigger.commitSha
+  if (!objectId) {
+    ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_review_object_missing' })
+    return { published: false, runId: input.runId, error: 'gitlab_review_object_missing' }
+  }
+
+  const client = new GitLabApiClient({
+    baseUrl: settings.baseUrl ?? `https://${trigger.host}`,
+    token,
+    fetch: input.fetch,
+  })
+  const published = await publishGitLabReviewResult({
+    client,
+    projectId: trigger.projectId,
+    objectType: trigger.objectType,
+    objectId,
+    manifest: context.diff,
+    summary: parsed.summary,
+    findings: parsed.findings,
+    inlineComments: settings.inlineComments,
+    warnings: parsed.nextActions,
+  })
+  ReviewRunStore.update(input.runId, {
+    status: parsed.status === 'failed' ? 'failed' : 'succeeded',
+    warnings: published.warnings,
+  })
+
+  return {
+    published: true,
+    runId: input.runId,
+    ...published,
   }
 }
 

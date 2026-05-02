@@ -17,6 +17,17 @@ export type GitLabCreateDiscussionInput = GitLabCreateNoteInput & {
   position?: Record<string, unknown>
 }
 
+export class GitLabApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly statusText: string,
+    readonly responseBody?: string,
+  ) {
+    super(`GitLab API request failed: ${status} ${statusText}`)
+    this.name = 'GitLabApiError'
+  }
+}
+
 export class GitLabApiClient {
   private readonly baseUrl: string
   private readonly token: string
@@ -59,7 +70,7 @@ export class GitLabApiClient {
       },
     })
     if (!response.ok) {
-      throw new Error(`GitLab API request failed: ${response.status} ${response.statusText}`)
+      throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
     }
     return await response.json() as T
   }
