@@ -8,6 +8,9 @@ import z from "zod"
 import { lazy } from "../../util/lazy"
 import { errors } from "../error"
 import { runAutomatedControllerSession, type AutomatedControllerResponse } from "./automated-controller"
+import { handleGitLabReviewWebhook } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
+import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
+import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 
 const WEBHOOK_CLIENT_CAPABILITIES = {
   interactions: false,
@@ -335,12 +338,37 @@ async function triggerWebhook(c: any) {
   })
 }
 
+async function triggerGitLabReviewWebhook(c: any) {
+  const contentType = c.req.header("content-type") || ""
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return c.json({ accepted: false, error: "json_body_required" }, 400)
+  }
+
+  let payload: unknown
+  try {
+    payload = await c.req.json()
+  } catch {
+    return c.json({ accepted: false, error: "invalid_json_body" }, 400)
+  }
+
+  const result = await handleGitLabReviewWebhook({
+    payload,
+    headers: Webhook.normalizeHeaders(c.req.raw.headers),
+    platforms: await readPlatformManagerConfig(),
+    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+  })
+
+  return c.json(result, result.accepted ? 202 : result.httpStatus as never)
+}
+
 export const WebhookPublicRoutes = lazy(() =>
-  new Hono().post(
-    "/:sourceID/:secret",
-    validator("param", z.object({ sourceID: z.string(), secret: z.string() })),
-    triggerWebhook,
-  ),
+  new Hono()
+    .post("/gitlab", triggerGitLabReviewWebhook)
+    .post(
+      "/:sourceID/:secret",
+      validator("param", z.object({ sourceID: z.string(), secret: z.string() })),
+      triggerWebhook,
+    ),
 )
 
 export const WebhookRoutes = lazy(() =>
