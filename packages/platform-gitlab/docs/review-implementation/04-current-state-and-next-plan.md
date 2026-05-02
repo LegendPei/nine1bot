@@ -31,11 +31,14 @@
   - base URL
 - 已迁移 review 资产：
   - PM 主代理：`agents/review/pm-coordinator.agent.md`
+  - runtime 可调用子代理：`agents/review/*.agent.md`
   - 子代理 prompt skills：`skills/review/subagent-prompts/*/SKILL.md`
   - workflow/policy skills：`skills/review/*/SKILL.md`
 - PM 与子代理 prompt 已适配为 GitLab review 专用模式：
   - 默认只读审查，不把任务扩展成通用实现。
   - PM 只负责编排、裁决和最终 ReviewStageResult 输出。
+  - PM 现在允许通过 runtime `task` 工具派生 `platform.gitlab.*` 子代理。
+  - 子代理已从“仅 skill prompt”升级为 runtime 可发现的 concrete subagent agent。
   - 子代理按架构、前端、QA、安全、上下文取证等角色输出统一 JSON findings。
   - developer / auto-fixer 默认 blocked，只有显式 `fixMode=true` 才允许写操作。
 - 已提供本地 dry-run 基建：
@@ -75,6 +78,7 @@
   - `GET /webhooks/gitlab/runs`
   - `GET /webhooks/gitlab/runs/:runId`
   - `POST /webhooks/gitlab/runs/:runId/publish`
+  - `POST /webhooks/gitlab/runs/:runId/retry`
 - 产品层 controller：
   - `packages/nine1bot/src/review/gitlab-controller.ts`
   - `packages/nine1bot/src/review/run-store.ts`
@@ -118,6 +122,8 @@
 - `ReviewRunStore` 增加 `publishedAt`，防止同一 run 被 streaming 输出或手动 API 重复发布。
 - session idle 时如果已经发布过结果，不再把 run 状态覆盖成普通 `succeeded`。
 - session 成功结束但没有捕获到合法 `GITLAB_REVIEW_RESULT` 时，run 会标记为 `failed`，错误为 `gitlab_review_result_missing`，避免未发布结果被误判为成功。
+- failed run 可以通过 `POST /webhooks/gitlab/runs/:runId/retry` 使用已持久化的 trigger/context 重新启动 Runtime session。
+- retry 会拒绝已经发布、正在运行、缺少 context 或缺少 idempotency key 的 run，避免重复发布和空上下文重跑。
 
 ### 结果发布
 
@@ -152,6 +158,8 @@
   - 启用顺序
   - webhook secret 与 GitLab API token 权限提示
 - Web API client 新增 `gitLabReviewApi.runs()`，读取 `/webhooks/gitlab/runs`。
+- Web API client 新增 `gitLabReviewApi.retry(runId)`。
+- GitLab Review Runs 列表对未发布的 failed run 展示 Retry 操作，便于调 prompt 和 runtime 输出格式。
 
 ## 已验证命令
 
@@ -161,6 +169,7 @@
 - `bun run typecheck` in `packages/platform-gitlab`
 - `bun test packages/nine1bot/src/review/gitlab-controller.test.ts`
 - `bun test packages/nine1bot/src/platform/manager.test.ts`
+- `bun test web/test/config-api.test.ts web/test/use-settings-platforms.test.ts`
 - `bun run review:dry-run fixtures/review/sample-mr-overflow.json`
 - `bun run review:dry-run:webhook` in `packages/platform-gitlab`
 - `bun run review:dry-run:runtime-output` in `packages/platform-gitlab`
@@ -175,30 +184,45 @@
 | 领域 | 原设计 | 当前状态 | 差距 |
 | --- | --- | --- | --- |
 | GitLab 包边界 | GitLab 专属代码放在 `platform-gitlab` | parsing、diff、API、publishing、skills、agents 已放入 | Phase 0/1 无明显差距 |
-| Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
-| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭；GitLab 平台详情页已展示 review runs、webhook 路径和基础配置指引 | 还需要更完整的 token scope 校验与可复制公网 webhook URL |
+| Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | PM 已允许 `task` 派生 `platform.gitlab.*`，架构/前端/QA/安全/规格/开发角色已注册为 concrete subagent agent，skills 仍作为角色知识库 | 还需要真实 Runtime 会话中验证 PM 多 task 并行输出的完整收口 |
+| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭；GitLab 平台详情页已展示 review runs、webhook 路径、基础配置指引和 failed run retry | 还需要更完整的 token scope 校验、可复制公网 webhook URL 和更多状态详情 |
 | Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload，commit mention 已能拉 diff 并写 summary | commit inline comment 暂未实现 |
 | 幂等性 | MR key 必须包含 `headSha` | 已实现并测试，run store 已持久化 | 后续可增加过期/清理策略 |
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
 | Inline 安全 | 校验 hunk，非法或 400 fallback | 已实现并测试 | 当前阶段无明显差距 |
 | Map-reduce findings | 代码侧聚合后交给 PM | aggregator 已实现 | 尚未接真实多 agent stage outputs |
 | Runtime 边界 | Runtime 只处理通用 schema/result | review 类型由 platform/controller 拥有，自动控制器只暴露通用 runtime output | 当前阶段无明显差距 |
-| Runtime 结果捕获 | PM 最终结构化结果自动发布 | 已从 `message.part.updated` 捕获 fenced JSON 并发布 | 还需要真实端到端 fixture 覆盖 streaming 与异常输出 |
-| Failure policy | subagent spec 包含 `failureMode` | 类型和初始 task specs 已有 | Runtime 内 PM 创建子代理的实际 tool contract 仍需确认/实现 |
+| Runtime 结果捕获 | PM 最终结构化结果自动发布 | 已从 `message.part.updated` 捕获 fenced JSON 并发布；缺结果会失败；failed run 可 retry | 还需要真实端到端 fixture 覆盖 streaming 与异常输出 |
+| Failure policy | subagent spec 包含 `failureMode` | 类型和初始 task specs 已有，PM prompt 已要求按策略处理子代理失败 | Runtime `task` 工具本身尚不接收 `failureMode/timeoutMs` 参数，需要由 PM prompt 和工作流编译层承接 |
 | Dry-run harness | 初期必须有 | 已支持 changes fixture、webhook fixture、PM 输出文本注入，本地可跑通 mock publish | 后续可补非法 JSON、GitLab 400 fallback 等更多失败 fixture |
+
+## 当前完成度判断
+
+按最初设计稿衡量，当前大约完成到 **85%**：
+
+- Phase 0/1 的核心底座已经具备：GitLab 配置、Webhook 触发、幂等、diff guard、runtime 启动、结构化结果捕获、MR/commit summary 发布、inline fallback、持久化 run store、dry-run harness、Web 状态页和 failed run retry。
+- 低耦合边界基本站住了：GitLab 业务类型仍收口在 `packages/platform-gitlab` 和 `packages/nine1bot/src/review`，Runtime 自动控制器只处理通用 session/context/output。
+- 多 agents 形态已经从文档/prompt 进入 runtime 资产层：PM 和 concrete subagent agents 都在 GitLab 包下注册，skills 作为角色知识库保留。
+
+剩余 15% 主要不是再补很多文件，而是真实运行闭环和边界加固：
+
+- 真实 Runtime 会话里验证 PM 使用 `task` 并行拉起 GitLab 子代理，以及子代理输出被 PM 稳定聚合。
+- 用真实 GitLab 测试项目验证 webhook、token 权限、MR 更新 headSha 幂等、inline discussion fallback、commit summary comment。
+- 补齐更细的运维体验：retry count、错误详情展开、公网 webhook URL、token scope 检查。
+- 评估并实现 GitLab commit 行级评论；当前 commit review 保守使用 summary comment。
 
 ## 下一步计划
 
-### 1. Runtime 结果捕获加固
+### 1. 真实 Runtime 多子代理验证
 
-目标：让结果捕获在真实 streaming、异常输出和重试场景下更稳。
+目标：验证 PM 能在真实 Runtime 会话里按风险派生多个 GitLab 子代理，并稳定合并输出。
 
 任务：
 
-- 为 `onRuntimeOutput` 增加更贴近真实 session event 的单元或集成测试。
-- 补充 PM 输出不合法 JSON 时的 fixture 覆盖。
-- 扩展 dry-run harness，使其能注入一段 PM 输出文本并验证自动发布链路。
-- 验证 PM 通过 runtime subagent/task 能力创建自定义子代理时，promptRef、skills、timeout、failureMode 能被正确传入。
+- 用真实 session fixture 验证 `platform.gitlab.pm-coordinator` 能发现并调用 `platform.gitlab.tech-architect`、`platform.gitlab.risk-qa`、`platform.gitlab.security-agent` 等子代理。
+- 固定子代理输出提取规则，避免 PM 把子代理自然语言日志误当作 finding。
+- 在工作流编译层继续保留代码侧 findings groupBy，PM 只做严重级别裁决和文字收口。
+- 明确 `failureMode` 在当前 runtime `task` 工具不支持原生参数时的承接方式：PM prompt、run warning、最终 `nextActions`。
 
 ### 2. Commit Inline Comment 增强
 
@@ -216,9 +240,9 @@
 
 任务：
 
-- 增加 run 记录过期或最大数量清理策略，避免长期无限增长。
-- 为手动重试设计状态流转：允许 failed/blocked run 复制上下文后重新执行。
-- 在 Web UI 中进一步展示 sessionId、turnSnapshotId、warnings 和错误详情。
+- 为手动 retry 增加更细的状态记录，如 retry count、lastRetryAt、retryOf。
+- 支持从 UI 展开 sessionId、turnSnapshotId、warnings 和错误详情。
+- 评估 blocked run 是否允许在调高 diff 预算或拆 MR 后复制上下文重跑；当前只允许 failed run retry。
 
 ### 4. Web UX 增强
 
@@ -244,11 +268,13 @@
 
 当前分支：`feat/gitlab-review-workflow`
 
-相关提交：
+最近相关提交：
 
-- `f6e439e feat(gitlab): add review workflow foundation`
-- `ce7d02d feat(gitlab): add review webhook entry`
-- `8043ed9 feat(gitlab): run review workflow from webhook`
-- `7e4aa9d feat(gitlab): publish review results`
-- `afda183 feat(gitlab): expose review run publish api`
-- `37da37c docs(gitlab): record review implementation state`
+- `3012e59 feat(gitlab): retry review runs from UI`
+- `1f4062a feat(gitlab): add review subagent agents`
+- `53c4df3 feat(gitlab): add review setup guidance`
+- `b87cad1 feat(gitlab): fail runs missing review output`
+- `f8cab3f feat(gitlab): bound review run history`
+- `727b5f3 feat(gitlab): show review runs in platform UI`
+- `811e2e3 feat(gitlab): expand review dry run harness`
+- `eb6dba8 feat(gitlab): persist review runs`
