@@ -532,10 +532,10 @@ async function retryGitLabReviewRun(c: any) {
     error: undefined,
     retryCount: (run.retryCount ?? 0) + 1,
     lastRetryAt: Date.now(),
-    warnings: [
+    warnings: uniqueStrings([
       ...((run.warnings as string[] | undefined) ?? []),
       "Review run manually retried from stored GitLab context.",
-    ],
+    ]),
     publishedAt: undefined,
   })
 
@@ -547,6 +547,10 @@ async function retryGitLabReviewRun(c: any) {
   })
 
   return c.json({ accepted: true, runId }, 202)
+}
+
+function uniqueStrings(items: string[]) {
+  return [...new Set(items)]
 }
 
 export const WebhookPublicRoutes = lazy(() =>

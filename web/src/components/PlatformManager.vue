@@ -440,6 +440,28 @@ function runAction(action: PlatformActionDescriptor) {
                   <span class="gitlab-run-meta">{{ run.id }} · {{ formatRunTime(run.updatedAt) }}</span>
                   <span class="gitlab-run-meta">{{ reviewRunDetail(run) }}</span>
                 </div>
+                <details
+                  v-if="run.error || run.warnings?.length || run.idempotencyKey"
+                  class="gitlab-run-details"
+                >
+                  <summary>Details</summary>
+                  <div class="gitlab-run-detail-body">
+                    <div v-if="run.error" class="gitlab-run-detail-line">
+                      <span>Error</span>
+                      <code>{{ run.error }}</code>
+                    </div>
+                    <div v-if="run.idempotencyKey" class="gitlab-run-detail-line">
+                      <span>Idempotency</span>
+                      <code>{{ run.idempotencyKey }}</code>
+                    </div>
+                    <div v-if="run.warnings?.length" class="gitlab-run-detail-line">
+                      <span>Warnings</span>
+                      <ul>
+                        <li v-for="warning in run.warnings" :key="warning">{{ warning }}</li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
                 <div class="gitlab-run-side">
                   <button
                     v-if="canRetryGitLabRun(run)"
@@ -816,6 +838,11 @@ function runAction(action: PlatformActionDescriptor) {
   background: var(--bg-primary);
 }
 
+.gitlab-run-row:has(.gitlab-run-details[open]) {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
 .gitlab-run-main,
 .gitlab-run-side {
   display: flex;
@@ -841,6 +868,41 @@ function runAction(action: PlatformActionDescriptor) {
 .gitlab-run-published {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.gitlab-run-details {
+  flex-basis: 100%;
+  order: 3;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.gitlab-run-details summary {
+  cursor: pointer;
+}
+
+.gitlab-run-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.gitlab-run-detail-line {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: var(--space-sm);
+}
+
+.gitlab-run-detail-line code,
+.gitlab-run-detail-line ul {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-run-detail-line ul {
+  padding-left: 16px;
 }
 
 .platform-form-section {
