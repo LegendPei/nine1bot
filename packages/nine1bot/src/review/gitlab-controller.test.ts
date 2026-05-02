@@ -289,6 +289,50 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('marks review run failed when live GitLab changes fetch is forbidden', async () => {
+    const fetchMock = (async () => new Response('Forbidden', {
+      status: 403,
+      statusText: 'Forbidden',
+    })) as typeof fetch
+
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'forbidden-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      httpStatus: 502,
+      error: 'gitlab_api_load_changes_failed:403:Forbidden',
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_api_load_changes_failed:403:Forbidden',
+    })
+  })
+
   test('publishes runtime stage results through GitLab publisher', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -470,6 +514,85 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
       status: 'blocked',
       publishedAt: expect.any(Number),
+    })
+  })
+
+  test('marks review run failed when GitLab rejects summary publishing', async () => {
+    const fetchMock = (async (url: string | URL | Request) => {
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          changes: [{
+            old_path: 'src/app.ts',
+            new_path: 'src/app.ts',
+            diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+          }],
+        })
+      }
+      return new Response('Forbidden', {
+        status: 403,
+        statusText: 'Forbidden',
+      })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'publish-forbidden-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+            'review.inlineComments': false,
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+            'review.inlineComments': false,
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'ok',
+        summary: 'Runtime review complete.',
+        findings: [],
+      },
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'gitlab_api_publish_result_failed:403:Forbidden',
+    })
+
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_api_publish_result_failed:403:Forbidden',
     })
   })
 

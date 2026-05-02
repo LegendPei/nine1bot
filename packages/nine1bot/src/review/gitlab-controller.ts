@@ -1,5 +1,6 @@
 import {
   GitLabApiClient,
+  GitLabApiError,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
@@ -136,12 +137,28 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   })
 
   const fixtureChanges = extractDryRunChanges(input.payload)
-  const changes = fixtureChanges ?? await loadLiveChanges({
-    trigger: parsed.trigger,
-    settings,
-    secrets: input.secrets,
-    fetch: input.fetch,
-  })
+  let changes: GitLabRawChangesResponse | undefined
+  try {
+    changes = fixtureChanges ?? await loadLiveChanges({
+      trigger: parsed.trigger,
+      settings,
+      secrets: input.secrets,
+      fetch: input.fetch,
+    })
+  } catch (error) {
+    const message = gitLabApiFailureMessage('load_changes', error)
+    ReviewRunStore.update(run.id, {
+      status: 'failed',
+      error: message,
+    })
+    return {
+      accepted: false,
+      status: 'rejected',
+      httpStatus: 502,
+      error: message,
+      runId: run.id,
+    }
+  }
 
   if (changes) {
     const context = buildGitLabReviewContext({
@@ -244,17 +261,31 @@ export async function publishGitLabReviewRunResult(input: {
     token,
     fetch: input.fetch,
   })
-  const published = await publishGitLabReviewResult({
-    client,
-    projectId: trigger.projectId,
-    objectType: trigger.objectType,
-    objectId,
-    manifest: context.diff,
-    summary: parsed.summary,
-    findings: parsed.findings,
-    inlineComments: settings.inlineComments,
-    warnings: parsed.nextActions,
-  })
+  let published: Awaited<ReturnType<typeof publishGitLabReviewResult>>
+  try {
+    published = await publishGitLabReviewResult({
+      client,
+      projectId: trigger.projectId,
+      objectType: trigger.objectType,
+      objectId,
+      manifest: context.diff,
+      summary: parsed.summary,
+      findings: parsed.findings,
+      inlineComments: settings.inlineComments,
+      warnings: parsed.nextActions,
+    })
+  } catch (error) {
+    const message = gitLabApiFailureMessage('publish_result', error)
+    ReviewRunStore.update(input.runId, {
+      status: 'failed',
+      error: message,
+    })
+    return {
+      published: false,
+      runId: input.runId,
+      error: message,
+    }
+  }
   ReviewRunStore.update(input.runId, {
     status: reviewRunStatusForStageResult(parsed.status),
     publishedAt: Date.now(),
@@ -272,6 +303,13 @@ function reviewRunStatusForStageResult(status: ReturnType<typeof parseReviewStag
   if (status === 'failed') return 'failed'
   if (status === 'blocked') return 'blocked'
   return 'succeeded'
+}
+
+function gitLabApiFailureMessage(operation: string, error: unknown) {
+  if (error instanceof GitLabApiError) {
+    return `gitlab_api_${operation}_failed:${error.status}:${error.statusText || 'unknown'}`
+  }
+  return `gitlab_api_${operation}_failed:${error instanceof Error ? error.message : String(error)}`
 }
 
 async function loadLiveChanges(input: {

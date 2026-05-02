@@ -210,6 +210,9 @@ if (!change.diff?.trim()) {
 - 修 `blocked` runtime result 的 run status 映射。
 - 修非黑名单空 diff blocked 策略。
 - 增加非法 JSON / 缺字段 JSON dry-run fixture：`review:dry-run:invalid-runtime-output`。该命令预期以非零退出，证明坏 Runtime 输出不会被静默发布。
+- 增加 GitLab API 失败收口：
+  - live changes 拉取返回 403 等错误时，review run 标记 `failed`，返回明确 `gitlab_api_load_changes_failed:*`。
+  - summary / inline 发布返回 403 等错误时，review run 标记 `failed`，返回明确 `gitlab_api_publish_result_failed:*`。
 
 ### 需要真实 GitLab / Runtime 验证
 
