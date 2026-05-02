@@ -35,6 +35,7 @@ export type AutomatedControllerInput = {
   entry: RuntimeControllerProtocol.Entry
   clientCapabilities: RuntimeControllerProtocol.ClientCapabilities
   parts: RuntimeControllerProtocol.MessageSendRequest["parts"]
+  context?: RuntimeControllerProtocol.MessageSendRequest["context"]
   interactionPolicy: AutomatedInteractionPolicy
   timeoutMs: number
   timeoutMessage?: string
@@ -65,6 +66,7 @@ export async function runAutomatedControllerSession(input: AutomatedControllerIn
       })
       const messageResponse = await sendControllerMessage(sessionResponse.sessionId, {
         parts: input.parts,
+        context: input.context,
         entry: input.entry,
         clientCapabilities: input.clientCapabilities,
       })

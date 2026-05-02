@@ -9,6 +9,8 @@ import { lazy } from "../../util/lazy"
 import { errors } from "../error"
 import { runAutomatedControllerSession, type AutomatedControllerResponse } from "./automated-controller"
 import { handleGitLabReviewWebhook } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
+import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
+import { ReviewRunStore } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 
@@ -28,6 +30,27 @@ const WEBHOOK_ENTRY_BASE = {
   mode: "event-trigger",
   templateIds: ["default-user-template", "webhook-entry"],
 } satisfies RuntimeControllerProtocol.Entry
+
+const GITLAB_REVIEW_CLIENT_CAPABILITIES = {
+  interactions: false,
+  permissionRequests: false,
+  questionRequests: false,
+  artifacts: false,
+  filePreview: false,
+  resourceFailures: true,
+  continueInWeb: true,
+  contextAudit: true,
+} satisfies RuntimeControllerProtocol.ClientCapabilities
+
+const GITLAB_REVIEW_SKILLS = [
+  "platform.gitlab.gitlab-mr-review-workflow",
+  "platform.gitlab.spec-gate-review",
+  "platform.gitlab.pm-risk-routing",
+  "platform.gitlab.review-finding-schema",
+  "platform.gitlab.verification-matrix",
+  "platform.gitlab.security-review-policy",
+  "platform.gitlab.gitlab-comment-rendering",
+]
 
 const RUN_MONITOR_TIMEOUT_MS = 30 * 60 * 1000
 const PROMPT_PREVIEW_LIMIT = 4000
@@ -358,7 +381,79 @@ async function triggerGitLabReviewWebhook(c: any) {
     secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
   })
 
+  if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
+    startGitLabReviewRuntimeRun(result).catch((error) => {
+      ReviewRunStore.update(result.runId, {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
+
   return c.json(result, result.accepted ? 202 : result.httpStatus as never)
+}
+
+type AcceptedGitLabReviewWithContext = Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }> & {
+  context: NonNullable<Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }>["context"]>
+}
+
+function isAcceptedGitLabReviewWithContext(
+  result: Awaited<ReturnType<typeof handleGitLabReviewWebhook>>,
+): result is AcceptedGitLabReviewWithContext {
+  return result.accepted && Boolean(result.context)
+}
+
+async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithContext) {
+  const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
+  const entry = {
+    source: "webhook",
+    platform: "gitlab",
+    mode: "gitlab-code-review",
+    templateIds: ["browser-gitlab", result.trigger.objectType === "mr" ? "gitlab-mr" : "gitlab-commit"],
+    traceId: result.runId,
+  } satisfies RuntimeControllerProtocol.Entry
+
+  await runAutomatedControllerSession({
+    directory,
+    title: `GitLab review: ${result.trigger.projectPath ?? result.trigger.projectId}`,
+    sessionChoice: {
+      agent: "platform.gitlab.pm-coordinator",
+      resources: {
+        skills: {
+          skills: GITLAB_REVIEW_SKILLS,
+        },
+      },
+    },
+    entry,
+    clientCapabilities: GITLAB_REVIEW_CLIENT_CAPABILITIES,
+    parts: [{ type: "text", text: buildGitLabReviewRuntimePrompt(result) }],
+    context: {
+      blocks: result.context.contextBlocks,
+    },
+    timeoutMs: RUN_MONITOR_TIMEOUT_MS,
+    timeoutMessage: "GitLab review run monitor timed out.",
+    interactionPolicy: {
+      permission: "deny",
+      question: "deny",
+      permissionAllowMessage: "GitLab review run allowed session permission request.",
+      permissionDenyMessage: "GitLab review runs are non-interactive, so permission requests are denied.",
+      questionDenyMessage: "Question request denied automatically in GitLab review run.",
+    },
+    async onControllerResponse(response) {
+      ReviewRunStore.update(result.runId, {
+        status: response.accepted ? "running" : "failed",
+        sessionId: response.sessionID,
+        turnSnapshotId: response.turnSnapshotId,
+        ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
+      })
+    },
+    async onFinished(finished) {
+      ReviewRunStore.update(result.runId, {
+        status: finished.status === "succeeded" ? "succeeded" : "failed",
+        ...(finished.error ? { error: finished.error } : {}),
+      })
+    },
+  })
 }
 
 export const WebhookPublicRoutes = lazy(() =>

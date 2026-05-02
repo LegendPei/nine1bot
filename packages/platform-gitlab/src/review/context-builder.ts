@@ -8,7 +8,12 @@ export type GitLabReviewContext = {
   diff: ReturnType<typeof buildGitLabDiffManifest>
   contextBlocks: Array<{
     id: string
+    layer: 'platform'
     source: string
+    enabled: boolean
+    priority: number
+    lifecycle: 'turn'
+    visibility: 'system-required'
     content: string
   }>
 }
@@ -30,12 +35,22 @@ export function buildGitLabReviewContext(input: {
     contextBlocks: [
       {
         id: 'gitlab-review-trigger',
+        layer: 'platform',
         source: 'platform.gitlab.review.trigger',
+        enabled: true,
+        priority: 90,
+        lifecycle: 'turn',
+        visibility: 'system-required',
         content: renderTrigger(input.trigger),
       },
       {
         id: 'gitlab-review-diff-manifest',
+        layer: 'platform',
         source: 'platform.gitlab.review.diff',
+        enabled: true,
+        priority: 88,
+        lifecycle: 'turn',
+        visibility: 'system-required',
         content: renderDiffManifest(diff),
       },
     ],

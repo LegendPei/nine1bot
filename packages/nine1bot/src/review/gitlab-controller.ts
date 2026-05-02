@@ -1,6 +1,8 @@
 import {
+  GitLabApiClient,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
+  renderBlockedDiffComment,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   validateGitLabWebhookToken,
@@ -9,6 +11,7 @@ import {
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
 } from '@nine1bot/platform-gitlab/review'
+import { ReviewRunStore } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -17,23 +20,46 @@ export type GitLabReviewWebhookInput = {
   headers: Record<string, string | undefined>
   platforms: PlatformManagerConfig
   secrets: PlatformSecretAccess
+  fetch?: typeof fetch
 }
 
 export type GitLabReviewWebhookResult =
   | {
       accepted: true
-      status: 'accepted' | 'dry-run'
+      status: 'accepted' | 'dry-run' | 'blocked'
       idempotencyKey: string
+      runId: string
       trigger: GitLabReviewTrigger
       context?: ReturnType<typeof buildGitLabReviewContext>
       warnings: string[]
+      duplicateOf?: string
     }
   | {
       accepted: false
       status: 'rejected'
       error: string
       httpStatus: number
+      runId?: string
     }
+
+export function buildGitLabReviewRuntimePrompt(input: {
+  idempotencyKey: string
+  trigger: GitLabReviewTrigger
+  context: ReturnType<typeof buildGitLabReviewContext>
+}) {
+  return [
+    'Run GitLab code review workflow.',
+    '',
+    `Idempotency key: ${input.idempotencyKey}`,
+    `Trigger: ${input.trigger.mode}`,
+    `Object: ${input.trigger.objectType}`,
+    input.trigger.objectIid ? `MR IID: ${input.trigger.objectIid}` : undefined,
+    input.trigger.commitSha ? `Commit SHA: ${input.trigger.commitSha}` : undefined,
+    input.trigger.headSha ? `Head SHA: ${input.trigger.headSha}` : undefined,
+    '',
+    'Use the declared GitLab review skills. Produce structured review findings only from the supplied diff context. If an inline position is uncertain, prefer a top-level finding without a guessed line.',
+  ].filter(Boolean).join('\n')
+}
 
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
@@ -56,32 +82,126 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   }
 
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
-  const fixtureChanges = extractDryRunChanges(input.payload)
-  if (settings.dryRun && fixtureChanges) {
+  const duplicate = ReviewRunStore.findByIdempotencyKey(idempotencyKey)
+  if (duplicate && duplicate.status !== 'failed') {
     return {
       accepted: true,
-      status: 'dry-run',
+      status: 'accepted',
       idempotencyKey,
+      runId: duplicate.id,
       trigger: parsed.trigger,
-      context: buildGitLabReviewContext({
+      warnings: ['Duplicate GitLab review trigger ignored by idempotency key.'],
+      duplicateOf: duplicate.id,
+    }
+  }
+
+  const run = ReviewRunStore.create({
+    platform: 'gitlab',
+    idempotencyKey,
+    status: 'accepted',
+    trigger: parsed.trigger as unknown as Record<string, unknown>,
+  })
+
+  const fixtureChanges = extractDryRunChanges(input.payload)
+  const changes = fixtureChanges ?? await loadLiveChanges({
+    trigger: parsed.trigger,
+    settings,
+    secrets: input.secrets,
+    fetch: input.fetch,
+  })
+
+  if (changes) {
+    const context = buildGitLabReviewContext({
+      trigger: parsed.trigger,
+      changes,
+      maxDiffBytes: settings.maxDiffBytes,
+      maxFiles: settings.maxFiles,
+    })
+    if (context.diff.blocked) {
+      await maybeWriteBlockedComment({
         trigger: parsed.trigger,
-        changes: fixtureChanges,
-        maxDiffBytes: settings.maxDiffBytes,
-        maxFiles: settings.maxFiles,
-      }),
+        settings,
+        secrets: input.secrets,
+        fetch: input.fetch,
+        reason: context.diff.blockReason ?? 'MR diff is too large or was truncated by GitLab.',
+      })
+      ReviewRunStore.update(run.id, {
+        status: 'blocked',
+        warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
+      })
+      return {
+        accepted: true,
+        status: 'blocked',
+        idempotencyKey,
+        runId: run.id,
+        trigger: parsed.trigger,
+        context,
+        warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
+      }
+    }
+    ReviewRunStore.update(run.id, { status: settings.dryRun ? 'succeeded' : 'running' })
+    return {
+      accepted: true,
+      status: settings.dryRun ? 'dry-run' : 'accepted',
+      idempotencyKey,
+      runId: run.id,
+      trigger: parsed.trigger,
+      context,
       warnings: [],
     }
   }
 
+  ReviewRunStore.update(run.id, {
+    status: settings.dryRun ? 'succeeded' : 'running',
+    warnings: settings.dryRun
+      ? ['Dry-run payload did not include changes; live GitLab changes fetch is not wired for this trigger.']
+      : ['Runtime review execution is not wired yet.'],
+  })
   return {
     accepted: true,
     status: 'accepted',
     idempotencyKey,
+    runId: run.id,
     trigger: parsed.trigger,
     warnings: settings.dryRun
       ? ['Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.']
       : ['Runtime review execution is not wired yet.'],
   }
+}
+
+async function loadLiveChanges(input: {
+  trigger: GitLabReviewTrigger
+  settings: GitLabReviewSettings
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+}): Promise<GitLabRawChangesResponse | undefined> {
+  if (input.trigger.objectType !== 'mr') return undefined
+  if (input.settings.dryRun) return undefined
+  const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
+  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
+  if (!token || !input.trigger.objectIid) return undefined
+  const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
+  return await client.getMergeRequestChanges(input.trigger.projectId, input.trigger.objectIid)
+}
+
+async function maybeWriteBlockedComment(input: {
+  trigger: GitLabReviewTrigger
+  settings: GitLabReviewSettings
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+  reason: string
+}) {
+  if (input.settings.dryRun || input.trigger.objectType !== 'mr' || !input.trigger.objectIid) return
+  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
+  if (!token) return
+  const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
+  const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
+  await client.createNote({
+    projectId: input.trigger.projectId,
+    resource: 'merge_requests',
+    resourceId: input.trigger.objectIid,
+    body: renderBlockedDiffComment(input.reason),
+  })
 }
 
 export async function resolveGitLabReviewSecret(
@@ -94,11 +214,17 @@ export async function resolveGitLabReviewSecret(
 }
 
 function reject(httpStatus: number, error: string): GitLabReviewWebhookResult {
+  const run = ReviewRunStore.create({
+    platform: 'gitlab',
+    status: 'rejected',
+    error,
+  })
   return {
     accepted: false,
     status: 'rejected',
     error,
     httpStatus,
+    runId: run.id,
   }
 }
 
