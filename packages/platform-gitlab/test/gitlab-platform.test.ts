@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { readdir, readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   buildGitLabPageContextPayload,
   createGitLabPlatformAdapter,
@@ -6,6 +8,8 @@ import {
   gitLabTemplateIdsForPage,
   parseGitLabUrl,
 } from '../src'
+
+const reviewAgentsDir = join(import.meta.dir, '..', 'agents', 'review')
 
 describe('GitLab platform adapter package', () => {
   test('parses GitLab repository, file, tree, merge request, and issue URLs', () => {
@@ -116,6 +120,35 @@ describe('GitLab platform adapter package', () => {
         lifecycle: 'platform-enabled',
       }],
     })
+  })
+
+  test('declares concrete GitLab review subagents for runtime task delegation', async () => {
+    const files = await readdir(reviewAgentsDir)
+    expect(files).toEqual(expect.arrayContaining([
+      'pm-coordinator.agent.md',
+      'tech-architect.agent.md',
+      'frontend-designer.agent.md',
+      'risk-qa.agent.md',
+      'security-agent.agent.md',
+      'spec-writer.agent.md',
+      'developer.agent.md',
+    ]))
+
+    const pm = await readFile(join(reviewAgentsDir, 'pm-coordinator.agent.md'), 'utf8')
+    expect(pm).toEqual(expect.stringContaining('task:'))
+    expect(pm).toEqual(expect.stringContaining('platform.gitlab.tech-architect'))
+    expect(pm).toEqual(expect.stringContaining('platform.gitlab.frontend-designer'))
+    expect(pm).toEqual(expect.stringContaining('platform.gitlab.risk-qa'))
+    expect(pm).toEqual(expect.stringContaining('platform.gitlab.security-agent'))
+
+    for (const filename of files.filter((file) => file !== 'pm-coordinator.agent.md' && file.endsWith('.agent.md'))) {
+      const content = await readFile(join(reviewAgentsDir, filename), 'utf8')
+      expect(content).toEqual(expect.stringContaining('mode: subagent'))
+      expect(content).toEqual(expect.stringContaining('edit: deny'))
+      expect(content).toEqual(expect.stringContaining('bash: deny'))
+      expect(content).toEqual(expect.stringContaining('"stage"'))
+      expect(content).toEqual(expect.stringContaining('"findings"'))
+    }
   })
 
   test('builds stable runtime page context blocks', () => {

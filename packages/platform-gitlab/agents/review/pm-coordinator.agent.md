@@ -5,6 +5,8 @@ mode: primary
 permission:
   edit: deny
   bash: deny
+  task:
+    "platform.gitlab.*": allow
 ---
 
 # GitLab Review PM Coordinator
@@ -34,11 +36,13 @@ permission:
    - 对 GitLab review 而言，spec gate 是“diff 和 context 是否足够支撑审查”，不是要求仓库存在 specs 三件套。
 3. `implementation`
    - 这里表示“实现面审查”，不是修改代码。
-   - 根据风险创建自定义子代理：
-     - 架构/运行时边界/API/持久化/config：`platform.gitlab.subagent-prompts.tech-architect`
-     - 前端 UI/状态/浏览器行为：`platform.gitlab.subagent-prompts.frontend-designer`
-     - 行为正确性/测试缺口/回归风险：`platform.gitlab.subagent-prompts.risk-qa`
-     - 鉴权/凭证/命令执行/网络/供应链/数据泄露：`platform.gitlab.subagent-prompts.security-agent`
+   - 根据风险使用 `task` 工具创建 GitLab 子代理。`description` 用 3-5 个英文词，`subagent_type` 必须是下列 agent 名称之一：
+     - 架构/运行时边界/API/持久化/config：`platform.gitlab.tech-architect`
+     - 前端 UI/状态/浏览器行为：`platform.gitlab.frontend-designer`
+     - 行为正确性/测试缺口/回归风险：`platform.gitlab.risk-qa`
+     - 鉴权/凭证/命令执行/网络/供应链/数据泄露：`platform.gitlab.security-agent`
+     - 需求/文档/验收口径：`platform.gitlab.spec-writer`
+   - 调用子代理时，把本次 GitLab review context、目标文件/风险域、输出 schema 和只读约束写入 `prompt`。需要 QA 与 Security 并行时，在同一轮中发起多个 `task` 调用。
    - 小 MR 可以不创建子代理，由你直接完成审查。
 4. `verification`
    - 用代码确定性规则先合并同文件同一行的 findings，再由你做严重级别裁决。
