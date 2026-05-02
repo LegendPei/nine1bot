@@ -5,6 +5,8 @@ import {
   buildGitLabDiffManifest,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
+  buildInitialGitLabReviewSubagentTasks,
+  compileSubagentStageResults,
   defaultGitLabReviewSettings,
   parseGitLabWebhookEvent,
   parseReviewStageResult,
@@ -15,6 +17,7 @@ import {
   type GitLabRawChangesResponse,
   type GitLabReviewTrigger,
   type ReviewFinding,
+  type SubagentTaskOutput,
 } from '../src/review'
 
 type DryRunMode = 'changes' | 'webhook'
@@ -24,6 +27,7 @@ const mode = parseMode(args)
 const fixturePath = resolve(process.cwd(), parseFixturePath(args, mode))
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
 const runtimeOutputPath = parseFlagValue(args, '--runtime-output')
+const subagentOutputPath = parseFlagValue(args, '--subagent-outputs')
 
 if (mode === 'webhook') {
   await runWebhookDryRun(fixture)
@@ -115,7 +119,9 @@ async function runWebhookDryRun(payload: unknown) {
     return
   }
 
-  const injectedStageResult = runtimeOutputPath
+  const injectedStageResult = subagentOutputPath
+    ? stageResultFromSubagentOutputs(readJsonFile(resolve(process.cwd(), subagentOutputPath)))
+    : runtimeOutputPath
     ? extractRuntimeStageResult(readFileSync(resolve(process.cwd(), runtimeOutputPath), 'utf8'))
     : undefined
   const stageResult = injectedStageResult ?? {
@@ -146,6 +152,34 @@ async function runWebhookDryRun(payload: unknown) {
     stageResult,
     published,
   })
+}
+
+function stageResultFromSubagentOutputs(input: unknown) {
+  if (!Array.isArray(input)) {
+    throw new Error('Subagent output fixture must be an array.')
+  }
+  const compiled = compileSubagentStageResults({
+    specs: buildInitialGitLabReviewSubagentTasks(),
+    outputs: input.map(parseSubagentTaskOutput),
+  })
+  return {
+    stage: 'closed',
+    status: compiled.status,
+    summary: `Compiled ${compiled.stageResults.length} subagent result(s), ${compiled.failedTasks.length} failure(s).`,
+    findings: compiled.findings,
+    nextActions: compiled.warnings,
+  }
+}
+
+function parseSubagentTaskOutput(input: unknown): SubagentTaskOutput {
+  if (!isRecord(input)) throw new Error('Subagent output item must be an object.')
+  return {
+    taskId: stringValue(input.taskId, 'taskId'),
+    role: optionalString(input.role),
+    text: optionalString(input.text),
+    error: optionalString(input.error),
+    timedOut: input.timedOut === true,
+  }
 }
 
 function extractRuntimeStageResult(text: string) {
@@ -243,8 +277,21 @@ function parseFlagValue(args: string[], flag: string) {
   return index >= 0 ? args[index + 1] : undefined
 }
 
+function readJsonFile(filepath: string) {
+  return JSON.parse(readFileSync(filepath, 'utf8'))
+}
+
 function isRecord(input: unknown): input is Record<string, unknown> {
   return Boolean(input && typeof input === 'object' && !Array.isArray(input))
+}
+
+function stringValue(input: unknown, field: string) {
+  if (typeof input !== 'string' || !input.trim()) throw new Error(`${field} must be a non-empty string.`)
+  return input
+}
+
+function optionalString(input: unknown) {
+  return typeof input === 'string' ? input : undefined
 }
 
 function print(input: unknown) {
