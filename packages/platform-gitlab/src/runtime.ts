@@ -6,6 +6,7 @@ import {
   parseGitLabUrl,
 } from './shared'
 import { fileURLToPath } from 'node:url'
+import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
 import { normalizeGitLabReviewSettings } from './review/settings'
 import type {
   PlatformActionResult,
@@ -14,6 +15,8 @@ import type {
   PlatformDescriptor,
   PlatformRuntimeAdapter,
   PlatformRuntimeStatus,
+  PlatformSecretAccess,
+  PlatformSecretRef,
   PlatformValidationResult,
 } from '@nine1bot/platform-protocol'
 import type { PageContextPayload, PlatformContextBlock, PlatformResourceContribution } from './types'
@@ -274,11 +277,65 @@ async function handleGitLabPlatformAction(
   if (status.status === 'auth-required' || status.status === 'error') {
     return { status: 'failed', message: status.message, updatedStatus: status }
   }
-  return {
-    status: 'ok',
-    message: 'GitLab platform settings are structurally valid. API reachability will be checked when live GitLab client wiring is enabled.',
-    updatedStatus: status,
+  return await testGitLabConnection(ctx, status)
+}
+
+async function testGitLabConnection(
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, ctx.secrets)
+  if (!token) {
+    return { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status }
   }
+
+  try {
+    const client = new GitLabApiClient({
+      baseUrl: settings.baseUrl || 'https://gitlab.com',
+      token,
+    })
+    const self = await client.getTokenSelf()
+    const scopes = Array.isArray(self.scopes) ? self.scopes : []
+    const active = self.active !== false && self.revoked !== true
+    if (!active) {
+      return { status: 'failed', message: 'GitLab API token is revoked or inactive.', updatedStatus: status }
+    }
+    if (!scopes.includes('api')) {
+      return {
+        status: 'failed',
+        message: `GitLab API token is reachable but missing required api scope. Current scopes: ${scopes.join(', ') || 'unknown'}.`,
+        updatedStatus: status,
+      }
+    }
+    return {
+      status: 'ok',
+      message: `GitLab API token is reachable${self.name ? ` (${self.name})` : ''} and includes api scope.`,
+      updatedStatus: status,
+    }
+  } catch (error) {
+    if (error instanceof GitLabApiError) {
+      return {
+        status: 'failed',
+        message: `GitLab API token check failed: ${error.status} ${error.statusText}.`,
+        updatedStatus: status,
+      }
+    }
+    return {
+      status: 'failed',
+      message: `GitLab API token check failed: ${error instanceof Error ? error.message : String(error)}.`,
+      updatedStatus: status,
+    }
+  }
+}
+
+async function resolveGitLabReviewSecret(
+  ref: GitLabReviewSecretRef | undefined,
+  secrets: PlatformSecretAccess,
+): Promise<string | undefined> {
+  if (!ref) return undefined
+  if (typeof ref === 'string') return ref
+  return await secrets.get(ref satisfies PlatformSecretRef)
 }
 
 function buildGitLabContextBlocks(page: PageContextPayload, observedAt: number): PlatformContextBlock[] | undefined {

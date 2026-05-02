@@ -17,6 +17,16 @@ export type GitLabCreateDiscussionInput = GitLabCreateNoteInput & {
   position?: Record<string, unknown>
 }
 
+export type GitLabTokenSelf = {
+  id?: number
+  name?: string
+  user_id?: number
+  scopes?: string[]
+  active?: boolean
+  revoked?: boolean
+  expires_at?: string | null
+}
+
 export class GitLabApiError extends Error {
   constructor(
     readonly status: number,
@@ -50,6 +60,10 @@ export class GitLabApiClient {
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/commits/${encodeURIComponent(String(commitSha))}/diff`,
     )
     return { changes: changes ?? [] }
+  }
+
+  async getTokenSelf(): Promise<GitLabTokenSelf> {
+    return await this.request<GitLabTokenSelf>('/api/v4/personal_access_tokens/self')
   }
 
   async createNote(input: GitLabCreateNoteInput): Promise<unknown> {

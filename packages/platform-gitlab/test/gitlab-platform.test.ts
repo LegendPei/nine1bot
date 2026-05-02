@@ -122,6 +122,83 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('checks GitLab API token reachability and required scope', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push(url)
+      return new Response(JSON.stringify({
+        name: 'Nine1bot Review Token',
+        active: true,
+        revoked: false,
+        scopes: ['read_user', 'api'],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('connection.test', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+        },
+        features: {},
+        env: {},
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'ok',
+        message: expect.stringContaining('api scope'),
+      })
+      expect(calls).toEqual(['https://gitlab.example.com/api/v4/personal_access_tokens/self'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('fails GitLab connection test when token lacks api scope', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      active: true,
+      revoked: false,
+      scopes: ['read_user'],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('connection.test', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+        },
+        features: {},
+        env: {},
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('missing required api scope'),
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('declares concrete GitLab review subagents for runtime task delegation', async () => {
     const files = await readdir(reviewAgentsDir)
     expect(files).toEqual(expect.arrayContaining([
@@ -176,3 +253,12 @@ describe('GitLab platform adapter package', () => {
     expect(blocks[1]?.content).toEqual(expect.stringContaining('Object key: gitlab.com:nine1/nine1bot:merge_request:42'))
   })
 })
+
+function secretAccess() {
+  return {
+    async get() { return undefined },
+    async set() {},
+    async delete() {},
+    async has() { return false },
+  }
+}
