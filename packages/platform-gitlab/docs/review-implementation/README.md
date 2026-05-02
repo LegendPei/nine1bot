@@ -21,6 +21,10 @@
    - Nine1Bot Controller、Platform Manager、Runtime source、AgentRunSpec、Runtime event 接入边界。
 3. [03-validation-and-dry-run.md](./03-validation-and-dry-run.md)
    - dry-run harness、fixtures、单元测试、集成测试和回归命令。
+4. [04-current-state-and-next-plan.md](./04-current-state-and-next-plan.md)
+   - 当前已完成实现、设计对比、剩余计划。
+5. [05-progress-freeze-and-design-review.md](./05-progress-freeze-and-design-review.md)
+   - 当前阶段冻结、是否必须真实测试、偏离设计 Review。
 
 ## 第一阶段交付目标
 
@@ -37,4 +41,3 @@ fixture webhook / GitLab note
 ```
 
 真实 GitLab webhook 和 Runtime 多代理执行接入放在后续阶段，不阻塞本地施工验证。
-
