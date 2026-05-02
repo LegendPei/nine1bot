@@ -33,6 +33,11 @@
   - PM 主代理：`agents/review/pm-coordinator.agent.md`
   - 子代理 prompt skills：`skills/review/subagent-prompts/*/SKILL.md`
   - workflow/policy skills：`skills/review/*/SKILL.md`
+- PM 与子代理 prompt 已适配为 GitLab review 专用模式：
+  - 默认只读审查，不把任务扩展成通用实现。
+  - PM 只负责编排、裁决和最终 ReviewStageResult 输出。
+  - 子代理按架构、前端、QA、安全、上下文取证等角色输出统一 JSON findings。
+  - developer / auto-fixer 默认 blocked，只有显式 `fixMode=true` 才允许写操作。
 - 已提供本地 dry-run 基建：
   - `scripts/review-dry-run.ts`
   - 正常 MR changes fixture
@@ -136,7 +141,7 @@
 | 领域 | 原设计 | 当前状态 | 差距 |
 | --- | --- | --- | --- |
 | GitLab 包边界 | GitLab 专属代码放在 `platform-gitlab` | parsing、diff、API、publishing、skills、agents 已放入 | Phase 0/1 无明显差距 |
-| Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，Runtime 已能启动 PM session | PM prompt 还需要进一步适配真实 subagent task tool contract |
+| Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
 | Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭 | 还没有 GitLab 专属引导 UI |
 | Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload | commit diff live fetch 还没接 |
 | 幂等性 | MR key 必须包含 `headSha` | 已实现并测试 | store 仍是内存实现 |
@@ -150,18 +155,7 @@
 
 ## 下一步计划
 
-### 1. PM 与 skills 适配
-
-目标：让迁移来的 prompts 真正适配当前项目和 runtime source 模型。
-
-任务：
-
-- 重写 `pm-coordinator.agent.md`，聚焦 GitLab review，而不是泛化实现管理。
-- 收紧各 subagent prompt skill，让它们稳定输出统一 JSON schema。
-- 明确每个角色的 allowed tools 和 failure modes。
-- 除非未来配置显式开启 fix mode，否则代码修改类 agent 默认不执行写操作。
-
-### 2. Runtime 结果捕获加固
+### 1. Runtime 结果捕获加固
 
 目标：让结果捕获在真实 streaming、异常输出和重试场景下更稳。
 
@@ -170,8 +164,9 @@
 - 为 `onRuntimeOutput` 增加更贴近真实 session event 的单元或集成测试。
 - 补充 PM 输出不合法 JSON 时的 run warning / failed policy。
 - 扩展 dry-run harness，使其能注入一段 PM 输出文本并验证自动发布链路。
+- 验证 PM 通过 runtime subagent/task 能力创建自定义子代理时，promptRef、skills、timeout、failureMode 能被正确传入。
 
-### 3. GitLab Commit Review
+### 2. GitLab Commit Review
 
 目标：支持 commit 评论触发场景。
 
@@ -182,7 +177,7 @@
 - 通过 `repository/commits/:sha/notes` 发布 commit review note。
 - 增加 commit note webhook fixture 和测试。
 
-### 4. ReviewRun 持久化
+### 3. ReviewRun 持久化
 
 目标：替换当前内存版 `ReviewRunStore`。
 
@@ -199,7 +194,7 @@
   - turnSnapshotId
   - publish status
 
-### 5. Web UX
+### 4. Web UX
 
 目标：让用户能清楚配置 GitLab review。
 
@@ -210,7 +205,7 @@
 - 展示 review run 状态：`GET /webhooks/gitlab/runs`。
 - 展示 dry-run、blocked、duplicate、published 等状态。
 
-### 6. 端到端测试桩
+### 5. 端到端测试桩
 
 目标：不用真实 GitLab 项目也能跑通完整链路。
 

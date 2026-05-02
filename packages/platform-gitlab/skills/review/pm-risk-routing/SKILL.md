@@ -15,3 +15,11 @@ Route by blast radius:
 
 Use `failureMode: abort-run` for PM/spec gates that are required. Use `ignore` or `fallback` for optional QA/Security/Frontend subagents and report timeouts in the final comment.
 
+Default routing should be conservative:
+
+- Small MR with low-risk local changes: PM can review directly without subagents.
+- Runtime/API/config/persistence changes: include technical architecture.
+- User-facing frontend changes: include frontend.
+- Behavior or test-sensitive changes: include QA.
+- Auth, token, webhook, command, network, dependency, storage, or data exposure changes: include security.
+
