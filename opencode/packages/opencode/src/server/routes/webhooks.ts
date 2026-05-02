@@ -8,7 +8,7 @@ import z from "zod"
 import { lazy } from "../../util/lazy"
 import { errors } from "../error"
 import { runAutomatedControllerSession, type AutomatedControllerResponse } from "./automated-controller"
-import { handleGitLabReviewWebhook } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
+import { handleGitLabReviewWebhook, publishGitLabReviewRunResult } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
@@ -51,6 +51,10 @@ const GITLAB_REVIEW_SKILLS = [
   "platform.gitlab.security-review-policy",
   "platform.gitlab.gitlab-comment-rendering",
 ]
+
+const GitLabReviewPublishBody = z.object({
+  stageResult: z.unknown(),
+}).strict()
 
 const RUN_MONITOR_TIMEOUT_MS = 30 * 60 * 1000
 const PROMPT_PREVIEW_LIMIT = 4000
@@ -549,5 +553,33 @@ export const WebhookRoutes = lazy(() =>
         }),
       ),
       async (c) => c.json(await Webhook.listRuns(c.req.valid("query"))),
+    )
+    .get("/gitlab/runs", async (c) => {
+      return c.json({
+        runs: ReviewRunStore.list(),
+      })
+    })
+    .get(
+      "/gitlab/runs/:runId",
+      validator("param", z.object({ runId: z.string() })),
+      async (c) => {
+        const run = ReviewRunStore.get(c.req.valid("param").runId)
+        if (!run) return c.json({ error: "review_run_not_found" }, 404)
+        return c.json(run)
+      },
+    )
+    .post(
+      "/gitlab/runs/:runId/publish",
+      validator("param", z.object({ runId: z.string() })),
+      validator("json", GitLabReviewPublishBody),
+      async (c) => {
+        const result = await publishGitLabReviewRunResult({
+          runId: c.req.valid("param").runId,
+          stageResult: c.req.valid("json").stageResult,
+          platforms: await readPlatformManagerConfig(),
+          secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+        })
+        return c.json(result, result.published ? 200 : 400)
+      },
     ),
 )
