@@ -93,7 +93,7 @@ export namespace ReviewRunStore {
 
   export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
     load()
-    const sorted = [...runs.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    const sorted = [...runs.values()].sort(compareNewestFirst)
     const limit = options.limit && Number.isFinite(options.limit) && options.limit > 0 ? Math.floor(options.limit) : undefined
     return (limit ? sorted.slice(0, limit) : sorted).map((run) => ({ ...run }))
   }
@@ -163,7 +163,7 @@ function prune() {
   if (runs.size <= limit) return
   const keep = new Set(
     [...runs.values()]
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .sort(compareNewestFirst)
       .slice(0, limit)
       .map((run) => run.id),
   )
@@ -174,6 +174,10 @@ function prune() {
 
 function inferSequence(records: ReviewRunRecord[]) {
   return records.length
+}
+
+function compareNewestFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
+  return b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || b.id.localeCompare(a.id)
 }
 
 function isReviewRunRecord(input: unknown): input is ReviewRunRecord {

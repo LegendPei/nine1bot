@@ -116,6 +116,7 @@
 - GitLab webhook runtime run 会在文本输出中捕获合法结果，并自动调用 `publishGitLabReviewRunResult`。
 - `ReviewRunStore` 增加 `publishedAt`，防止同一 run 被 streaming 输出或手动 API 重复发布。
 - session idle 时如果已经发布过结果，不再把 run 状态覆盖成普通 `succeeded`。
+- session 成功结束但没有捕获到合法 `GITLAB_REVIEW_RESULT` 时，run 会标记为 `failed`，错误为 `gitlab_review_result_missing`，避免未发布结果被误判为成功。
 
 ### 结果发布
 
@@ -188,7 +189,7 @@
 任务：
 
 - 为 `onRuntimeOutput` 增加更贴近真实 session event 的单元或集成测试。
-- 补充 PM 输出不合法 JSON 时的 run warning / failed policy。
+- 补充 PM 输出不合法 JSON 时的 fixture 覆盖。
 - 扩展 dry-run harness，使其能注入一段 PM 输出文本并验证自动发布链路。
 - 验证 PM 通过 runtime subagent/task 能力创建自定义子代理时，promptRef、skills、timeout、failureMode 能被正确传入。
 

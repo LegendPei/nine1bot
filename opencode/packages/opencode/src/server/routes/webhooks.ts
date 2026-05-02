@@ -478,8 +478,19 @@ async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithConte
     async onFinished(finished) {
       const current = ReviewRunStore.get(result.runId)
       if (current?.publishedAt) return
+      if (finished.status === "succeeded") {
+        ReviewRunStore.update(result.runId, {
+          status: "failed",
+          error: "gitlab_review_result_missing",
+          warnings: [
+            ...((current?.warnings as string[] | undefined) ?? []),
+            "Runtime session finished without a valid GITLAB_REVIEW_RESULT payload.",
+          ],
+        })
+        return
+      }
       ReviewRunStore.update(result.runId, {
-        status: finished.status === "succeeded" ? "succeeded" : "failed",
+        status: "failed",
         ...(finished.error ? { error: finished.error } : {}),
       })
     },
