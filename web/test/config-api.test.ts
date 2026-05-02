@@ -3,6 +3,7 @@ import {
   authApi,
   configApi,
   customProviderApi,
+  gitLabReviewApi,
   importAuthFromOpencode,
   mcpApi,
   nine1botConfigApi,
@@ -62,6 +63,36 @@ afterEach(() => {
 })
 
 describe('web config APIs', () => {
+  it('loads GitLab review runs from the dedicated webhook endpoint', async () => {
+    installFetchMock((url) => {
+      if (url === '/webhooks/gitlab/runs') {
+        return jsonResponse({
+          runs: [{
+            id: 'review_1',
+            platform: 'gitlab',
+            status: 'succeeded',
+            createdAt: 1,
+            updatedAt: 2,
+            publishedAt: 3,
+          }],
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    await expect(gitLabReviewApi.runs()).resolves.toEqual([{
+      id: 'review_1',
+      platform: 'gitlab',
+      status: 'succeeded',
+      createdAt: 1,
+      updatedAt: 2,
+      publishedAt: 3,
+    }])
+    expect(callSummary()).toEqual([
+      ['GET', '/webhooks/gitlab/runs'],
+    ])
+  })
+
   it('keeps MCP and skill operations on resource config endpoints', async () => {
     installFetchMock((url, init) => {
       const method = init?.method || 'GET'

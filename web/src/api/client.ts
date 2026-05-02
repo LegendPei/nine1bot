@@ -491,6 +491,21 @@ export interface WebhookStatus {
   }
 }
 
+export interface GitLabReviewRun {
+  id: string
+  platform: 'gitlab'
+  idempotencyKey?: string
+  status: 'accepted' | 'rejected' | 'blocked' | 'running' | 'succeeded' | 'failed'
+  createdAt: number
+  updatedAt: number
+  error?: string
+  trigger?: Record<string, unknown>
+  sessionId?: string
+  turnSnapshotId?: string
+  publishedAt?: number
+  warnings?: string[]
+}
+
 export interface WebhookSourceInput {
   name: string
   enabled?: boolean
@@ -2257,6 +2272,17 @@ export async function importAuthFromOpencode(): Promise<AuthImportResult> {
     throw new Error(data.error || `Failed to import auth: ${res.status}`)
   }
   return res.json()
+}
+
+export const gitLabReviewApi = {
+  async runs(): Promise<GitLabReviewRun[]> {
+    const res = await fetchWithTimeout(`${BASE_URL}/webhooks/gitlab/runs`)
+    if (!res.ok) {
+      throw new Error(`Failed to list GitLab review runs: ${res.status}`)
+    }
+    const data = await res.json()
+    return Array.isArray(data.runs) ? data.runs : []
+  },
 }
 
 // === Question API ===

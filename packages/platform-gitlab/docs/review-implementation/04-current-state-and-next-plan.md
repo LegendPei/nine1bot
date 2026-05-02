@@ -131,6 +131,19 @@
   - 暂不使用 MR discussion position 生成 commit inline comment
 - dry-run 下不会触碰 GitLab，会返回拒绝发布结果。
 
+### Web UX
+
+已实现：
+
+- 通用平台配置页已经能展示 GitLab review descriptor 中的开关和密钥字段。
+- GitLab 平台详情页会额外展示最近的 GitLab Review Runs：
+  - run id
+  - MR / Commit 对象
+  - status
+  - updatedAt
+  - published 标记
+- Web API client 新增 `gitLabReviewApi.runs()`，读取 `/webhooks/gitlab/runs`。
+
 ## 已验证命令
 
 已通过：
@@ -153,7 +166,7 @@
 | --- | --- | --- | --- |
 | GitLab 包边界 | GitLab 专属代码放在 `platform-gitlab` | parsing、diff、API、publishing、skills、agents 已放入 | Phase 0/1 无明显差距 |
 | Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
-| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭 | 还没有 GitLab 专属引导 UI |
+| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭；GitLab 平台详情页已展示 review runs | 还需要更完整的 GitLab 专属引导文案和 webhook URL 展示 |
 | Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload，commit mention 已能拉 diff 并写 summary | commit inline comment 暂未实现 |
 | 幂等性 | MR key 必须包含 `headSha` | 已实现并测试，run store 已持久化 | 后续可增加过期/清理策略 |
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
@@ -197,16 +210,16 @@
 - 为手动重试设计状态流转：允许 failed/blocked run 复制上下文后重新执行。
 - 在 Web UI 中展示持久化 run 的 sessionId、turnSnapshotId、publish status 和 warnings。
 
-### 4. Web UX
+### 4. Web UX 增强
 
-目标：让用户能清楚配置 GitLab review。
+目标：在已有配置表单和 Review Runs 状态块基础上补齐引导体验。
 
 任务：
 
 - 如果 generic platform form 不够清晰，增加 GitLab 专属帮助文案或 custom component。
 - 展示 webhook URL：`/webhooks/gitlab`。
-- 展示 review run 状态：`GET /webhooks/gitlab/runs`。
-- 展示 dry-run、blocked、duplicate、published 等状态。
+- 展示 token 权限建议、GitLab webhook 配置步骤和 dry-run 调试入口。
+- 为 blocked、duplicate、published、failed 状态增加更清晰的说明。
 
 ### 5. 端到端测试桩增强
 

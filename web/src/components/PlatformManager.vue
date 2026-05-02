@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { CheckCircle2, CircleAlert, CircleSlash, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
+import { gitLabReviewApi, type GitLabReviewRun } from '../api/client'
 import type {
   PlatformActionDescriptor,
   PlatformConfigField,
@@ -31,17 +32,28 @@ const enabledDraft = ref(true)
 const formValues = reactive<Record<string, string | number | boolean>>({})
 const secretClears = reactive<Record<string, boolean>>({})
 const jsonErrors = reactive<Record<string, string>>({})
+const gitLabReviewRuns = ref<GitLabReviewRun[]>([])
+const loadingGitLabRuns = ref(false)
+const gitLabRunsError = ref('')
 
 const configFields = computed(() => {
   return props.selectedPlatform?.config?.sections.flatMap((section) => section.fields) ?? []
 })
 const operationLocked = computed(() => props.saving || Boolean(props.actionRunning))
 const healthRefreshing = computed(() => props.actionRunning === 'health')
+const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
+const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.slice(0, 8))
 
 watch(
   () => props.selectedPlatform,
   (platform) => {
     resetForm(platform)
+    if (platform?.id === 'gitlab') {
+      loadGitLabReviewRuns()
+    } else {
+      gitLabReviewRuns.value = []
+      gitLabRunsError.value = ''
+    }
   },
   { immediate: true },
 )
@@ -236,6 +248,31 @@ function saveSettings() {
 
 function refreshStatus() {
   if (props.selectedPlatform) emit('refresh', props.selectedPlatform.id)
+  if (isGitLabPlatform.value) loadGitLabReviewRuns()
+}
+
+async function loadGitLabReviewRuns() {
+  loadingGitLabRuns.value = true
+  gitLabRunsError.value = ''
+  try {
+    gitLabReviewRuns.value = await gitLabReviewApi.runs()
+  } catch (error: any) {
+    gitLabRunsError.value = error?.message || 'Failed to load GitLab review runs'
+  } finally {
+    loadingGitLabRuns.value = false
+  }
+}
+
+function formatRunTime(timestamp?: number) {
+  if (!timestamp) return 'n/a'
+  return new Date(timestamp).toLocaleString()
+}
+
+function reviewRunObject(run: GitLabReviewRun) {
+  const trigger = run.trigger || {}
+  if (trigger.objectType === 'mr') return `MR ${String(trigger.objectIid ?? '')}`.trim()
+  if (trigger.objectType === 'commit') return `Commit ${String(trigger.commitSha ?? '').slice(0, 8)}`
+  return run.id
 }
 
 function runAction(action: PlatformActionDescriptor) {
@@ -327,6 +364,36 @@ function runAction(action: PlatformActionDescriptor) {
             </div>
             <p v-if="selectedPlatform.runtimeStatus.message" class="platform-message text-sm">
               {{ selectedPlatform.runtimeStatus.message }}
+            </p>
+          </div>
+
+          <div v-if="isGitLabPlatform" class="platform-section">
+            <div class="platform-section-heading-row">
+              <h5 class="platform-section-title">GitLab Review Runs</h5>
+              <button class="btn btn-ghost btn-sm" :disabled="loadingGitLabRuns" @click="loadGitLabReviewRuns">
+                <RefreshCw :size="13" />
+                <span>{{ loadingGitLabRuns ? 'Loading' : 'Refresh' }}</span>
+              </button>
+            </div>
+            <div v-if="gitLabRunsError" class="platform-alert warning">
+              {{ gitLabRunsError }}
+            </div>
+            <div v-else-if="visibleGitLabRuns.length" class="gitlab-run-list">
+              <div v-for="run in visibleGitLabRuns" :key="run.id" class="gitlab-run-row">
+                <div class="gitlab-run-main">
+                  <span class="gitlab-run-title">{{ reviewRunObject(run) }}</span>
+                  <span class="gitlab-run-meta">{{ run.id }} · {{ formatRunTime(run.updatedAt) }}</span>
+                </div>
+                <div class="gitlab-run-side">
+                  <span class="platform-status-pill" :class="statusClass(run.status === 'succeeded' ? 'available' : run.status === 'failed' ? 'error' : 'degraded')">
+                    {{ run.status }}
+                  </span>
+                  <span v-if="run.publishedAt" class="gitlab-run-published">published</span>
+                </div>
+              </div>
+            </div>
+            <p v-else class="text-muted text-sm">
+              No GitLab review runs yet.
             </p>
           </div>
 
@@ -571,6 +638,13 @@ function runAction(action: PlatformActionDescriptor) {
   margin: 0;
 }
 
+.platform-section-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
 .platform-status-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -616,6 +690,51 @@ function runAction(action: PlatformActionDescriptor) {
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
   color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.gitlab-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.gitlab-run-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.gitlab-run-main,
+.gitlab-run-side {
+  display: flex;
+  min-width: 0;
+}
+
+.gitlab-run-main {
+  flex-direction: column;
+}
+
+.gitlab-run-side {
+  align-items: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+.gitlab-run-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gitlab-run-meta,
+.gitlab-run-published {
+  color: var(--text-muted);
   font-size: 12px;
 }
 
