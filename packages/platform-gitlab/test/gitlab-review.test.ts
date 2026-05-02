@@ -4,8 +4,11 @@ import {
   buildGitLabDiffManifest,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
+  buildInitialGitLabReviewSubagentTasks,
+  compileSubagentStageResults,
   defaultGitLabReviewSettings,
   GitLabApiError,
+  parseSubagentStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
   validateGitLabInlinePosition,
@@ -101,6 +104,106 @@ describe('GitLab review foundation', () => {
         duplicates: [expect.objectContaining({ source: 'security' })],
       },
     ])
+  })
+
+  test('extracts subagent review JSON from task output and aggregates findings deterministically', () => {
+    const specs = buildInitialGitLabReviewSubagentTasks()
+    const compiled = compileSubagentStageResults({
+      specs,
+      outputs: [
+        {
+          taskId: 'qa-verification',
+          text: [
+            'QA notes',
+            '```json',
+            JSON.stringify({
+              stage: 'verification',
+              status: 'ok',
+              summary: 'QA found auth gap',
+              findings: [{
+                title: 'Auth gap',
+                body: 'QA evidence',
+                severity: 'major',
+                category: 'auth',
+                file: 'src/auth.ts',
+                newLine: 20,
+              }],
+              nextActions: ['add regression test'],
+            }),
+            '```',
+          ].join('\n'),
+        },
+        {
+          taskId: 'security-verification',
+          text: JSON.stringify({
+            stage: 'verification',
+            status: 'ok',
+            summary: 'Security found auth gap',
+            findings: [{
+              title: 'Auth gap',
+              body: 'Security evidence',
+              severity: 'critical',
+              category: 'auth',
+              file: 'src/auth.ts',
+              newLine: 20,
+            }],
+          }),
+        },
+      ],
+    })
+
+    expect(compiled.status).toBe('ok')
+    expect(compiled.findings).toMatchObject([{
+      file: 'src/auth.ts',
+      newLine: 20,
+      severity: 'critical',
+      sources: ['risk-qa', 'security-agent'],
+      duplicates: [expect.objectContaining({ source: 'security-agent' })],
+    }])
+    expect(compiled.warnings).toEqual(['qa-verification: add regression test'])
+  })
+
+  test('applies subagent failure modes before PM wording', () => {
+    const specs = buildInitialGitLabReviewSubagentTasks()
+    const compiled = compileSubagentStageResults({
+      specs,
+      outputs: [
+        { taskId: 'discovery-spec', timedOut: true },
+        { taskId: 'qa-verification', error: 'model overloaded' },
+        { taskId: 'technical-architecture', text: 'not json' },
+      ],
+    })
+
+    expect(compiled.status).toBe('failed')
+    expect(compiled.failedTasks).toMatchObject([
+      { taskId: 'discovery-spec', failureMode: 'abort-run', reason: 'subagent-timeout' },
+      { taskId: 'qa-verification', failureMode: 'ignore', reason: 'model overloaded' },
+      { taskId: 'technical-architecture', failureMode: 'fallback', reason: 'missing-or-invalid-review-stage-result' },
+    ])
+    expect(compiled.warnings).toEqual([
+      'discovery-spec aborted the review run: subagent-timeout',
+      'qa-verification was ignored after failure: model overloaded',
+      'technical-architecture used fallback after failure: missing-or-invalid-review-stage-result',
+    ])
+  })
+
+  test('parses PM tagged review result from subagent style output', () => {
+    const result = parseSubagentStageResult([
+      '```json',
+      'GITLAB_REVIEW_RESULT:',
+      JSON.stringify({
+        stage: 'closed',
+        status: 'ok',
+        summary: 'done',
+        findings: [],
+      }),
+      '```',
+      '<task_metadata>',
+      'session_id: session_123',
+      '</task_metadata>',
+    ].join('\n'))
+
+    expect(result).toMatchObject({ stage: 'closed', status: 'ok', summary: 'done' })
   })
 
   test('keeps GitLab code review disabled by default', () => {
