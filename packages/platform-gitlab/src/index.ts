@@ -12,4 +12,5 @@ export {
   normalizeGitLabPagePayload,
 } from './runtime'
 export type { GitLabPlatformAdapter } from './runtime'
+export * from './review'
 export type * from './types'

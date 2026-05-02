@@ -5,7 +5,17 @@ import {
   normalizeGitLabPagePayload,
   parseGitLabUrl,
 } from './shared'
-import type { PlatformAdapterContribution, PlatformDescriptor, PlatformRuntimeAdapter } from '@nine1bot/platform-protocol'
+import { fileURLToPath } from 'node:url'
+import { normalizeGitLabReviewSettings } from './review/settings'
+import type {
+  PlatformActionResult,
+  PlatformAdapterContext,
+  PlatformAdapterContribution,
+  PlatformDescriptor,
+  PlatformRuntimeAdapter,
+  PlatformRuntimeStatus,
+  PlatformValidationResult,
+} from '@nine1bot/platform-protocol'
 import type { PageContextPayload, PlatformContextBlock, PlatformResourceContribution } from './types'
 
 export type GitLabPlatformAdapter = PlatformRuntimeAdapter & {
@@ -54,6 +64,69 @@ export const gitlabPlatformDescriptor = {
           },
         ],
       },
+      {
+        id: 'codeReview',
+        title: 'Code review',
+        description: 'Optional GitLab MR and commit code review automation. Disabled until explicitly enabled.',
+        fields: [
+          {
+            key: 'review.baseUrl',
+            type: 'string',
+            label: 'GitLab base URL',
+            description: 'Base URL for the GitLab instance, for example https://gitlab.com.',
+          },
+          {
+            key: 'review.enabled',
+            type: 'boolean',
+            label: 'Enable GitLab code review',
+            description: 'Allow @Nine1bot comments or configured webhooks to start GitLab review runs.',
+          },
+          {
+            key: 'review.botMention',
+            type: 'string',
+            label: 'Bot mention',
+            description: 'Mention text that triggers manual review from GitLab comments.',
+          },
+          {
+            key: 'review.webhookAutoReview',
+            type: 'boolean',
+            label: 'Webhook auto review',
+            description: 'Automatically review configured merge request webhook events.',
+          },
+          {
+            key: 'review.inlineComments',
+            type: 'boolean',
+            label: 'Inline comments',
+            description: 'Attempt GitLab inline discussions for validated changed lines.',
+          },
+          {
+            key: 'review.dryRun',
+            type: 'boolean',
+            label: 'Dry run',
+            description: 'Build review context without writing comments back to GitLab.',
+          },
+          {
+            key: 'review.allowedProjectIds',
+            type: 'string-list',
+            label: 'Allowed project ids',
+            description: 'GitLab project ids allowed to trigger review runs.',
+          },
+          {
+            key: 'review.webhookSecretRef',
+            type: 'password',
+            label: 'Webhook secret',
+            description: 'Secret used to validate X-Gitlab-Token.',
+            secret: true,
+          },
+          {
+            key: 'review.tokenSecretRef',
+            type: 'password',
+            label: 'GitLab API token',
+            description: 'GitLab account token used to read diffs and write review comments.',
+            secret: true,
+          },
+        ],
+      },
     ],
   },
   detailPage: {
@@ -77,7 +150,30 @@ export const gitlabPlatformContribution = {
   descriptor: gitlabPlatformDescriptor,
   runtime: {
     createAdapter: createGitLabPlatformAdapter,
+    sources: {
+      agents: [
+        {
+          id: 'gitlab-review-agents',
+          directory: fileURLToPath(new URL('../agents', import.meta.url)),
+          namespace: 'platform.gitlab',
+          visibility: 'recommendable',
+          lifecycle: 'platform-enabled',
+        },
+      ],
+      skills: [
+        {
+          id: 'gitlab-review-skills',
+          directory: fileURLToPath(new URL('../skills', import.meta.url)),
+          namespace: 'platform.gitlab',
+          visibility: 'declared-only',
+          lifecycle: 'platform-enabled',
+        },
+      ],
+    },
   },
+  getStatus: getGitLabPlatformStatus,
+  validateConfig: validateGitLabPlatformConfig,
+  handleAction: handleGitLabPlatformAction,
 } satisfies PlatformAdapterContribution
 
 export function createGitLabPlatformAdapter(): GitLabPlatformAdapter {
@@ -100,10 +196,90 @@ export function createGitLabPlatformAdapter(): GitLabPlatformAdapter {
       }
       return emptyResources(['gitlab-context'])
     },
+    recommendedAgent(input) {
+      return input.templateIds.includes('gitlab-mr') ? 'platform.gitlab.pm-coordinator' : input.fallback
+    },
   }
 }
 
 export { gitLabTemplateIdsForPage, normalizeGitLabPagePayload, parseGitLabUrl }
+
+async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<PlatformRuntimeStatus> {
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const cards: PlatformRuntimeStatus['cards'] = [
+    { id: 'context', label: 'Page context', value: 'enabled', tone: 'success' },
+    { id: 'review', label: 'Code review', value: settings.enabled ? 'enabled' : 'disabled', tone: settings.enabled ? 'success' : 'neutral' },
+    { id: 'mode', label: 'Review mode', value: settings.executionMode, tone: settings.dryRun ? 'warning' : 'neutral' },
+  ]
+
+  if (!settings.enabled) {
+    return {
+      status: 'available',
+      message: 'GitLab page context is available. Code review is disabled until enabled in settings.',
+      cards,
+    }
+  }
+
+  if (!settings.tokenSecretRef) {
+    return {
+      status: 'auth-required',
+      message: 'GitLab code review is enabled but no API token is configured.',
+      cards,
+    }
+  }
+
+  const tokenConfigured = typeof settings.tokenSecretRef === 'string' || await ctx.secrets.has(settings.tokenSecretRef)
+  if (!tokenConfigured) {
+    return {
+      status: 'auth-required',
+      message: 'GitLab code review token is missing or unavailable.',
+      cards,
+    }
+  }
+
+  return {
+    status: settings.dryRun ? 'degraded' : 'available',
+    message: settings.dryRun
+      ? 'GitLab code review is configured in dry-run mode; no comments will be written.'
+      : 'GitLab code review is configured.',
+    cards,
+  }
+}
+
+async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<PlatformValidationResult> {
+  const settings = normalizeGitLabReviewSettings(settingsInput)
+  const fieldErrors: Record<string, string> = {}
+
+  if (settings.enabled) {
+    if (!settings.tokenSecretRef) fieldErrors['review.tokenSecretRef'] = 'GitLab API token is required when code review is enabled.'
+    if (settings.baseUrl && !isHttpUrl(settings.baseUrl)) fieldErrors['review.baseUrl'] = 'GitLab base URL must be an http(s) URL.'
+    if (!settings.botMention.trim().startsWith('@')) fieldErrors['review.botMention'] = 'Bot mention must start with @.'
+  }
+
+  return Object.keys(fieldErrors).length
+    ? { ok: false, message: 'Invalid GitLab code review settings.', fieldErrors }
+    : { ok: true }
+}
+
+async function handleGitLabPlatformAction(
+  actionId: string,
+  _input: unknown,
+  ctx: PlatformAdapterContext,
+): Promise<PlatformActionResult> {
+  if (actionId !== 'connection.test') {
+    return { status: 'failed', message: `Unsupported GitLab action: ${actionId}` }
+  }
+
+  const status = await getGitLabPlatformStatus(ctx)
+  if (status.status === 'auth-required' || status.status === 'error') {
+    return { status: 'failed', message: status.message, updatedStatus: status }
+  }
+  return {
+    status: 'ok',
+    message: 'GitLab platform settings are structurally valid. API reachability will be checked when live GitLab client wiring is enabled.',
+    updatedStatus: status,
+  }
+}
 
 function buildGitLabContextBlocks(page: PageContextPayload, observedAt: number): PlatformContextBlock[] | undefined {
   const adapted = normalizeGitLabPagePayload(page)
@@ -251,6 +427,15 @@ function pageKeyFor(page: PageContextPayload) {
 
 function stringValue(input: unknown): string | undefined {
   return typeof input === 'string' && input.trim() ? input : undefined
+}
+
+function isHttpUrl(input: string) {
+  try {
+    const url = new URL(input)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 function textDigest(input: string) {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildGitLabPageContextPayload,
   createGitLabPlatformAdapter,
+  gitlabPlatformContribution,
   gitLabTemplateIdsForPage,
   parseGitLabUrl,
 } from '../src'
@@ -83,6 +84,7 @@ describe('GitLab platform adapter package', () => {
     const page = {
       platform: 'gitlab',
       url: 'https://gitlab.com/nine1/nine1bot/-/issues/7',
+      pageType: 'gitlab-issue',
       title: 'Issue 7',
     }
     const adapter = createGitLabPlatformAdapter()
@@ -95,6 +97,25 @@ describe('GitLab platform adapter package', () => {
       'template.gitlab-issue',
     ])
     expect(adapter.resourceContributions({ templateIds })?.builtinTools.enabledGroups).toContain('gitlab-context')
+    expect(adapter.recommendedAgent?.({ templateIds, fallback: 'build' })).toBe('build')
+    expect(adapter.recommendedAgent?.({ templateIds: ['gitlab-mr'], fallback: 'build' })).toBe('platform.gitlab.pm-coordinator')
+  })
+
+  test('declares platform-scoped runtime sources for GitLab review assets', () => {
+    expect(gitlabPlatformContribution.runtime?.sources).toMatchObject({
+      agents: [{
+        id: 'gitlab-review-agents',
+        namespace: 'platform.gitlab',
+        visibility: 'recommendable',
+        lifecycle: 'platform-enabled',
+      }],
+      skills: [{
+        id: 'gitlab-review-skills',
+        namespace: 'platform.gitlab',
+        visibility: 'declared-only',
+        lifecycle: 'platform-enabled',
+      }],
+    })
   })
 
   test('builds stable runtime page context blocks', () => {
