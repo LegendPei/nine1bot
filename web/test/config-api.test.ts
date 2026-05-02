@@ -74,6 +74,8 @@ describe('web config APIs', () => {
             createdAt: 1,
             updatedAt: 2,
             publishedAt: 3,
+            retryCount: 1,
+            lastRetryAt: 4,
           }],
         })
       }
@@ -90,6 +92,8 @@ describe('web config APIs', () => {
       createdAt: 1,
       updatedAt: 2,
       publishedAt: 3,
+      retryCount: 1,
+      lastRetryAt: 4,
     }])
     await expect(gitLabReviewApi.retry('review_1')).resolves.toEqual({ accepted: true, runId: 'review_1' })
     expect(callSummary()).toEqual([

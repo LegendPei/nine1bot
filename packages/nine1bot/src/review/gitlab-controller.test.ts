@@ -197,6 +197,8 @@ describe('GitLab review controller', () => {
     ReviewRunStore.update(created.id, {
       status: 'running',
       sessionId: 'session_123',
+      retryCount: 2,
+      lastRetryAt: 1_000,
     })
 
     ReviewRunStore.reloadForTesting()
@@ -205,6 +207,8 @@ describe('GitLab review controller', () => {
       id: created.id,
       status: 'running',
       sessionId: 'session_123',
+      retryCount: 2,
+      lastRetryAt: 1_000,
     })
     expect(ReviewRunStore.findByIdempotencyKey('gitlab:example:123:commit:abc:auto:test')).toMatchObject({
       id: created.id,

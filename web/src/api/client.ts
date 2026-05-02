@@ -503,6 +503,8 @@ export interface GitLabReviewRun {
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number
+  retryCount?: number
+  lastRetryAt?: number
   warnings?: string[]
 }
 

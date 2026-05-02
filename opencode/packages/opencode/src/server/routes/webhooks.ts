@@ -530,6 +530,8 @@ async function retryGitLabReviewRun(c: any) {
   ReviewRunStore.update(runId, {
     status: "accepted",
     error: undefined,
+    retryCount: (run.retryCount ?? 0) + 1,
+    lastRetryAt: Date.now(),
     warnings: [
       ...((run.warnings as string[] | undefined) ?? []),
       "Review run manually retried from stored GitLab context.",

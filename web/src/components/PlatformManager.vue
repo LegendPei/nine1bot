@@ -301,6 +301,8 @@ function reviewRunDetail(run: GitLabReviewRun) {
   const parts = [
     run.sessionId ? `session ${run.sessionId}` : '',
     run.turnSnapshotId ? `turn ${run.turnSnapshotId}` : '',
+    run.retryCount ? `retry ${run.retryCount}` : '',
+    run.lastRetryAt ? `last retry ${formatRunTime(run.lastRetryAt)}` : '',
     run.error ? `error ${run.error}` : '',
     run.warnings?.length ? `${run.warnings.length} warning(s)` : '',
   ].filter(Boolean)
