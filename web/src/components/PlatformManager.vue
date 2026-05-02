@@ -43,6 +43,7 @@ const operationLocked = computed(() => props.saving || Boolean(props.actionRunni
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
 const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.slice(0, 8))
+const gitLabWebhookPath = '/webhooks/gitlab'
 
 watch(
   () => props.selectedPlatform,
@@ -275,6 +276,16 @@ function reviewRunObject(run: GitLabReviewRun) {
   return run.id
 }
 
+function reviewRunDetail(run: GitLabReviewRun) {
+  const parts = [
+    run.sessionId ? `session ${run.sessionId}` : '',
+    run.turnSnapshotId ? `turn ${run.turnSnapshotId}` : '',
+    run.error ? `error ${run.error}` : '',
+    run.warnings?.length ? `${run.warnings.length} warning(s)` : '',
+  ].filter(Boolean)
+  return parts.length ? parts.join(' · ') : run.idempotencyKey || 'No details'
+}
+
 function runAction(action: PlatformActionDescriptor) {
   const platform = props.selectedPlatform
   if (!platform) return
@@ -349,6 +360,27 @@ function runAction(action: PlatformActionDescriptor) {
             </span>
           </div>
 
+          <div v-if="isGitLabPlatform" class="platform-section gitlab-review-guide">
+            <div class="platform-section-heading-row">
+              <h5 class="platform-section-title">GitLab Code Review</h5>
+              <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}</code>
+            </div>
+            <div class="gitlab-guide-grid">
+              <div class="gitlab-guide-item">
+                <span class="gitlab-guide-label">Enable</span>
+                <span class="gitlab-guide-text">Turn on GitLab and code review, then keep dry-run enabled until the first fixture run looks right.</span>
+              </div>
+              <div class="gitlab-guide-item">
+                <span class="gitlab-guide-label">Secrets</span>
+                <span class="gitlab-guide-text">Set the webhook secret and a GitLab API token that can read diffs and write MR or commit comments.</span>
+              </div>
+              <div class="gitlab-guide-item">
+                <span class="gitlab-guide-label">Webhook</span>
+                <span class="gitlab-guide-text">Configure GitLab to send merge request and note events to the webhook path with X-Gitlab-Token.</span>
+              </div>
+            </div>
+          </div>
+
           <div class="platform-section">
             <h5 class="platform-section-title">状态</h5>
             <div class="platform-status-grid">
@@ -383,6 +415,7 @@ function runAction(action: PlatformActionDescriptor) {
                 <div class="gitlab-run-main">
                   <span class="gitlab-run-title">{{ reviewRunObject(run) }}</span>
                   <span class="gitlab-run-meta">{{ run.id }} · {{ formatRunTime(run.updatedAt) }}</span>
+                  <span class="gitlab-run-meta">{{ reviewRunDetail(run) }}</span>
                 </div>
                 <div class="gitlab-run-side">
                   <span class="platform-status-pill" :class="statusClass(run.status === 'succeeded' ? 'available' : run.status === 'failed' ? 'error' : 'degraded')">
@@ -649,6 +682,46 @@ function runAction(action: PlatformActionDescriptor) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-sm);
+}
+
+.gitlab-review-guide {
+  padding: 12px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.gitlab-webhook-path {
+  padding: 2px 6px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.gitlab-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.gitlab-guide-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gitlab-guide-label {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.gitlab-guide-text {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .platform-status-card {

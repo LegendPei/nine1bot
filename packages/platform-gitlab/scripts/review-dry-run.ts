@@ -7,6 +7,7 @@ import {
   buildGitLabReviewIdempotencyKey,
   defaultGitLabReviewSettings,
   parseGitLabWebhookEvent,
+  parseReviewStageResult,
   publishGitLabReviewResult,
   renderBlockedDiffComment,
   renderReviewSummaryComment,
@@ -22,6 +23,7 @@ const args = process.argv.slice(2)
 const mode = parseMode(args)
 const fixturePath = resolve(process.cwd(), parseFixturePath(args, mode))
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
+const runtimeOutputPath = parseFlagValue(args, '--runtime-output')
 
 if (mode === 'webhook') {
   await runWebhookDryRun(fixture)
@@ -113,7 +115,10 @@ async function runWebhookDryRun(payload: unknown) {
     return
   }
 
-  const stageResult = {
+  const injectedStageResult = runtimeOutputPath
+    ? extractRuntimeStageResult(readFileSync(resolve(process.cwd(), runtimeOutputPath), 'utf8'))
+    : undefined
+  const stageResult = injectedStageResult ?? {
     stage: 'closed',
     status: 'ok',
     summary: 'Dry-run webhook review completed without Runtime or GitLab network calls.',
@@ -141,6 +146,38 @@ async function runWebhookDryRun(payload: unknown) {
     stageResult,
     published,
   })
+}
+
+function extractRuntimeStageResult(text: string) {
+  for (const candidate of extractJsonCandidates(text)) {
+    try {
+      return parseReviewStageResult(JSON.parse(candidate))
+    } catch {
+      continue
+    }
+  }
+  throw new Error('No valid GITLAB_REVIEW_RESULT payload found in runtime output.')
+}
+
+function extractJsonCandidates(text: string): string[] {
+  const candidates: string[] = []
+  const fencePattern = /```(?:json)?\s*([\s\S]*?)```/gi
+  for (const match of text.matchAll(fencePattern)) {
+    const content = match[1]?.trim()
+    if (content) candidates.push(stripGitLabReviewResultTag(content))
+  }
+  const tagged = /GITLAB_REVIEW_RESULT\s*:?\s*(\{[\s\S]*\})/i.exec(text)
+  if (tagged?.[1]) candidates.push(tagged[1].trim())
+  const firstBrace = text.indexOf('{')
+  const lastBrace = text.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1).trim())
+  }
+  return [...new Set(candidates)]
+}
+
+function stripGitLabReviewResultTag(content: string) {
+  return content.replace(/^GITLAB_REVIEW_RESULT\s*:?\s*/i, '').trim()
 }
 
 function syntheticFindingsForManifest(manifest: ReturnType<typeof buildGitLabDiffManifest>): ReviewFinding[] {
@@ -199,6 +236,11 @@ function parseFixturePath(args: string[], mode: DryRunMode) {
   const flagIndex = args.indexOf('--webhook')
   if (flagIndex >= 0) return args[flagIndex + 1] ?? 'fixtures/review/sample-webhook-mr-note.json'
   return args[0] ?? (mode === 'webhook' ? 'fixtures/review/sample-webhook-mr-note.json' : 'fixtures/review/sample-mr-changes.json')
+}
+
+function parseFlagValue(args: string[], flag: string) {
+  const index = args.indexOf(flag)
+  return index >= 0 ? args[index + 1] : undefined
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {

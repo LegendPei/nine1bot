@@ -44,6 +44,7 @@
   - overflow MR changes fixture
   - webhook note fixture
   - `review:dry-run:webhook` 可在无真实 GitLab/Runtime 的情况下跑通 webhook parse、context build、stage result 和 mock publish
+  - `review:dry-run:runtime-output` 可注入 PM 最终文本，验证 `GITLAB_REVIEW_RESULT` 提取和 mock publish
 
 ### 设计审查中提出的安全规则
 
@@ -145,6 +146,11 @@
   - status
   - updatedAt
   - published 标记
+  - sessionId、turnSnapshotId、warnings、error 等细节摘要
+- GitLab 平台详情页展示最小配置指引：
+  - webhook 路径 `/webhooks/gitlab`
+  - 启用顺序
+  - webhook secret 与 GitLab API token 权限提示
 - Web API client 新增 `gitLabReviewApi.runs()`，读取 `/webhooks/gitlab/runs`。
 
 ## 已验证命令
@@ -157,6 +163,7 @@
 - `bun test packages/nine1bot/src/platform/manager.test.ts`
 - `bun run review:dry-run fixtures/review/sample-mr-overflow.json`
 - `bun run review:dry-run:webhook` in `packages/platform-gitlab`
+- `bun run review:dry-run:runtime-output` in `packages/platform-gitlab`
 - `bun run typecheck` in `opencode/packages/opencode` 已再次验证，仍只失败在 workspace 包 `@nine1bot/platform-protocol` 的 standalone 解析问题上。
 
 已知验证 caveat：
@@ -169,7 +176,7 @@
 | --- | --- | --- | --- |
 | GitLab 包边界 | GitLab 专属代码放在 `platform-gitlab` | parsing、diff、API、publishing、skills、agents 已放入 | Phase 0/1 无明显差距 |
 | Agents / skills | Runtime 执行 PM，PM 用 skills 创建自定义子代理 | 资产已注册，PM/子代理 prompt 已收紧为 GitLab review 只读模式 | 还需要真实 subagent task tool contract 的端到端验证 |
-| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭；GitLab 平台详情页已展示 review runs | 还需要更完整的 GitLab 专属引导文案和 webhook URL 展示 |
+| Web 配置开关 | 默认关闭，通过平台设置启用 | descriptor 已暴露配置项，默认关闭；GitLab 平台详情页已展示 review runs、webhook 路径和基础配置指引 | 还需要更完整的 token scope 校验与可复制公网 webhook URL |
 | Webhook 触发 | GitLab MR / note webhook 与 `@Nine1bot` | `/webhooks/gitlab` 已解析 MR 和 note payload，commit mention 已能拉 diff 并写 summary | commit inline comment 暂未实现 |
 | 幂等性 | MR key 必须包含 `headSha` | 已实现并测试，run store 已持久化 | 后续可增加过期/清理策略 |
 | Diff 安全 | 过滤噪声，overflow 阻断 | 已实现并测试 | 需要更多真实 GitLab 大 MR payload fixture |
@@ -178,7 +185,7 @@
 | Runtime 边界 | Runtime 只处理通用 schema/result | review 类型由 platform/controller 拥有，自动控制器只暴露通用 runtime output | 当前阶段无明显差距 |
 | Runtime 结果捕获 | PM 最终结构化结果自动发布 | 已从 `message.part.updated` 捕获 fenced JSON 并发布 | 还需要真实端到端 fixture 覆盖 streaming 与异常输出 |
 | Failure policy | subagent spec 包含 `failureMode` | 类型和初始 task specs 已有 | Runtime 内 PM 创建子代理的实际 tool contract 仍需确认/实现 |
-| Dry-run harness | 初期必须有 | 已支持 changes fixture 与 webhook fixture，本地可跑通 mock publish | 后续可接入 PM 输出文本注入与异常 JSON 场景 |
+| Dry-run harness | 初期必须有 | 已支持 changes fixture、webhook fixture、PM 输出文本注入，本地可跑通 mock publish | 后续可补非法 JSON、GitLab 400 fallback 等更多失败 fixture |
 
 ## 下一步计划
 
@@ -230,7 +237,6 @@
 
 任务：
 
-- 注入 PM 输出文本，验证 `GITLAB_REVIEW_RESULT` 提取和发布入口。
 - 增加非法 JSON、缺字段 JSON、blocked diff、inline fallback、GitLab 400 fallback 的 fixture 模式。
 - 如后续 Runtime subagent/task contract 固定，再把 dry-run 扩展到 prompt assembly 边界。
 
