@@ -12,7 +12,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "review:dry-run": "bun run scripts/review-dry-run.ts"
+    "review:dry-run": "bun run scripts/review-dry-run.ts",
+    "review:dry-run:webhook": "bun run scripts/review-dry-run.ts --webhook fixtures/review/sample-webhook-mr-note.json"
   },
   "dependencies": {
     "@nine1bot/platform-protocol": "workspace:*"

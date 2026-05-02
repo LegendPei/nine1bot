@@ -3,62 +3,208 @@ import { resolve } from 'node:path'
 import {
   aggregateReviewFindings,
   buildGitLabDiffManifest,
+  buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
+  defaultGitLabReviewSettings,
+  parseGitLabWebhookEvent,
+  publishGitLabReviewResult,
   renderBlockedDiffComment,
   renderReviewSummaryComment,
   validateGitLabInlinePosition,
   type GitLabRawChangesResponse,
+  type GitLabReviewTrigger,
   type ReviewFinding,
 } from '../src/review'
 
-const fixturePath = resolve(process.cwd(), process.argv[2] ?? 'fixtures/review/sample-mr-changes.json')
-const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as GitLabRawChangesResponse
-const manifest = buildGitLabDiffManifest(fixture)
+type DryRunMode = 'changes' | 'webhook'
 
-const idempotencyKey = buildGitLabReviewIdempotencyKey({
-  host: 'gitlab.example.com',
-  projectId: 1,
-  objectType: 'mr',
-  objectIid: 10,
-  headSha: manifest.diffRefs?.headSha ?? 'dry-run-head',
-  mode: 'webhook',
-  eventName: 'merge_request',
-})
+const args = process.argv.slice(2)
+const mode = parseMode(args)
+const fixturePath = resolve(process.cwd(), parseFixturePath(args, mode))
+const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
 
-if (manifest.blocked) {
-  console.log(JSON.stringify({
-    idempotencyKey,
-    blocked: true,
-    comment: renderBlockedDiffComment(manifest.blockReason ?? 'Diff blocked.'),
-  }, null, 2))
-  process.exit(0)
+if (mode === 'webhook') {
+  await runWebhookDryRun(fixture)
+} else {
+  await runChangesDryRun(fixture as GitLabRawChangesResponse)
 }
 
-const syntheticFindings: ReviewFinding[] = [
-  {
-    title: 'Permission check changed',
-    body: 'Dry-run fixture detected a changed authorization decision line.',
+async function runChangesDryRun(changes: GitLabRawChangesResponse) {
+  const trigger: GitLabReviewTrigger = {
+    host: 'gitlab.example.com',
+    projectId: 1,
+    objectType: 'mr',
+    objectIid: 10,
+    headSha: changes.diff_refs?.head_sha ?? 'dry-run-head',
+    mode: 'webhook',
+    eventName: 'merge_request',
+  }
+  const manifest = buildGitLabDiffManifest(changes)
+  const idempotencyKey = buildGitLabReviewIdempotencyKey(trigger)
+
+  if (manifest.blocked) {
+    print({
+      mode: 'changes',
+      idempotencyKey,
+      blocked: true,
+      comment: renderBlockedDiffComment(manifest.blockReason ?? 'Diff blocked.'),
+    })
+    return
+  }
+
+  const syntheticFindings = syntheticFindingsForManifest(manifest)
+  const inline = validateGitLabInlinePosition(syntheticFindings[0]!, manifest.files, manifest.diffRefs)
+  const findings = aggregateReviewFindings(syntheticFindings)
+  const comment = renderReviewSummaryComment({
+    summary: 'Dry-run completed without calling GitLab or Runtime.',
+    findings,
+    manifest,
+    warnings: inline.ok ? [] : [inline.reason],
+  })
+
+  print({
+    mode: 'changes',
+    idempotencyKey,
+    blocked: false,
+    manifest,
+    inline,
+    comment,
+  })
+}
+
+async function runWebhookDryRun(payload: unknown) {
+  const parsed = parseGitLabWebhookEvent(payload, {
+    ...defaultGitLabReviewSettings,
+    enabled: true,
+    webhookAutoReview: true,
+    manualMentionTrigger: true,
+    botMention: '@Nine1bot',
+  })
+  if (!parsed.ok) {
+    print({ mode: 'webhook', accepted: false, reason: parsed.reason })
+    return
+  }
+
+  const changes = extractChanges(payload)
+  if (!changes) {
+    print({
+      mode: 'webhook',
+      accepted: false,
+      reason: 'fixture-missing-review-changes',
+      trigger: parsed.trigger,
+    })
+    return
+  }
+
+  const context = buildGitLabReviewContext({
+    trigger: parsed.trigger,
+    changes,
+  })
+
+  if (context.diff.blocked) {
+    print({
+      mode: 'webhook',
+      accepted: true,
+      idempotencyKey: context.idempotencyKey,
+      blocked: true,
+      comment: renderBlockedDiffComment(context.diff.blockReason ?? 'Diff blocked.'),
+      contextBlocks: context.contextBlocks,
+    })
+    return
+  }
+
+  const stageResult = {
+    stage: 'closed',
+    status: 'ok',
+    summary: 'Dry-run webhook review completed without Runtime or GitLab network calls.',
+    findings: syntheticFindingsForManifest(context.diff),
+    nextActions: ['Use this fixture to debug PM prompt and publisher behavior locally.'],
+  }
+  const published = await publishGitLabReviewResult({
+    client: mockGitLabClient(),
+    projectId: parsed.trigger.projectId,
+    objectType: parsed.trigger.objectType,
+    objectId: parsed.trigger.objectType === 'mr' ? parsed.trigger.objectIid! : parsed.trigger.commitSha!,
+    manifest: context.diff,
+    summary: stageResult.summary,
+    findings: stageResult.findings,
+    inlineComments: true,
+    warnings: stageResult.nextActions,
+  })
+
+  print({
+    mode: 'webhook',
+    accepted: true,
+    idempotencyKey: context.idempotencyKey,
+    trigger: parsed.trigger,
+    contextBlocks: context.contextBlocks,
+    stageResult,
+    published,
+  })
+}
+
+function syntheticFindingsForManifest(manifest: ReturnType<typeof buildGitLabDiffManifest>): ReviewFinding[] {
+  const firstFile = manifest.files[0]
+  if (!firstFile) return []
+  return [{
+    title: 'Dry-run changed line',
+    body: 'Synthetic finding generated by the local GitLab review dry-run harness.',
     severity: 'major',
-    category: 'auth',
-    file: 'src/auth.ts',
-    newLine: 3,
+    category: 'dry-run',
+    file: firstFile.newPath,
+    newLine: firstChangedNewLine(firstFile.diff),
     source: 'dry-run',
-  },
-]
+  }]
+}
 
-const inline = validateGitLabInlinePosition(syntheticFindings[0]!, manifest.files, manifest.diffRefs)
-const findings = aggregateReviewFindings(syntheticFindings)
-const comment = renderReviewSummaryComment({
-  summary: 'Dry-run completed without calling GitLab or Runtime.',
-  findings,
-  manifest,
-  warnings: inline.ok ? [] : [inline.reason],
-})
+function firstChangedNewLine(diff: string) {
+  const header = /@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(diff)
+  let current = header ? Number(header[1]) : 1
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('@@')) continue
+    if (line.startsWith('+') && !line.startsWith('+++')) return current
+    if (!line.startsWith('-')) current += 1
+  }
+  return undefined
+}
 
-console.log(JSON.stringify({
-  idempotencyKey,
-  blocked: false,
-  manifest,
-  inline,
-  comment,
-}, null, 2))
+function mockGitLabClient() {
+  const calls: Array<Record<string, unknown>> = []
+  return {
+    calls,
+    async createDiscussion(input: Record<string, unknown>) {
+      calls.push({ type: 'discussion', ...input })
+      return { id: calls.length }
+    },
+    async createNote(input: Record<string, unknown>) {
+      calls.push({ type: 'note', ...input })
+      return { id: calls.length }
+    },
+  }
+}
+
+function extractChanges(payload: unknown): GitLabRawChangesResponse | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
+  const record = payload as Record<string, unknown>
+  if (isRecord(record.review_changes)) return record.review_changes as GitLabRawChangesResponse
+  if (isRecord(record.changes)) return record.changes as GitLabRawChangesResponse
+  return undefined
+}
+
+function parseMode(args: string[]): DryRunMode {
+  return args.includes('--webhook') ? 'webhook' : 'changes'
+}
+
+function parseFixturePath(args: string[], mode: DryRunMode) {
+  const flagIndex = args.indexOf('--webhook')
+  if (flagIndex >= 0) return args[flagIndex + 1] ?? 'fixtures/review/sample-webhook-mr-note.json'
+  return args[0] ?? (mode === 'webhook' ? 'fixtures/review/sample-webhook-mr-note.json' : 'fixtures/review/sample-mr-changes.json')
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return Boolean(input && typeof input === 'object' && !Array.isArray(input))
+}
+
+function print(input: unknown) {
+  console.log(JSON.stringify(input, null, 2))
+}

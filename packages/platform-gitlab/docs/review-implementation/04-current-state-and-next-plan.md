@@ -42,6 +42,8 @@
   - `scripts/review-dry-run.ts`
   - 正常 MR changes fixture
   - overflow MR changes fixture
+  - webhook note fixture
+  - `review:dry-run:webhook` 可在无真实 GitLab/Runtime 的情况下跑通 webhook parse、context build、stage result 和 mock publish
 
 ### 设计审查中提出的安全规则
 
@@ -138,6 +140,7 @@
 - `bun test packages/nine1bot/src/review/gitlab-controller.test.ts`
 - `bun test packages/nine1bot/src/platform/manager.test.ts`
 - `bun run review:dry-run fixtures/review/sample-mr-overflow.json`
+- `bun run review:dry-run:webhook` in `packages/platform-gitlab`
 - `bun run typecheck` in `opencode/packages/opencode` 已再次验证，仍只失败在 workspace 包 `@nine1bot/platform-protocol` 的 standalone 解析问题上。
 
 已知验证 caveat：
@@ -159,7 +162,7 @@
 | Runtime 边界 | Runtime 只处理通用 schema/result | review 类型由 platform/controller 拥有，自动控制器只暴露通用 runtime output | 当前阶段无明显差距 |
 | Runtime 结果捕获 | PM 最终结构化结果自动发布 | 已从 `message.part.updated` 捕获 fenced JSON 并发布 | 还需要真实端到端 fixture 覆盖 streaming 与异常输出 |
 | Failure policy | subagent spec 包含 `failureMode` | 类型和初始 task specs 已有 | Runtime 内 PM 创建子代理的实际 tool contract 仍需确认/实现 |
-| Dry-run harness | 初期必须有 | 已实现 | 可继续扩展 webhook payload fixture 模式 |
+| Dry-run harness | 初期必须有 | 已支持 changes fixture 与 webhook fixture，本地可跑通 mock publish | 后续可接入 PM 输出文本注入与异常 JSON 场景 |
 
 ## 下一步计划
 
@@ -205,19 +208,15 @@
 - 展示 review run 状态：`GET /webhooks/gitlab/runs`。
 - 展示 dry-run、blocked、duplicate、published 等状态。
 
-### 5. 端到端测试桩
+### 5. 端到端测试桩增强
 
-目标：不用真实 GitLab 项目也能跑通完整链路。
+目标：在当前本地桩基础上覆盖更多真实失败模式。
 
 任务：
 
-- 扩展 dry-run CLI，支持 webhook payload fixtures。
-- mock GitLab API 的 changes、notes、discussions。
-- 增加一条脚本串起：
-  - webhook parse
-  - live changes fetch mock
-  - Runtime prompt/context compile boundary
-  - publish fallback paths
+- 注入 PM 输出文本，验证 `GITLAB_REVIEW_RESULT` 提取和发布入口。
+- 增加非法 JSON、缺字段 JSON、blocked diff、inline fallback、GitLab 400 fallback 的 fixture 模式。
+- 如后续 Runtime subagent/task contract 固定，再把 dry-run 扩展到 prompt assembly 边界。
 
 ## 当前提交栈
 
