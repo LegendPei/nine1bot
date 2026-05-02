@@ -14,7 +14,7 @@ import {
   publishGitLabReviewRunResult,
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
-import { ReviewRunStore } from "../../../../../../packages/nine1bot/src/review/run-store"
+import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 
@@ -405,13 +405,31 @@ type AcceptedGitLabReviewWithContext = Extract<Awaited<ReturnType<typeof handleG
   context: NonNullable<Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }>["context"]>
 }
 
+type GitLabReviewRuntimeRunInput = {
+  runId: string
+  idempotencyKey: string
+  trigger: AcceptedGitLabReviewWithContext["trigger"]
+  context: AcceptedGitLabReviewWithContext["context"]
+}
+
 function isAcceptedGitLabReviewWithContext(
   result: Awaited<ReturnType<typeof handleGitLabReviewWebhook>>,
 ): result is AcceptedGitLabReviewWithContext {
   return result.accepted && Boolean(result.context)
 }
 
-async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithContext) {
+function gitLabReviewRuntimeInputFromRecord(run: ReviewRunRecord): GitLabReviewRuntimeRunInput | { error: string } {
+  if (!run.idempotencyKey) return { error: "review_run_idempotency_key_missing" }
+  if (!run.trigger || !run.context) return { error: "review_run_context_missing" }
+  return {
+    runId: run.id,
+    idempotencyKey: run.idempotencyKey,
+    trigger: run.trigger as GitLabReviewRuntimeRunInput["trigger"],
+    context: run.context as GitLabReviewRuntimeRunInput["context"],
+  }
+}
+
+async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
   const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
   let publishAttempted = false
   const entry = {
@@ -495,6 +513,38 @@ async function startGitLabReviewRuntimeRun(result: AcceptedGitLabReviewWithConte
       })
     },
   })
+}
+
+async function retryGitLabReviewRun(c: any) {
+  const runId = c.req.valid("param").runId
+  const run = ReviewRunStore.get(runId)
+  if (!run) return c.json({ accepted: false, error: "review_run_not_found" }, 404)
+  if (run.publishedAt) return c.json({ accepted: false, runId, error: "review_run_already_published" }, 409)
+  if (run.status === "running" || run.status === "accepted") {
+    return c.json({ accepted: false, runId, error: "review_run_already_active" }, 409)
+  }
+
+  const input = gitLabReviewRuntimeInputFromRecord(run)
+  if ("error" in input) return c.json({ accepted: false, runId, error: input.error }, 400)
+
+  ReviewRunStore.update(runId, {
+    status: "accepted",
+    error: undefined,
+    warnings: [
+      ...((run.warnings as string[] | undefined) ?? []),
+      "Review run manually retried from stored GitLab context.",
+    ],
+    publishedAt: undefined,
+  })
+
+  startGitLabReviewRuntimeRun(input).catch((error) => {
+    ReviewRunStore.update(runId, {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
+
+  return c.json({ accepted: true, runId }, 202)
 }
 
 export const WebhookPublicRoutes = lazy(() =>
@@ -627,5 +677,10 @@ export const WebhookRoutes = lazy(() =>
         })
         return c.json(result, result.published ? 200 : 400)
       },
+    )
+    .post(
+      "/gitlab/runs/:runId/retry",
+      validator("param", z.object({ runId: z.string() })),
+      retryGitLabReviewRun,
     ),
 )

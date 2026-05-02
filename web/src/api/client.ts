@@ -506,6 +506,12 @@ export interface GitLabReviewRun {
   warnings?: string[]
 }
 
+export interface GitLabReviewRetryResult {
+  accepted: boolean
+  runId?: string
+  error?: string
+}
+
 export interface WebhookSourceInput {
   name: string
   enabled?: boolean
@@ -2285,6 +2291,17 @@ export const gitLabReviewApi = {
     }
     const data = await res.json()
     return Array.isArray(data.runs) ? data.runs : []
+  },
+
+  async retry(runId: string): Promise<GitLabReviewRetryResult> {
+    const res = await fetchWithTimeout(`${BASE_URL}/webhooks/gitlab/runs/${encodeURIComponent(runId)}/retry`, {
+      method: 'POST'
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(data.error || `Failed to retry GitLab review run: ${res.status}`)
+    }
+    return data
   },
 }
 

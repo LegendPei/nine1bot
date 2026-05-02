@@ -35,6 +35,7 @@ const jsonErrors = reactive<Record<string, string>>({})
 const gitLabReviewRuns = ref<GitLabReviewRun[]>([])
 const loadingGitLabRuns = ref(false)
 const gitLabRunsError = ref('')
+const retryingGitLabRunIds = ref<Set<string>>(new Set())
 
 const configFields = computed(() => {
   return props.selectedPlatform?.config?.sections.flatMap((section) => section.fields) ?? []
@@ -264,6 +265,26 @@ async function loadGitLabReviewRuns() {
   }
 }
 
+function canRetryGitLabRun(run: GitLabReviewRun) {
+  return run.status === 'failed' && !run.publishedAt
+}
+
+async function retryGitLabReviewRun(run: GitLabReviewRun) {
+  if (!canRetryGitLabRun(run) || retryingGitLabRunIds.value.has(run.id)) return
+  retryingGitLabRunIds.value = new Set([...retryingGitLabRunIds.value, run.id])
+  gitLabRunsError.value = ''
+  try {
+    await gitLabReviewApi.retry(run.id)
+    await loadGitLabReviewRuns()
+  } catch (error: any) {
+    gitLabRunsError.value = error?.message || 'Failed to retry GitLab review run'
+  } finally {
+    const next = new Set(retryingGitLabRunIds.value)
+    next.delete(run.id)
+    retryingGitLabRunIds.value = next
+  }
+}
+
 function formatRunTime(timestamp?: number) {
   if (!timestamp) return 'n/a'
   return new Date(timestamp).toLocaleString()
@@ -418,6 +439,15 @@ function runAction(action: PlatformActionDescriptor) {
                   <span class="gitlab-run-meta">{{ reviewRunDetail(run) }}</span>
                 </div>
                 <div class="gitlab-run-side">
+                  <button
+                    v-if="canRetryGitLabRun(run)"
+                    class="btn btn-ghost btn-sm"
+                    :disabled="retryingGitLabRunIds.has(run.id)"
+                    @click="retryGitLabReviewRun(run)"
+                  >
+                    <RefreshCw :size="13" />
+                    <span>{{ retryingGitLabRunIds.has(run.id) ? 'Retrying' : 'Retry' }}</span>
+                  </button>
                   <span class="platform-status-pill" :class="statusClass(run.status === 'succeeded' ? 'available' : run.status === 'failed' ? 'error' : 'degraded')">
                     {{ run.status }}
                   </span>

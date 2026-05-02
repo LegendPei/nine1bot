@@ -77,6 +77,9 @@ describe('web config APIs', () => {
           }],
         })
       }
+      if (url === '/webhooks/gitlab/runs/review_1/retry') {
+        return jsonResponse({ accepted: true, runId: 'review_1' }, 202)
+      }
       throw new Error(`Unexpected request: ${url}`)
     })
 
@@ -88,8 +91,10 @@ describe('web config APIs', () => {
       updatedAt: 2,
       publishedAt: 3,
     }])
+    await expect(gitLabReviewApi.retry('review_1')).resolves.toEqual({ accepted: true, runId: 'review_1' })
     expect(callSummary()).toEqual([
       ['GET', '/webhooks/gitlab/runs?limit=25'],
+      ['POST', '/webhooks/gitlab/runs/review_1/retry'],
     ])
   })
 
