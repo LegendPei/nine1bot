@@ -252,18 +252,19 @@ describe('PlatformAdapterManager', () => {
         visibility: 'declared-only',
       }],
     })
-    await expect(manager.getDetail('demo')).resolves.toMatchObject({
-      runtimeSources: {
-        agents: [{
-          id: 'demo-agents',
-          status: 'registered',
-        }],
-        skills: [{
-          id: 'demo-skills',
-          status: 'registered',
-        }],
-      },
+    const detail = await manager.getDetail('demo')
+    expect(detail?.runtimeSources).toMatchObject({
+      agents: [{
+        id: 'demo-agents',
+        status: 'registered',
+      }],
+      skills: [{
+        id: 'demo-skills',
+        status: 'registered',
+      }],
     })
+    expect(detail?.runtimeSources?.agents[0]?.error).toBeUndefined()
+    expect(detail?.runtimeSources?.skills[0]?.error).toBeUndefined()
   })
 
   it('reports enabled registered source drift as error instead of disabled', async () => {

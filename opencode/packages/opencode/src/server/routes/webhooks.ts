@@ -12,11 +12,13 @@ import {
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
+  reportGitLabReviewRunFailure,
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
+import { normalizeGitLabReviewSettings } from "../../../../../../packages/platform-gitlab/src/review/settings"
 
 const WEBHOOK_CLIENT_CAPABILITIES = {
   interactions: false,
@@ -375,6 +377,10 @@ async function triggerGitLabReviewWebhook(c: any) {
     return c.json({ accepted: false, error: "json_body_required" }, 400)
   }
 
+  const platforms = await readPlatformManagerConfig()
+  const linkedSource = await validateGitLabLinkedWebhookSource(c, platforms)
+  if ("response" in linkedSource) return linkedSource.response
+
   let payload: unknown
   try {
     payload = await c.req.json()
@@ -385,20 +391,56 @@ async function triggerGitLabReviewWebhook(c: any) {
   const result = await handleGitLabReviewWebhook({
     payload,
     headers: Webhook.normalizeHeaders(c.req.raw.headers),
-    platforms: await readPlatformManagerConfig(),
+    platforms,
     secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+    ...(linkedSource.sourceID ? { verifiedWebhookSourceId: linkedSource.sourceID } : {}),
   })
 
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
     startGitLabReviewRuntimeRun(result).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
       ReviewRunStore.update(result.runId, {
         status: "failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       })
+      reportStoredGitLabReviewFailure(result.runId, "runtime_start", message).catch(() => undefined)
     })
   }
 
   return c.json(result, result.accepted ? 202 : result.httpStatus as never)
+}
+
+async function validateGitLabLinkedWebhookSource(c: any, platforms: Awaited<ReturnType<typeof readPlatformManagerConfig>>) {
+  const sourceID = c.req.param?.("sourceID")
+  const secret = c.req.param?.("secret")
+  if (!sourceID && !secret) return {}
+  if (!sourceID || !secret) {
+    return { response: c.json({ accepted: false, error: "webhook_source_secret_required" }, 400) }
+  }
+
+  const settings = platforms.gitlab?.settings ?? {}
+  const linkedSourceID = typeof settings["review.webhookSourceId"] === "string"
+    ? settings["review.webhookSourceId"]
+    : typeof settings.webhookSourceId === "string"
+      ? settings.webhookSourceId
+      : ""
+  if (linkedSourceID !== sourceID) {
+    return { response: c.json({ accepted: false, error: "gitlab_webhook_source_not_linked" }, 403) }
+  }
+
+  let source
+  try {
+    source = await Webhook.getSource(sourceID)
+  } catch {
+    return { response: c.json({ accepted: false, error: "webhook_source_not_found" }, 404) }
+  }
+  if (!source.enabled || source.deletedAt) {
+    return { response: c.json({ accepted: false, error: "webhook_source_disabled" }, 403) }
+  }
+  if (!Webhook.verifySecret(source, secret)) {
+    return { response: c.json({ accepted: false, error: "invalid_webhook_source_secret" }, 401) }
+  }
+  return { sourceID }
 }
 
 type AcceptedGitLabReviewWithContext = Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }> & {
@@ -431,6 +473,8 @@ function gitLabReviewRuntimeInputFromRecord(run: ReviewRunRecord): GitLabReviewR
 
 async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
   const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
+  const platforms = await readPlatformManagerConfig()
+  const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
   let publishAttempted = false
   const entry = {
     source: "webhook",
@@ -445,6 +489,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
     title: `GitLab review: ${result.trigger.projectPath ?? result.trigger.projectId}`,
     sessionChoice: {
       agent: "platform.gitlab.pm-coordinator",
+      ...gitLabReviewModelChoice(settings),
       resources: {
         skills: {
           skills: GITLAB_REVIEW_SKILLS,
@@ -473,6 +518,9 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
         turnSnapshotId: response.turnSnapshotId,
         ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
       })
+      if (!response.accepted) {
+        await reportStoredGitLabReviewFailure(result.runId, "controller_message", "controller_message_not_accepted")
+      }
     },
     async onRuntimeOutput(output) {
       if (publishAttempted || output.kind !== "part" || !output.text) return
@@ -491,28 +539,53 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
           error: published.error,
           warnings: published.warnings,
         })
+        await reportStoredGitLabReviewFailure(result.runId, "publish_result", published.error)
       }
     },
     async onFinished(finished) {
       const current = ReviewRunStore.get(result.runId)
       if (current?.publishedAt) return
       if (finished.status === "succeeded") {
+        const error = "gitlab_review_result_missing"
         ReviewRunStore.update(result.runId, {
           status: "failed",
-          error: "gitlab_review_result_missing",
+          error,
           warnings: [
             ...((current?.warnings as string[] | undefined) ?? []),
             "Runtime session finished without a valid GITLAB_REVIEW_RESULT payload.",
           ],
         })
+        await reportStoredGitLabReviewFailure(result.runId, "runtime_output", error)
         return
       }
+      const error = finished.error ?? `runtime_finished_${finished.status}`
       ReviewRunStore.update(result.runId, {
         status: "failed",
-        ...(finished.error ? { error: finished.error } : {}),
+        error,
       })
+      await reportStoredGitLabReviewFailure(result.runId, "runtime_finished", error)
     },
   })
+}
+
+async function reportStoredGitLabReviewFailure(runId: string, phase: string, error: string) {
+  await reportGitLabReviewRunFailure({
+    runId,
+    platforms: await readPlatformManagerConfig(),
+    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+    phase,
+    error,
+  })
+}
+
+function gitLabReviewModelChoice(settings: ReturnType<typeof normalizeGitLabReviewSettings>) {
+  if (!settings.modelProviderId || !settings.modelId) return {}
+  return {
+    model: {
+      providerID: settings.modelProviderId,
+      modelID: settings.modelId,
+    },
+  } satisfies NonNullable<RuntimeControllerProtocol.SessionChoice>
 }
 
 async function retryGitLabReviewRun(c: any) {
@@ -540,10 +613,12 @@ async function retryGitLabReviewRun(c: any) {
   })
 
   startGitLabReviewRuntimeRun(input).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
     ReviewRunStore.update(runId, {
       status: "failed",
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     })
+    reportStoredGitLabReviewFailure(runId, "runtime_retry", message).catch(() => undefined)
   })
 
   return c.json({ accepted: true, runId }, 202)
@@ -556,6 +631,11 @@ function uniqueStrings(items: string[]) {
 export const WebhookPublicRoutes = lazy(() =>
   new Hono()
     .post("/gitlab", triggerGitLabReviewWebhook)
+    .post(
+      "/gitlab/:sourceID/:secret",
+      validator("param", z.object({ sourceID: z.string(), secret: z.string() })),
+      triggerGitLabReviewWebhook,
+    )
     .post(
       "/:sourceID/:secret",
       validator("param", z.object({ sourceID: z.string(), secret: z.string() })),

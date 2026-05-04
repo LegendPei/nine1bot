@@ -6,6 +6,7 @@ import {
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
+  reportGitLabReviewRunFailure,
 } from './gitlab-controller'
 import { ReviewRunStore } from './run-store'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
@@ -379,6 +380,7 @@ describe('GitLab review controller', () => {
 
     expect(accepted).toMatchObject({ accepted: true, status: 'accepted' })
     if (!accepted.accepted) throw new Error('expected accepted review run')
+    ReviewRunStore.update(accepted.runId, { status: 'failed', error: 'previous_runtime_error' })
 
     const published = await publishGitLabReviewRunResult({
       runId: accepted.runId,
@@ -413,6 +415,12 @@ describe('GitLab review controller', () => {
       inlinePosted: 1,
       fallbackPosted: 0,
     })
+    const storedAfterPublish = ReviewRunStore.get(accepted.runId)
+    expect(storedAfterPublish).toMatchObject({
+      status: 'succeeded',
+      publishedAt: expect.any(Number),
+    })
+    expect(storedAfterPublish?.error).toBeUndefined()
     await expect(publishGitLabReviewRunResult({
       runId: accepted.runId,
       platforms: {
@@ -594,6 +602,68 @@ describe('GitLab review controller', () => {
       status: 'failed',
       error: 'gitlab_api_publish_result_failed:403:Forbidden',
     })
+  })
+
+  test('writes a GitLab failure note for stored review run failures', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const run = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'failed',
+      error: 'gitlab_review_result_missing',
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'mr',
+        objectIid: 10,
+      },
+    })
+
+    await expect(reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      phase: 'runtime_output',
+      error: 'gitlab_review_result_missing',
+    })).resolves.toMatchObject({
+      notified: true,
+      runId: run.id,
+    })
+
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      failureNotifiedAt: expect.any(Number),
+    })
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+    ])
+    expect(String(calls[0]?.init?.body)).toContain('Nine1Bot+review+failed')
+
+    await expect(reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms,
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      phase: 'runtime_output',
+      error: 'again',
+    })).resolves.toMatchObject({
+      notified: false,
+      error: 'review_run_failure_already_notified',
+    })
+    expect(calls).toHaveLength(1)
   })
 
   test('loads live commit diff and publishes a commit summary comment', async () => {

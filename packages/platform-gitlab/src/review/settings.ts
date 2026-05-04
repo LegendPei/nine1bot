@@ -6,6 +6,7 @@ export type GitLabReviewSettings = {
   allowedProjectIds: Array<string | number>
   webhookSecretRef?: GitLabReviewSecretRef
   tokenSecretRef?: GitLabReviewSecretRef
+  webhookSourceId?: string
   manualMentionTrigger: boolean
   webhookAutoReview: boolean
   inlineComments: boolean
@@ -13,6 +14,8 @@ export type GitLabReviewSettings = {
   maxDiffBytes: number
   maxFiles: number
   executionMode: 'dry-run' | 'runtime'
+  modelProviderId?: string
+  modelId?: string
 }
 
 export type GitLabReviewSecretRef = string | {
@@ -33,6 +36,8 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   maxDiffBytes: 240_000,
   maxFiles: 80,
   executionMode: 'dry-run',
+  modelProviderId: undefined,
+  modelId: undefined,
 }
 
 export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSettings {
@@ -46,6 +51,7 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     allowedProjectIds: idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')),
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
+    webhookSourceId: optionalString(setting(record, 'review.webhookSourceId', 'webhookSourceId')),
     manualMentionTrigger: booleanValue(setting(record, 'review.manualMentionTrigger', 'manualMentionTrigger'), defaultGitLabReviewSettings.manualMentionTrigger),
     webhookAutoReview: booleanValue(setting(record, 'review.webhookAutoReview', 'webhookAutoReview'), defaultGitLabReviewSettings.webhookAutoReview),
     inlineComments: booleanValue(setting(record, 'review.inlineComments', 'inlineComments'), defaultGitLabReviewSettings.inlineComments),
@@ -53,6 +59,8 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     maxDiffBytes: positiveNumber(setting(record, 'review.maxDiffBytes', 'maxDiffBytes'), defaultGitLabReviewSettings.maxDiffBytes),
     maxFiles: positiveNumber(setting(record, 'review.maxFiles', 'maxFiles'), defaultGitLabReviewSettings.maxFiles),
     executionMode: setting(record, 'review.executionMode', 'executionMode') === 'runtime' ? 'runtime' : 'dry-run',
+    modelProviderId: optionalString(setting(record, 'review.modelProviderId', 'modelProviderId')),
+    modelId: optionalString(setting(record, 'review.modelId', 'modelId')),
   }
 }
 

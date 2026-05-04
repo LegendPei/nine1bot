@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { CheckCircle2, CircleAlert, CircleSlash, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
-import { gitLabReviewApi, type GitLabReviewRun } from '../api/client'
+import { CheckCircle2, CircleAlert, CircleSlash, Copy, KeyRound, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
+import { gitLabReviewApi, webhookApi, type GitLabReviewRun, type WebhookSource, type WebhookStatus } from '../api/client'
 import type {
   PlatformActionDescriptor,
   PlatformConfigField,
   PlatformDetail,
   PlatformSummary,
   PlatformActionResult,
+  Provider,
 } from '../api/client'
 
 const props = defineProps<{
@@ -19,6 +20,7 @@ const props = defineProps<{
   actionRunning: string
   error: string
   actionResult: PlatformActionResult | null
+  providers: Provider[]
 }>()
 
 const emit = defineEmits<{
@@ -33,8 +35,15 @@ const formValues = reactive<Record<string, string | number | boolean>>({})
 const secretClears = reactive<Record<string, boolean>>({})
 const jsonErrors = reactive<Record<string, string>>({})
 const gitLabReviewRuns = ref<GitLabReviewRun[]>([])
+const webhookSources = ref<WebhookSource[]>([])
+const webhookStatus = ref<WebhookStatus | null>(null)
 const loadingGitLabRuns = ref(false)
+const loadingWebhookSources = ref(false)
+const refreshingGitLabWebhookSecret = ref(false)
 const gitLabRunsError = ref('')
+const webhookSourcesError = ref('')
+const gitLabWebhookUrlMessage = ref('')
+const generatedGitLabWebhookUrl = ref('')
 const retryingGitLabRunIds = ref<Set<string>>(new Set())
 
 const configFields = computed(() => {
@@ -45,6 +54,22 @@ const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
 const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.slice(0, 8))
 const gitLabWebhookPath = '/webhooks/gitlab'
+const gitLabWebhookSourceFieldKey = 'review.webhookSourceId'
+const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
+const gitLabReviewModelFieldKey = 'review.modelId'
+const selectedGitLabWebhookSource = computed(() => {
+  const sourceId = textValue(gitLabWebhookSourceFieldKey)
+  return webhookSources.value.find((source) => source.id === sourceId)
+})
+const authenticatedModelCount = computed(() => {
+  return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
+})
+const gitLabReviewWebhookUrl = computed(() => {
+  if (generatedGitLabWebhookUrl.value) return generatedGitLabWebhookUrl.value
+  const baseUrl = gitLabWebhookBaseUrl()
+  const sourceId = selectedGitLabWebhookSource.value?.id || '{sourceId}'
+  return `${baseUrl}/webhooks/gitlab/${sourceId}/{sourceSecret}`
+})
 
 watch(
   () => props.selectedPlatform,
@@ -52,9 +77,16 @@ watch(
     resetForm(platform)
     if (platform?.id === 'gitlab') {
       loadGitLabReviewRuns()
+      loadWebhookSources()
+      loadWebhookStatus()
     } else {
       gitLabReviewRuns.value = []
       gitLabRunsError.value = ''
+      webhookSources.value = []
+      webhookStatus.value = null
+      webhookSourcesError.value = ''
+      generatedGitLabWebhookUrl.value = ''
+      gitLabWebhookUrlMessage.value = ''
     }
   },
   { immediate: true },
@@ -176,6 +208,52 @@ function setTextValue(field: PlatformConfigField, event: Event) {
   }
 }
 
+function isGitLabWebhookSourceField(field: PlatformConfigField) {
+  return isGitLabPlatform.value && field.key === gitLabWebhookSourceFieldKey
+}
+
+function isGitLabReviewModelProviderField(field: PlatformConfigField) {
+  return isGitLabPlatform.value && field.key === gitLabReviewModelProviderFieldKey
+}
+
+function isGitLabReviewModelField(field: PlatformConfigField) {
+  return isGitLabPlatform.value && field.key === gitLabReviewModelFieldKey
+}
+
+function gitLabReviewModelValue() {
+  const providerId = textValue(gitLabReviewModelProviderFieldKey)
+  const modelId = textValue(gitLabReviewModelFieldKey)
+  return providerId && modelId ? `${providerId}\t${modelId}` : ''
+}
+
+function setGitLabReviewModel(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  if (!value) {
+    formValues[gitLabReviewModelProviderFieldKey] = ''
+    formValues[gitLabReviewModelFieldKey] = ''
+    return
+  }
+  const [providerId, ...modelParts] = value.split('\t')
+  formValues[gitLabReviewModelProviderFieldKey] = providerId || ''
+  formValues[gitLabReviewModelFieldKey] = modelParts.join('\t')
+}
+
+function gitLabWebhookBaseUrl() {
+  const status = webhookStatus.value
+  const base = status?.publicUrl || status?.localUrl || window.location.origin
+  return base.replace(/\/$/, '')
+}
+
+async function copyGitLabWebhookUrl() {
+  gitLabWebhookUrlMessage.value = ''
+  try {
+    await navigator.clipboard.writeText(gitLabReviewWebhookUrl.value)
+    gitLabWebhookUrlMessage.value = 'Webhook URL copied.'
+  } catch {
+    gitLabWebhookUrlMessage.value = 'Copy failed. Select the URL and copy it manually.'
+  }
+}
+
 function clearSecretField(field: PlatformConfigField) {
   secretClears[field.key] = true
   formValues[field.key] = ''
@@ -250,7 +328,50 @@ function saveSettings() {
 
 function refreshStatus() {
   if (props.selectedPlatform) emit('refresh', props.selectedPlatform.id)
-  if (isGitLabPlatform.value) loadGitLabReviewRuns()
+  if (isGitLabPlatform.value) {
+    loadGitLabReviewRuns()
+    loadWebhookSources()
+    loadWebhookStatus()
+  }
+}
+
+async function loadWebhookStatus() {
+  try {
+    webhookStatus.value = await webhookApi.status()
+  } catch {
+    webhookStatus.value = null
+  }
+}
+
+async function loadWebhookSources() {
+  loadingWebhookSources.value = true
+  webhookSourcesError.value = ''
+  try {
+    webhookSources.value = await webhookApi.sources()
+  } catch (error: any) {
+    webhookSourcesError.value = error?.message || 'Failed to load webhook sources'
+  } finally {
+    loadingWebhookSources.value = false
+  }
+}
+
+async function refreshGitLabWebhookSecret() {
+  const source = selectedGitLabWebhookSource.value
+  if (!source || refreshingGitLabWebhookSecret.value) return
+  refreshingGitLabWebhookSecret.value = true
+  gitLabWebhookUrlMessage.value = ''
+  try {
+    const refreshed = await webhookApi.refreshSecret(source.id)
+    const baseUrl = gitLabWebhookBaseUrl()
+    generatedGitLabWebhookUrl.value = `${baseUrl}/webhooks/gitlab/${refreshed.source.id}/${refreshed.secret}`
+    webhookSources.value = webhookSources.value.map((item) => item.id === refreshed.source.id ? refreshed.source : item)
+    await navigator.clipboard.writeText(generatedGitLabWebhookUrl.value).catch(() => undefined)
+    gitLabWebhookUrlMessage.value = 'Secret refreshed. Update the GitLab Project Webhook URL with the copied URL.'
+  } catch (error: any) {
+    gitLabWebhookUrlMessage.value = error?.message || 'Failed to refresh webhook secret.'
+  } finally {
+    refreshingGitLabWebhookSecret.value = false
+  }
 }
 
 async function loadGitLabReviewRuns() {
@@ -303,6 +424,7 @@ function reviewRunDetail(run: GitLabReviewRun) {
     run.turnSnapshotId ? `turn ${run.turnSnapshotId}` : '',
     run.retryCount ? `retry ${run.retryCount}` : '',
     run.lastRetryAt ? `last retry ${formatRunTime(run.lastRetryAt)}` : '',
+    run.failureNotifiedAt ? `failure noted ${formatRunTime(run.failureNotifiedAt)}` : '',
     run.error ? `error ${run.error}` : '',
     run.warnings?.length ? `${run.warnings.length} warning(s)` : '',
   ].filter(Boolean)
@@ -386,20 +508,40 @@ function runAction(action: PlatformActionDescriptor) {
           <div v-if="isGitLabPlatform" class="platform-section gitlab-review-guide">
             <div class="platform-section-heading-row">
               <h5 class="platform-section-title">GitLab Code Review</h5>
-              <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}</code>
+              <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}/...</code>
+            </div>
+            <div class="gitlab-webhook-url-box">
+              <span class="gitlab-guide-label">Dedicated Project Webhook URL</span>
+              <code class="gitlab-webhook-url">{{ gitLabReviewWebhookUrl }}</code>
+              <div class="gitlab-webhook-actions">
+                <button type="button" class="btn btn-ghost btn-sm" @click="copyGitLabWebhookUrl">
+                  <Copy :size="13" />
+                  <span>Copy URL</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="!selectedGitLabWebhookSource || refreshingGitLabWebhookSecret"
+                  @click="refreshGitLabWebhookSecret"
+                >
+                  <KeyRound :size="13" />
+                  <span>{{ refreshingGitLabWebhookSecret ? 'Refreshing' : 'Refresh source secret' }}</span>
+                </button>
+              </div>
+              <span v-if="gitLabWebhookUrlMessage" class="gitlab-guide-text">{{ gitLabWebhookUrlMessage }}</span>
             </div>
             <div class="gitlab-guide-grid">
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Enable</span>
-                <span class="gitlab-guide-text">Turn on GitLab and code review, then keep dry-run enabled until the first fixture run looks right.</span>
+                <span class="gitlab-guide-label">GitLab webhook</span>
+                <span class="gitlab-guide-text">Use a Project Webhook. Enable Comments or Note events for @Nine1bot review, and Merge request events for optional auto review.</span>
               </div>
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Secrets</span>
-                <span class="gitlab-guide-text">Set the webhook secret and a GitLab API token that can read diffs and write MR or commit comments.</span>
+                <span class="gitlab-guide-label">Secret token</span>
+                <span class="gitlab-guide-text">Leave GitLab's Secret token field empty when using this URL. The Automations source secret is already embedded in the path.</span>
               </div>
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Webhook</span>
-                <span class="gitlab-guide-text">Configure GitLab to send merge request and note events to the webhook path with X-Gitlab-Token.</span>
+                <span class="gitlab-guide-label">Review model</span>
+                <span class="gitlab-guide-text">Choose a model from authenticated Chat providers. The default option follows the current default chat model. Available models: {{ authenticatedModelCount }}.</span>
               </div>
             </div>
           </div>
@@ -501,12 +643,61 @@ function runAction(action: PlatformActionDescriptor) {
                 <span v-if="section.description" class="text-muted text-sm">{{ section.description }}</span>
               </div>
 
-              <label v-for="field in section.fields" :key="field.key" class="platform-field">
+              <label
+                v-for="field in section.fields"
+                v-show="!isGitLabReviewModelProviderField(field)"
+                :key="field.key"
+                class="platform-field"
+              >
                 <span class="platform-field-label">{{ field.label }}</span>
                 <span v-if="field.description" class="platform-field-desc text-muted text-sm">{{ field.description }}</span>
 
                 <select
-                  v-if="field.type === 'select'"
+                  v-if="isGitLabWebhookSourceField(field)"
+                  :value="textValue(field.key)"
+                  class="input platform-input"
+                  :disabled="loadingWebhookSources"
+                  @change="setTextValue(field, $event)"
+                >
+                  <option value="">Not linked</option>
+                  <option v-for="source in webhookSources" :key="source.id" :value="source.id">
+                    {{ source.name }} ({{ source.enabled ? 'enabled' : 'disabled' }})
+                  </option>
+                </select>
+                <span v-if="isGitLabWebhookSourceField(field) && webhookSourcesError" class="platform-field-error">
+                  {{ webhookSourcesError }}
+                </span>
+                <span v-else-if="isGitLabWebhookSourceField(field)" class="platform-field-desc text-muted text-sm">
+                  Configure webhook sources in Automations, then link one here for traceability.
+                </span>
+
+                <select
+                  v-else-if="isGitLabReviewModelField(field)"
+                  :value="gitLabReviewModelValue()"
+                  class="input platform-input"
+                  @change="setGitLabReviewModel"
+                >
+                  <option value="">Use default chat model</option>
+                  <optgroup
+                    v-for="provider in providers.filter((item) => item.authenticated)"
+                    :key="provider.id"
+                    :label="provider.name"
+                  >
+                    <option
+                      v-for="model in provider.models"
+                      :key="`${provider.id}:${model.id}`"
+                      :value="`${provider.id}\t${model.id}`"
+                    >
+                      {{ model.name || model.id }}
+                    </option>
+                  </optgroup>
+                </select>
+                <span v-else-if="isGitLabReviewModelField(field)" class="platform-field-desc text-muted text-sm">
+                  Models come from the same configured providers used by Chat.
+                </span>
+
+                <select
+                  v-else-if="field.type === 'select'"
                   :value="textValue(field.key)"
                   class="input platform-input"
                   @change="setTextValue(field, $event)"
@@ -605,6 +796,13 @@ function runAction(action: PlatformActionDescriptor) {
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  padding: var(--space-lg);
+  overflow: auto;
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 .section-title {
@@ -758,6 +956,34 @@ function runAction(action: PlatformActionDescriptor) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-sm);
+}
+
+.gitlab-webhook-url-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.gitlab-webhook-url {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-webhook-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
 }
 
 .gitlab-guide-item {

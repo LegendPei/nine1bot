@@ -17,6 +17,7 @@ import SearchOverlay from './components/SearchOverlay.vue'
 import ProjectsPage from './components/ProjectsPage.vue'
 import AutomationsPage from './components/AutomationsPage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import PlatformManager from './components/PlatformManager.vue'
 import FileViewer from './components/FileViewer.vue'
 import TodoList from './components/TodoList.vue'
 import PlanPanel from './components/PlanPanel.vue'
@@ -98,7 +99,31 @@ const {
   clearFileContent,
 } = useFiles()
 
-const { showSettings, openSettings, closeSettings, activeTab: settingsTab, currentProvider, currentModel, providers, selectModel: settingsSelectModel, loadProviders, loadConfig } = useSettings()
+const {
+  showSettings,
+  openSettings,
+  closeSettings,
+  activeTab: settingsTab,
+  currentProvider,
+  currentModel,
+  providers,
+  platforms,
+  selectedPlatformId,
+  selectedPlatform,
+  loadingPlatforms,
+  savingPlatform,
+  platformActionRunning,
+  platformError,
+  platformActionResult,
+  selectModel: settingsSelectModel,
+  loadProviders,
+  loadConfig,
+  loadPlatforms,
+  loadPlatformDetail,
+  updatePlatform,
+  refreshPlatformStatus,
+  executePlatformAction,
+} = useSettings()
 
 // App mode (chat / agent)
 const { mode: appMode, setMode: setAppMode } = useAppMode()
@@ -149,6 +174,7 @@ const showMetricsPage = ref(false)
 
 // Automations page
 const showAutomationsPage = ref(false)
+const showPlatformsPage = ref(false)
 
 const sidebarCollapsed = ref(false)
 const projectContextRevision = ref(0)
@@ -186,7 +212,8 @@ const isEmptyState = computed(() =>
   !isLoading.value &&
   !showProjectsPage.value &&
   !showMetricsPage.value &&
-  !showAutomationsPage.value
+  !showAutomationsPage.value &&
+  !showPlatformsPage.value
 )
 
 // Handle model selection from InputBox
@@ -371,6 +398,9 @@ async function handleSend(content: string, files?: Array<{ type: 'file'; mime: s
   if (showAutomationsPage.value) {
     showAutomationsPage.value = false
   }
+  if (showPlatformsPage.value) {
+    showPlatformsPage.value = false
+  }
 
   // sendMessage 会自动处理草稿模式，在发送前创建会话
   const model = currentProvider.value && currentModel.value
@@ -395,6 +425,7 @@ function handleNewSession() {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   createSession(currentDirectory.value || '.')
 }
 
@@ -408,6 +439,7 @@ function handleSwitchMode(newMode: 'chat' | 'agent') {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   createSession(currentDirectory.value || '.')
 }
 
@@ -419,6 +451,7 @@ async function handleSelectProject(projectId: string) {
 
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   const project = await selectProject(projectId)
   if (!project) return
 
@@ -438,6 +471,7 @@ function handleOpenProjects() {
   showMetricsPage.value = false
   showProjectsPage.value = true
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   loadProjects().catch((error) => {
     console.error('Failed to load projects:', error)
   })
@@ -447,20 +481,33 @@ function handleOpenAutomations() {
   showAutomationsPage.value = true
   showProjectsPage.value = false
   showMetricsPage.value = false
+  showPlatformsPage.value = false
   loadProjects().catch((error) => {
     console.error('Failed to load projects:', error)
+  })
+}
+
+function handleOpenPlatforms() {
+  showPlatformsPage.value = true
+  showAutomationsPage.value = false
+  showProjectsPage.value = false
+  showMetricsPage.value = false
+  loadPlatforms().catch((error) => {
+    console.error('Failed to load platforms:', error)
   })
 }
 
 function handleOpenMetrics() {
   showProjectsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   showMetricsPage.value = true
 }
 
 function handleToggleMetrics() {
   showProjectsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   showMetricsPage.value = !showMetricsPage.value
 }
 
@@ -481,6 +528,7 @@ async function handleOpenMetricsSession(sessionId: string) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   await selectSession(session)
 }
 
@@ -502,6 +550,7 @@ async function handleCreateProject(name: string, instructions: string, directory
   }
   showProjectsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   await loadSessions()
   await refreshGlobalRecentsIfAgent()
 }
@@ -516,6 +565,7 @@ function handleSearchSelect(sessionId: string) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   const session = searchRecentSessions.value.find(s => s.id === sessionId) || sessions.value.find(s => s.id === sessionId)
   if (session) {
     selectSession(session)
@@ -528,6 +578,7 @@ function handleProjectNewSession(projectId: string) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   createSession(project.rootDirectory || project.worktree)
 }
 
@@ -540,6 +591,7 @@ async function handleProjectSelectSession(session: Session) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   await selectSession(session)
 }
 
@@ -547,6 +599,7 @@ async function handleSidebarSelectSession(session: Session) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   await selectSession(session)
 }
 
@@ -554,6 +607,7 @@ async function handleAutomationSelectSession(session: Session) {
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
+  showPlatformsPage.value = false
   await selectSession(session)
 }
 
@@ -659,7 +713,7 @@ function handlePromptSelect(prompt: string) {
       :isSessionRunning="isSessionRunning"
       :runningCount="runningCount"
       :maxParallelAgents="MAX_PARALLEL_AGENTS"
-      :activePage="showMetricsPage ? 'metrics' : showAutomationsPage ? 'automations' : showProjectsPage ? 'projects' : 'chat'"
+      :activePage="showMetricsPage ? 'metrics' : showAutomationsPage ? 'automations' : showPlatformsPage ? 'platforms' : showProjectsPage ? 'projects' : 'chat'"
       @toggle-collapse="toggleSidebar"
       @select-session="handleSidebarSelectSession"
       @new-session="handleNewSession"
@@ -676,6 +730,7 @@ function handlePromptSelect(prompt: string) {
       @open-projects="handleOpenProjects"
       @open-metrics="handleOpenMetrics"
       @open-automations="handleOpenAutomations"
+      @open-platforms="handleOpenPlatforms"
     />
 
     <!-- Main Content -->
@@ -700,6 +755,23 @@ function handlePromptSelect(prompt: string) {
           v-if="showAutomationsPage"
           :projects="projects"
           @select-session="handleAutomationSelectSession"
+        />
+
+        <PlatformManager
+          v-else-if="showPlatformsPage"
+          :platforms="platforms"
+          :selected-platform-id="selectedPlatformId"
+          :selected-platform="selectedPlatform"
+          :loading="loadingPlatforms"
+          :saving="savingPlatform"
+          :action-running="platformActionRunning"
+          :error="platformError"
+          :action-result="platformActionResult"
+          :providers="providers"
+          @select="loadPlatformDetail"
+          @update="updatePlatform"
+          @refresh="refreshPlatformStatus"
+          @action="executePlatformAction"
         />
 
         <!-- Projects Page -->

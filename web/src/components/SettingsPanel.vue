@@ -9,7 +9,6 @@ import SkillsList from './SkillsList.vue'
 import ModelSelector from './ModelSelector.vue'
 import AuthManager from './AuthManager.vue'
 import PreferencesPanel from './PreferencesPanel.vue'
-import PlatformManager from './PlatformManager.vue'
 
 const emit = defineEmits<{
   close: []
@@ -29,14 +28,6 @@ const {
   loadingMcp,
   skills,
   loadingSkills,
-  platforms,
-  selectedPlatformId,
-  selectedPlatform,
-  loadingPlatforms,
-  savingPlatform,
-  platformActionRunning,
-  platformError,
-  platformActionResult,
   selectModel,
   setDefaultModel,
   connectMcp,
@@ -48,10 +39,6 @@ const {
   setApiKey,
   removeAuth,
   importAuthFromOpencode,
-  loadPlatformDetail,
-  updatePlatform,
-  refreshPlatformStatus,
-  executePlatformAction
 } = useSettings()
 
 const { theme, toggleTheme } = useTheme()
@@ -160,13 +147,6 @@ function handleOverlayClick(e: MouseEvent) {
           </button>
           <button
             class="tab"
-            :class="{ active: activeTab === 'platforms' }"
-            @click="activeTab = 'platforms'"
-          >
-            多平台
-          </button>
-          <button
-            class="tab"
             :class="{ active: activeTab === 'profile' }"
             @click="activeTab = 'profile'"
           >
@@ -223,23 +203,6 @@ function handleOverlayClick(e: MouseEvent) {
         <!-- Preferences Tab -->
         <PreferencesPanel
           v-if="activeTab === 'preferences'"
-        />
-
-        <!-- Platforms Tab -->
-        <PlatformManager
-          v-if="activeTab === 'platforms'"
-          :platforms="platforms"
-          :selected-platform-id="selectedPlatformId"
-          :selected-platform="selectedPlatform"
-          :loading="loadingPlatforms"
-          :saving="savingPlatform"
-          :action-running="platformActionRunning"
-          :error="platformError"
-          :action-result="platformActionResult"
-          @select="loadPlatformDetail"
-          @update="updatePlatform"
-          @refresh="refreshPlatformStatus"
-          @action="executePlatformAction"
         />
 
         <!-- Profile Tab -->

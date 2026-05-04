@@ -1,51 +1,115 @@
-﻿---
+---
 name: platform.gitlab.review-finding-schema
-description: Use to produce structured GitLab code review findings.
+description: Use to produce structured GitLab code review findings and the final GitLab review result.
 ---
 
 # Review Finding Schema
 
-Final PM output must be a ReviewStageResult:
+Use this skill whenever a GitLab review agent or PM coordinator emits findings.
 
-```json
-{
-  "stage": "closed",
-  "status": "ok | blocked | failed",
-  "summary": "short review summary",
-  "findings": [],
-  "nextActions": []
-}
-```
+## Final Result Contract
 
-When this is the PM final answer, wrap it as:
+The PM coordinator final answer must be exactly one fenced JSON block. The first content line inside the fence must be `GITLAB_REVIEW_RESULT:`.
 
 ```json
 GITLAB_REVIEW_RESULT:
 {
   "stage": "closed",
   "status": "ok",
-  "summary": "short review summary",
+  "summary": "Concise review conclusion grounded in the supplied diff.",
   "findings": [],
   "nextActions": []
 }
 ```
 
-Return findings as JSON-compatible objects:
+Required fields:
+
+- `stage`: always `closed` for the final PM result.
+- `status`: one of `ok`, `blocked`, `failed`.
+- `summary`: short human-readable conclusion.
+- `findings`: array of finding objects, empty when no concrete issues are found.
+- `nextActions`: array of short strings, empty when no follow-up is needed.
+
+Do not wrap the result in another object. Do not add Markdown prose outside the JSON fence.
+
+## Finding Object
 
 ```json
 {
-  "title": "short finding title",
-  "body": "why this matters and what should change",
-  "severity": "info | minor | major | critical | blocker",
-  "category": "optional stable category",
-  "file": "optional repo path",
+  "title": "Short finding title",
+  "body": "Evidence, impact, and suggested change.",
+  "severity": "major",
+  "category": "correctness",
+  "file": "src/example.ts",
   "oldLine": 12,
   "newLine": 18,
-  "source": "agent role"
+  "source": "pm-coordinator"
 }
 ```
 
-Only include `file` and line fields when they are grounded in the diff manifest. Prefer no line over a guessed line.
+Required finding fields:
 
-Allowed severities are `info`, `minor`, `major`, `critical`, and `blocker`. Allowed stage result statuses are `ok`, `blocked`, and `failed`.
+- `title`
+- `body`
+- `severity`
 
+Optional finding fields:
+
+- `category`
+- `file`
+- `oldLine`
+- `newLine`
+- `source`
+
+Allowed severities: `info`, `minor`, `major`, `critical`, `blocker`.
+
+Allowed categories: `correctness`, `security`, `testing`, `performance`, `maintainability`, `frontend`, `architecture`, `docs`, `config`.
+
+## Evidence Rules
+
+Only include `file`, `oldLine`, or `newLine` when the location is grounded in the supplied diff manifest.
+
+Never guess line numbers. If the exact changed line is uncertain, omit line fields and let the publisher create a top-level summary finding.
+
+Do not create findings for:
+
+- style-only preferences
+- generic best practices without diff evidence
+- files skipped by filters
+- behavior outside the supplied MR or commit diff
+
+## Status Selection
+
+Use `ok` when review completed, even if findings exist.
+
+Use `blocked` when the diff is too large, truncated, overflowed, empty after filters, or otherwise lacks enough evidence to review.
+
+Use `failed` when the review workflow itself failed and no reliable review conclusion can be produced.
+
+## Minimal Valid Outputs
+
+No findings:
+
+```json
+GITLAB_REVIEW_RESULT:
+{
+  "stage": "closed",
+  "status": "ok",
+  "summary": "No concrete issues were found in the supplied diff.",
+  "findings": [],
+  "nextActions": []
+}
+```
+
+Blocked:
+
+```json
+GITLAB_REVIEW_RESULT:
+{
+  "stage": "closed",
+  "status": "blocked",
+  "summary": "Review was blocked because the supplied GitLab diff was truncated or too large.",
+  "findings": [],
+  "nextActions": ["Split the MR or request a manual review for the omitted diff."]
+}
+```

@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import {
   PanelLeftClose, PanelLeft, MessageSquare, Plus, Search,
   FolderOpen, Code2, Sparkles, Pencil, Trash2, X, Check,
-  Loader2, Square, ChevronRight, User, MessageCircle, EllipsisVertical, BarChart3, Webhook
+  Loader2, Square, ChevronRight, User, MessageCircle, EllipsisVertical, BarChart3, Webhook, Boxes
 } from 'lucide-vue-next'
 import type { Session, FileItem } from '../api/client'
 import type { AppMode } from '../composables/useAppMode'
@@ -45,7 +45,7 @@ const props = defineProps<{
   isSessionRunning: (sessionId: string) => boolean
   runningCount: number
   maxParallelAgents: number
-  activePage: 'chat' | 'projects' | 'metrics' | 'automations'
+  activePage: 'chat' | 'projects' | 'metrics' | 'automations' | 'platforms'
 }>()
 
 const emit = defineEmits<{
@@ -65,6 +65,7 @@ const emit = defineEmits<{
   'open-projects': []
   'open-metrics': []
   'open-automations': []
+  'open-platforms': []
 }>()
 
 // Session mode mapping
@@ -205,6 +206,10 @@ function contextMenuDelete() {
         <Webhook :size="18" />
         <span>Automations</span>
       </button>
+      <button class="nav-item" :class="{ active: activePage === 'platforms' }" @click="emit('open-platforms')">
+        <Boxes :size="18" />
+        <span>Platforms</span>
+      </button>
     </nav>
 
     <!-- Top Navigation (collapsed) -->
@@ -223,6 +228,9 @@ function contextMenuDelete() {
       </button>
       <button class="nav-item-icon" :class="{ active: activePage === 'automations' }" @click="emit('open-automations')" title="Automations">
         <Webhook :size="18" />
+      </button>
+      <button class="nav-item-icon" :class="{ active: activePage === 'platforms' }" @click="emit('open-platforms')" title="Platforms">
+        <Boxes :size="18" />
       </button>
     </nav>
 

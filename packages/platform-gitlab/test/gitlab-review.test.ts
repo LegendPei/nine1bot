@@ -8,6 +8,7 @@ import {
   compileSubagentStageResults,
   defaultGitLabReviewSettings,
   GitLabApiError,
+  normalizeGitLabReviewSettings,
   parseSubagentStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
@@ -221,6 +222,16 @@ describe('GitLab review foundation', () => {
   test('keeps GitLab code review disabled by default', () => {
     expect(defaultGitLabReviewSettings.enabled).toBe(false)
     expect(defaultGitLabReviewSettings.executionMode).toBe('dry-run')
+  })
+
+  test('normalizes optional GitLab review model settings', () => {
+    expect(normalizeGitLabReviewSettings({
+      'review.modelProviderId': 'deepseek',
+      'review.modelId': 'deepseek-chat',
+    })).toMatchObject({
+      modelProviderId: 'deepseek',
+      modelId: 'deepseek-chat',
+    })
   })
 
   test('validates GitLab webhook tokens without accepting missing secrets', () => {

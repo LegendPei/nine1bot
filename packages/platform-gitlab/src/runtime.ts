@@ -97,6 +97,24 @@ export const gitlabPlatformDescriptor = {
             description: 'Automatically review configured merge request webhook events.',
           },
           {
+            key: 'review.webhookSourceId',
+            type: 'string',
+            label: 'Automation webhook source',
+            description: 'Optional Automations webhook source linked to this GitLab review setup.',
+          },
+          {
+            key: 'review.modelProviderId',
+            type: 'string',
+            label: 'Review model provider',
+            description: 'Provider selected from the configured chat model providers for GitLab review runtime runs.',
+          },
+          {
+            key: 'review.modelId',
+            type: 'string',
+            label: 'Review model',
+            description: 'Model selected from the configured chat models for GitLab review runtime runs.',
+          },
+          {
             key: 'review.inlineComments',
             type: 'boolean',
             label: 'Inline comments',
@@ -213,6 +231,7 @@ async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<Pla
     { id: 'context', label: 'Page context', value: 'enabled', tone: 'success' },
     { id: 'review', label: 'Code review', value: settings.enabled ? 'enabled' : 'disabled', tone: settings.enabled ? 'success' : 'neutral' },
     { id: 'mode', label: 'Review mode', value: settings.executionMode, tone: settings.dryRun ? 'warning' : 'neutral' },
+    { id: 'model', label: 'Review model', value: settings.modelProviderId && settings.modelId ? `${settings.modelProviderId}/${settings.modelId}` : 'default', tone: 'neutral' },
   ]
 
   if (!settings.enabled) {
@@ -257,6 +276,8 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
     if (!settings.tokenSecretRef) fieldErrors['review.tokenSecretRef'] = 'GitLab API token is required when code review is enabled.'
     if (settings.baseUrl && !isHttpUrl(settings.baseUrl)) fieldErrors['review.baseUrl'] = 'GitLab base URL must be an http(s) URL.'
     if (!settings.botMention.trim().startsWith('@')) fieldErrors['review.botMention'] = 'Bot mention must start with @.'
+    if (settings.modelProviderId && !settings.modelId) fieldErrors['review.modelId'] = 'Review model is required when a review model provider is set.'
+    if (!settings.modelProviderId && settings.modelId) fieldErrors['review.modelProviderId'] = 'Review model provider is required when a review model is set.'
   }
 
   return Object.keys(fieldErrors).length
