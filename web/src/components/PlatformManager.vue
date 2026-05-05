@@ -46,6 +46,59 @@ const actionJsonErrors = reactive<Record<string, Record<string, string>>>({})
 const configFields = computed(() => {
   return props.selectedPlatform?.config?.sections.flatMap((section) => section.fields) ?? []
 })
+const configFormSections = computed(() => {
+  if (!isGitLabPlatform.value) return props.selectedPlatform?.config?.sections ?? []
+  const fieldsByKey = new Map(configFields.value.map((field) => [field.key, field]))
+  const usedKeys = new Set<string>()
+  const groups = [
+    {
+      id: 'gitlab-connection',
+      title: '连接与密钥',
+      description: '配置 GitLab 实例地址、API token 和专用 webhook secret。',
+      keys: ['review.baseUrl', 'review.tokenSecretRef', 'review.webhookSecretRef'],
+    },
+    {
+      id: 'gitlab-trigger',
+      title: '触发入口',
+      description: '配置评论触发词、自动审查开关和允许触发 review 的项目范围。',
+      keys: ['review.botMention', 'review.webhookAutoReview', 'review.allowedProjectIds'],
+    },
+    {
+      id: 'gitlab-review-policy',
+      title: '审查策略',
+      description: '控制是否启用 review、发布方式、行内评论和专用模型。',
+      keys: ['review.enabled', 'review.dryRun', 'review.inlineComments', 'review.modelProviderId', 'review.modelId'],
+    },
+    {
+      id: 'gitlab-page-context',
+      title: '页面上下文',
+      description: '控制浏览器插件采集 GitLab 页面上下文时允许的实例和补充信息。',
+      keys: ['allowedHosts', 'apiEnrichment'],
+    },
+  ].map((group) => {
+    const fields = group.keys
+      .map((key) => fieldsByKey.get(key))
+      .filter((field): field is PlatformConfigField => Boolean(field))
+    fields.forEach((field) => usedKeys.add(field.key))
+    return {
+      id: group.id,
+      title: group.title,
+      description: group.description,
+      fields,
+    }
+  }).filter((group) => group.fields.length > 0)
+
+  const otherFields = configFields.value.filter((field) => !usedKeys.has(field.key))
+  if (otherFields.length > 0) {
+    groups.push({
+      id: 'gitlab-other',
+      title: '其他配置',
+      description: '平台插件暴露的其他高级配置。',
+      fields: otherFields,
+    })
+  }
+  return groups
+})
 const operationLocked = computed(() => props.saving || Boolean(props.actionRunning))
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
@@ -253,9 +306,9 @@ async function copyGitLabWebhookUrl() {
   gitLabWebhookUrlMessage.value = ''
   try {
     await navigator.clipboard.writeText(gitLabReviewWebhookUrl.value)
-    gitLabWebhookUrlMessage.value = 'Webhook URL copied.'
+    gitLabWebhookUrlMessage.value = 'Webhook URL 已复制。'
   } catch {
-    gitLabWebhookUrlMessage.value = 'Copy failed. Select the URL and copy it manually.'
+    gitLabWebhookUrlMessage.value = '复制失败，请手动选中 URL 复制。'
   }
 }
 
@@ -574,36 +627,53 @@ function buildActionInput(action: PlatformActionDescriptor) {
 
           <div v-if="isGitLabPlatform" class="platform-section gitlab-review-guide">
             <div class="platform-section-heading-row">
-              <h5 class="platform-section-title">GitLab Code Review</h5>
+              <h5 class="platform-section-title">Webhook 触发入口</h5>
               <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}</code>
             </div>
+            <p class="gitlab-guide-intro text-muted text-sm">
+              这个 URL 是 GitLab 平台 review 的专用入口，可以同时填到多个 Project、Group 或 System Hook。Nine1Bot 会根据 GitLab payload 里的 project id 和允许项目列表判断是否处理。
+            </p>
             <div class="gitlab-webhook-url-box">
-              <span class="gitlab-guide-label">Dedicated Project Webhook URL</span>
+              <span class="gitlab-guide-label">专用 Webhook URL</span>
               <code class="gitlab-webhook-url">{{ gitLabReviewWebhookUrl }}</code>
               <div class="gitlab-webhook-actions">
                 <button type="button" class="btn btn-ghost btn-sm" @click="copyGitLabWebhookUrl">
                   <Copy :size="13" />
-                  <span>Copy URL</span>
+                  <span>复制 URL</span>
                 </button>
               </div>
               <span v-if="gitLabWebhookUrlMessage" class="gitlab-guide-text">{{ gitLabWebhookUrlMessage }}</span>
             </div>
+            <div class="gitlab-hook-mode-grid">
+              <div class="gitlab-hook-mode-card">
+                <span class="gitlab-guide-label">Project Hook</span>
+                <span class="gitlab-guide-text">适合少量项目测试。每个项目单独配置，边界最清楚。</span>
+              </div>
+              <div class="gitlab-hook-mode-card recommended">
+                <span class="gitlab-guide-label">Group Hook</span>
+                <span class="gitlab-guide-text">推荐团队使用。一个 group 配一次，组内项目共用同一个 URL。</span>
+              </div>
+              <div class="gitlab-hook-mode-card">
+                <span class="gitlab-guide-label">System Hook</span>
+                <span class="gitlab-guide-text">适合自托管管理员统一接入。事件范围最大，必须配合允许项目列表。</span>
+              </div>
+            </div>
             <div class="gitlab-guide-grid">
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">GitLab webhook</span>
-                <span class="gitlab-guide-text">Use a Project Webhook. Enable Comments or Note events for @Nine1bot review, and Merge request events for optional auto review.</span>
+                <span class="gitlab-guide-label">需要勾选的事件</span>
+                <span class="gitlab-guide-text">勾选 Comments / Note events 用于 @Nine1bot review。需要自动审查时，再勾选 Merge request events。</span>
               </div>
               <div class="gitlab-guide-item">
                 <span class="gitlab-guide-label">Secret token</span>
-                <span class="gitlab-guide-text">Leave GitLab's Secret token field empty when using this URL. The GitLab platform webhook secret is embedded in the path.</span>
+                <span class="gitlab-guide-text">使用上面的 path secret URL 时，GitLab 的 Secret token 字段留空。若改用 /webhooks/gitlab，则 Secret token 填同一个 webhook secret。</span>
               </div>
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Review model</span>
-                <span class="gitlab-guide-text">Choose a model from authenticated Chat providers. The default option follows the current default chat model. Available models: {{ authenticatedModelCount }}.</span>
+                <span class="gitlab-guide-label">项目范围</span>
+                <span class="gitlab-guide-text">同一个 URL 可以给多个项目共用；用允许项目列表限制真正会触发 review 的 project id。</span>
               </div>
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Fallback endpoint</span>
-                <span class="gitlab-guide-text">If the secret must stay in a header, call /webhooks/gitlab and set GitLab's Secret token to the same webhook secret.</span>
+                <span class="gitlab-guide-label">Review 模型</span>
+                <span class="gitlab-guide-text">模型来自已认证的 Chat providers。当前可选模型数：{{ authenticatedModelCount }}。</span>
               </div>
             </div>
           </div>
@@ -634,6 +704,9 @@ function buildActionInput(action: PlatformActionDescriptor) {
                 <span>{{ loadingGitLabRuns ? 'Loading' : 'Refresh' }}</span>
               </button>
             </div>
+            <p class="text-muted text-sm">
+              最近 8 条 review run。这里用于观察触发、运行、发布和失败回写状态；失败且尚未发布的 run 可以重试。
+            </p>
             <div v-if="gitLabRunsError" class="platform-alert warning">
               {{ gitLabRunsError }}
             </div>
@@ -697,9 +770,9 @@ function buildActionInput(action: PlatformActionDescriptor) {
             </div>
           </div>
 
-          <form v-if="selectedPlatform.config?.sections.length" class="platform-section" @submit.prevent="saveSettings">
-            <h5 class="platform-section-title">配置</h5>
-            <div v-for="section in selectedPlatform.config.sections" :key="section.id" class="platform-form-section">
+          <form v-if="configFormSections.length" class="platform-section" @submit.prevent="saveSettings">
+            <h5 class="platform-section-title">{{ isGitLabPlatform ? 'GitLab Review 配置' : '配置' }}</h5>
+            <div v-for="section in configFormSections" :key="section.id" class="platform-form-section">
               <div class="platform-form-section-header">
                 <span class="platform-form-section-title">{{ section.title }}</span>
                 <span v-if="section.description" class="text-muted text-sm">{{ section.description }}</span>
@@ -1064,6 +1137,10 @@ function buildActionInput(action: PlatformActionDescriptor) {
   gap: var(--space-sm);
 }
 
+.gitlab-guide-intro {
+  margin: 0;
+}
+
 .gitlab-webhook-url-box {
   display: flex;
   flex-direction: column;
@@ -1090,6 +1167,28 @@ function buildActionInput(action: PlatformActionDescriptor) {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs);
+}
+
+.gitlab-hook-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.gitlab-hook-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 76px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.gitlab-hook-mode-card.recommended {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-primary));
 }
 
 .gitlab-guide-item {
@@ -1405,6 +1504,11 @@ function buildActionInput(action: PlatformActionDescriptor) {
   }
 
   .platform-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gitlab-guide-grid,
+  .gitlab-hook-mode-grid {
     grid-template-columns: 1fr;
   }
 }
