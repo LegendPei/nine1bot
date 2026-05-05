@@ -157,6 +157,30 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
 
   const parsed = parseGitLabWebhookEvent(input.payload, settings)
   if (!parsed.ok) {
+    const rejectedMention = rejectedMentionCommentRequest({
+      payload: input.payload,
+      reason: parsed.reason,
+      settings,
+    })
+    if (rejectedMention) {
+      const duplicate = ReviewRunStore.findByIdempotencyKey(rejectedMention.idempotencyKey)
+      if (duplicate) {
+        return {
+          accepted: false,
+          status: 'rejected',
+          error: parsed.reason,
+          httpStatus: 202,
+          runId: duplicate.id,
+        }
+      }
+      const commented = await writeRejectedMentionComment({
+        request: rejectedMention,
+        settings,
+        secrets: input.secrets,
+        fetch: input.fetch,
+      })
+      return reject(202, parsed.reason, commented ? rejectedMention.idempotencyKey : undefined)
+    }
     await maybeWriteRejectedMentionComment({
       payload: input.payload,
       reason: parsed.reason,
@@ -453,24 +477,59 @@ async function maybeWriteRejectedMentionComment(input: {
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
 }): Promise<boolean> {
-  if (input.settings.dryRun) return false
+  const request = rejectedMentionCommentRequest(input)
+  if (!request) return false
+  return await writeRejectedMentionComment({
+    request,
+    settings: input.settings,
+    secrets: input.secrets,
+    fetch: input.fetch,
+  })
+}
+
+function rejectedMentionCommentRequest(input: {
+  payload: unknown
+  reason: string
+  settings: GitLabReviewSettings
+}): {
+  target: RejectedMentionTarget
+  body: string
+  idempotencyKey: string
+} | undefined {
+  if (input.settings.dryRun) return undefined
   const body = renderRejectedMentionComment(input.reason)
-  if (!body) return false
+  if (!body) return undefined
   const target = rejectedMentionTarget(input.payload, input.settings)
-  if (!target) return false
+  if (!target) return undefined
+  return {
+    target,
+    body,
+    idempotencyKey: buildRejectedMentionIdempotencyKey(input.reason, target),
+  }
+}
+
+async function writeRejectedMentionComment(input: {
+  request: {
+    target: RejectedMentionTarget
+    body: string
+  }
+  settings: GitLabReviewSettings
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+}): Promise<boolean> {
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return false
   const client = new GitLabApiClient({
-    baseUrl: input.settings.baseUrl ?? `https://${target.host}`,
+    baseUrl: input.settings.baseUrl ?? `https://${input.request.target.host}`,
     token,
     fetch: input.fetch,
   })
   try {
     await client.createNote({
-      projectId: target.projectId,
-      resource: target.resource,
-      resourceId: target.resourceId,
-      body,
+      projectId: input.request.target.projectId,
+      resource: input.request.target.resource,
+      resourceId: input.request.target.resourceId,
+      body: input.request.body,
     })
     return true
   } catch {
@@ -488,12 +547,15 @@ function gitLabReviewObject(trigger: GitLabReviewTrigger): { resource: 'merge_re
   return undefined
 }
 
-function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings): {
+type RejectedMentionTarget = {
   host: string
   projectId: string | number
   resource: 'merge_requests' | 'repository/commits'
   resourceId: string | number
-} | undefined {
+  noteId?: string | number
+}
+
+function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings): RejectedMentionTarget | undefined {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
   const record = payload as Record<string, unknown>
   if (stringValue(record.object_kind) !== 'note') return undefined
@@ -513,11 +575,24 @@ function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings)
   if (mergeRequest) {
     const mrIid = idValue(mergeRequest.iid)
     if (!mrIid) return undefined
-    return { host, projectId, resource: 'merge_requests', resourceId: mrIid }
+    return { host, projectId, resource: 'merge_requests', resourceId: mrIid, noteId: idValue(note?.id) }
   }
   const commitSha = stringValue(commit?.id) ?? stringValue(note?.commit_id)
   if (!commitSha) return undefined
-  return { host, projectId, resource: 'repository/commits', resourceId: commitSha }
+  return { host, projectId, resource: 'repository/commits', resourceId: commitSha, noteId: idValue(note?.id) }
+}
+
+function buildRejectedMentionIdempotencyKey(reason: string, target: RejectedMentionTarget) {
+  return [
+    'gitlab',
+    target.host,
+    target.projectId,
+    'rejected-mention',
+    target.resource,
+    target.resourceId,
+    target.noteId ? `note:${target.noteId}` : 'note:unknown',
+    reason,
+  ].join(':')
 }
 
 function isAllowedGitLabTarget(settings: GitLabReviewSettings, host: string, projectId: string | number) {
@@ -613,9 +688,10 @@ export async function resolveGitLabReviewSecret(
   return await secrets.get(ref satisfies PlatformSecretRef)
 }
 
-function reject(httpStatus: number, error: string): GitLabReviewWebhookResult {
+function reject(httpStatus: number, error: string, idempotencyKey?: string): GitLabReviewWebhookResult {
   const run = ReviewRunStore.create({
     platform: 'gitlab',
+    idempotencyKey,
     status: 'rejected',
     error,
   })

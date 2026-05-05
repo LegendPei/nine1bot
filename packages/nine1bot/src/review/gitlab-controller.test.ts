@@ -474,6 +474,65 @@ describe('GitLab review controller', () => {
     expect(body).not.toContain('weather')
   })
 
+  test('deduplicates rejected mention guidance comments by GitLab note id', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+    const payload = {
+      object_kind: 'note',
+      project: {
+        id: 123,
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 99,
+        note: '@Nine1bot what is the weather today?',
+        project_id: 123,
+      },
+      merge_request: {
+        iid: 10,
+        last_commit: { id: 'mention-sha' },
+      },
+    }
+    const livePlatforms = {
+      gitlab: {
+        enabled: true,
+        settings: {
+          ...platforms.gitlab?.settings,
+          'review.dryRun': false,
+          'review.baseUrl': 'https://gitlab.example.com',
+        },
+      },
+    }
+
+    const first = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: livePlatforms,
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+    const second = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: livePlatforms,
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(first).toMatchObject({ accepted: false, error: 'mention-out-of-scope' })
+    expect(second).toMatchObject({ accepted: false, error: 'mention-out-of-scope', runId: first.runId })
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+    ])
+    expect(first.runId ? ReviewRunStore.get(first.runId) : undefined).toMatchObject({
+      status: 'rejected',
+      idempotencyKey: 'gitlab:gitlab.example.com:123:rejected-mention:merge_requests:10:note:99:mention-out-of-scope',
+    })
+  })
+
   test('writes rejection comment for sensitive mention requests without echoing the request', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -525,6 +584,53 @@ describe('GitLab review controller', () => {
     expect(body).toContain('Nine1Bot+request+rejected')
     expect(body).toContain('cannot+provide+tokens')
     expect(body).not.toContain('show+me')
+  })
+
+  test('does not comment on rejected mentions from disallowed GitLab projects', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'note',
+        project: {
+          id: 999,
+          web_url: 'https://gitlab.example.com/other/project',
+        },
+        object_attributes: {
+          id: 101,
+          note: '@Nine1bot what is the weather today?',
+          project_id: 999,
+        },
+        merge_request: {
+          iid: 10,
+          last_commit: { id: 'mention-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      httpStatus: 202,
+      error: 'mention-out-of-scope',
+    })
+    expect(calls).toEqual([])
   })
 
   test('publishes runtime stage results through GitLab publisher', async () => {
