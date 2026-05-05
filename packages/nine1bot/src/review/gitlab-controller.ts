@@ -157,6 +157,13 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
 
   const parsed = parseGitLabWebhookEvent(input.payload, settings)
   if (!parsed.ok) {
+    await maybeWriteRejectedMentionComment({
+      payload: input.payload,
+      reason: parsed.reason,
+      settings,
+      secrets: input.secrets,
+      fetch: input.fetch,
+    })
     return reject(202, parsed.reason)
   }
 
@@ -439,6 +446,38 @@ async function maybeWriteFailureComment(input: {
   }
 }
 
+async function maybeWriteRejectedMentionComment(input: {
+  payload: unknown
+  reason: string
+  settings: GitLabReviewSettings
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+}): Promise<boolean> {
+  if (input.settings.dryRun) return false
+  const body = renderRejectedMentionComment(input.reason)
+  if (!body) return false
+  const target = rejectedMentionTarget(input.payload, input.settings)
+  if (!target) return false
+  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
+  if (!token) return false
+  const client = new GitLabApiClient({
+    baseUrl: input.settings.baseUrl ?? `https://${target.host}`,
+    token,
+    fetch: input.fetch,
+  })
+  try {
+    await client.createNote({
+      projectId: target.projectId,
+      resource: target.resource,
+      resourceId: target.resourceId,
+      body,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 function gitLabReviewObject(trigger: GitLabReviewTrigger): { resource: 'merge_requests' | 'repository/commits'; resourceId: string | number } | undefined {
   if (trigger.objectType === 'mr' && trigger.objectIid) {
     return { resource: 'merge_requests', resourceId: trigger.objectIid }
@@ -447,6 +486,45 @@ function gitLabReviewObject(trigger: GitLabReviewTrigger): { resource: 'merge_re
     return { resource: 'repository/commits', resourceId: trigger.commitSha }
   }
   return undefined
+}
+
+function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings): {
+  host: string
+  projectId: string | number
+  resource: 'merge_requests' | 'repository/commits'
+  resourceId: string | number
+} | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
+  const record = payload as Record<string, unknown>
+  if (stringValue(record.object_kind) !== 'note') return undefined
+  const project = recordValue(record.project)
+  const note = recordValue(record.object_attributes)
+  const mergeRequest = recordValue(record.merge_request)
+  const commit = recordValue(record.commit)
+  const projectId = idValue(project?.id ?? note?.project_id)
+  const host = hostFromUrl(
+    stringValue(project?.web_url) ??
+    stringValue(project?.git_http_url) ??
+    stringValue(project?.homepage) ??
+    settings.baseUrl,
+  )
+  if (!projectId || !host) return undefined
+  if (!isAllowedGitLabTarget(settings, host, projectId)) return undefined
+  if (mergeRequest) {
+    const mrIid = idValue(mergeRequest.iid)
+    if (!mrIid) return undefined
+    return { host, projectId, resource: 'merge_requests', resourceId: mrIid }
+  }
+  const commitSha = stringValue(commit?.id) ?? stringValue(note?.commit_id)
+  if (!commitSha) return undefined
+  return { host, projectId, resource: 'repository/commits', resourceId: commitSha }
+}
+
+function isAllowedGitLabTarget(settings: GitLabReviewSettings, host: string, projectId: string | number) {
+  const hostAllowed = settings.allowedHosts.length === 0 || settings.allowedHosts.includes(host)
+  const projectAllowed = settings.allowedProjectIds.length === 0 ||
+    settings.allowedProjectIds.map(String).includes(String(projectId))
+  return hostAllowed && projectAllowed
 }
 
 function renderFailureComment(phase: string, error: string) {
@@ -462,6 +540,28 @@ function renderFailureComment(phase: string, error: string) {
     '',
     'Please check the Nine1Bot review run logs, model configuration, GitLab token permissions, and retry the review after fixing the issue.',
   ].join('\n')
+}
+
+function renderRejectedMentionComment(reason: string): string | undefined {
+  if (reason === 'mention-out-of-scope') {
+    return [
+      '### Nine1Bot request ignored',
+      '',
+      'I only handle code review requests for the current merge request or commit.',
+      '',
+      'Try `@Nine1bot review`, or add a review focus such as `@Nine1bot focus on RBAC authorization and security risks`.',
+    ].join('\n')
+  }
+  if (reason === 'mention-sensitive-request') {
+    return [
+      '### Nine1Bot request rejected',
+      '',
+      'I cannot provide tokens, secrets, environment variables, system prompts, internal configuration, or other sensitive runtime data.',
+      '',
+      'Ask for a code review focus instead, such as `@Nine1bot check whether token storage is safe`.',
+    ].join('\n')
+  }
+  return undefined
 }
 
 async function loadLiveChanges(input: {
@@ -546,6 +646,30 @@ function extractDryRunChanges(payload: unknown): GitLabRawChangesResponse | unde
 
 function isRawChangesResponse(input: unknown): input is GitLabRawChangesResponse {
   return Boolean(input && typeof input === 'object' && !Array.isArray(input))
+}
+
+function recordValue(input: unknown): Record<string, unknown> | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  return input as Record<string, unknown>
+}
+
+function stringValue(input: unknown): string | undefined {
+  return typeof input === 'string' && input.length > 0 ? input : undefined
+}
+
+function idValue(input: unknown): string | number | undefined {
+  if (typeof input === 'string' && input.length > 0) return input
+  if (typeof input === 'number' && Number.isFinite(input)) return input
+  return undefined
+}
+
+function hostFromUrl(input: string | undefined): string | undefined {
+  if (!input) return undefined
+  try {
+    return new URL(input).hostname
+  } catch {
+    return undefined
+  }
 }
 
 function extractJsonCandidates(text: string): string[] {
