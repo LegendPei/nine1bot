@@ -9,11 +9,14 @@ import type {
   PlatformConfigField,
   PlatformDescriptor,
   PlatformRuntimeSourcesDescriptor,
+  PlatformRuntimeSourcesProvider,
   PlatformRuntimeStatus,
   PlatformSecretAccess,
   PlatformSecretRef,
   PlatformValidationResult,
 } from '@nine1bot/platform-protocol'
+import { normalize as normalizePath, posix as posixPath, win32 as win32Path } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { RuntimePlatformAdapterRegistry } from '../../../../opencode/packages/opencode/src/runtime/platform/adapter'
 import { RuntimeSourceRegistry } from '../../../../opencode/packages/opencode/src/runtime/source/registry'
 
@@ -84,6 +87,7 @@ export type PlatformRuntimeSourceSummary = {
   id: string
   directory: string
   namespace?: string
+  includeNamePrefix?: string
   visibility: string
   status: 'registered' | 'disabled' | 'error'
   error?: string
@@ -433,9 +437,26 @@ export class PlatformAdapterManager {
           updatedStatus: record.runtimeStatus,
         }
       }
+      let currentRecord = record
+      if (result.updatedSettings !== undefined) {
+        const previousEntry = this.config[id] ?? {}
+        const nextEntry = await this.prepareConfigEntry(record, previousEntry, {
+          settings: settingsRecord(result.updatedSettings),
+        })
+        const validation = await this.validateConfigEntry(record, nextEntry)
+        if (!validation.ok) {
+          throw new PlatformValidationError(validation.message ?? 'Invalid platform config', validation.fieldErrors ?? {})
+        }
+        this.configure({
+          ...this.config,
+          [id]: nextEntry,
+        })
+        this.registerRuntimeAdapters()
+        currentRecord = this.records.get(id) ?? currentRecord
+      }
       if (result.updatedStatus) {
         this.records.set(id, {
-          ...record,
+          ...currentRecord,
           lifecycleStatus: lifecycleStatusFromRuntime(result.updatedStatus.status),
           runtimeStatus: result.updatedStatus,
           error: result.updatedStatus.status === 'error' ? result.updatedStatus.message : undefined,
@@ -545,34 +566,30 @@ export class PlatformAdapterManager {
     }
   }
 
-  private registerRuntimeSources(record: PlatformManagerRecord, sources?: PlatformRuntimeSourcesDescriptor) {
+  private registerRuntimeSources(record: PlatformManagerRecord, sources?: PlatformRuntimeSourcesProvider) {
     RuntimeSourceRegistry.registerOwner({
       owner: {
         id: record.id,
         kind: 'platform',
         enabled: record.enabled,
       },
-      sources: sources
-        ? {
-            agents: sources.agents?.map((source) => ({ ...source })),
-            skills: sources.skills?.map((source) => ({ ...source })),
-          }
-        : undefined,
+      sources: normalizeRuntimeSources(this.resolveRuntimeSources(record, sources)),
     })
   }
 
   private runtimeSourcesForRecord(record: PlatformManagerRecord): PlatformRuntimeSourcesSummary | undefined {
     const contribution = this.contributions.get(record.id)
-    const sources = contribution?.runtime?.sources
+    const sources = this.resolveRuntimeSources(record, contribution?.runtime?.sources)
     if (!sources?.agents?.length && !sources?.skills?.length) return undefined
 
+    const normalizedSources = normalizeRuntimeSources(sources) ?? {}
     const registered = RuntimeSourceRegistry.listOwner(record.id)
     const status = runtimeSourceStatus(record)
     const registeredAgents = new Set(registered.agents.map((source) => source.id))
     const registeredSkills = new Set(registered.skills.map((source) => source.id))
 
     return {
-      agents: (sources.agents ?? []).map((source) => {
+      agents: (normalizedSources.agents ?? []).map((source) => {
         const sourceStatus = registeredAgents.has(source.id) ? 'registered' : status
         return {
           id: source.id,
@@ -583,18 +600,26 @@ export class PlatformAdapterManager {
           error: runtimeSourceError(record, source.id, sourceStatus),
         }
       }),
-      skills: (sources.skills ?? []).map((source) => {
+      skills: (normalizedSources.skills ?? []).map((source) => {
         const sourceStatus = registeredSkills.has(source.id) ? 'registered' : status
         return {
           id: source.id,
           directory: source.directory,
           namespace: source.namespace,
+          includeNamePrefix: source.includeNamePrefix,
           visibility: source.visibility,
           status: sourceStatus,
           error: runtimeSourceError(record, source.id, sourceStatus),
         }
       }),
     }
+  }
+
+  private resolveRuntimeSources(
+    record: PlatformManagerRecord,
+    sources?: PlatformRuntimeSourcesProvider,
+  ): PlatformRuntimeSourcesDescriptor | undefined {
+    return typeof sources === 'function' ? sources(this.createContext(record)) : sources
   }
 
   private async prepareConfigEntry(
@@ -799,6 +824,36 @@ function runtimeSourceStatus(record: PlatformManagerRecord): PlatformRuntimeSour
   if (record.lifecycleStatus === 'error') return 'error'
   if (!record.registered) return 'disabled'
   return 'error'
+}
+
+function normalizeRuntimeSources(sources?: PlatformRuntimeSourcesDescriptor): PlatformRuntimeSourcesDescriptor | undefined {
+  if (!sources) return undefined
+  return {
+    agents: sources.agents?.map((source) => normalizeRuntimeSource(source)),
+    skills: sources.skills?.map((source) => normalizeRuntimeSource(source)),
+  }
+}
+
+function normalizeRuntimeSource<T extends { directory: string }>(source: T): T {
+  return {
+    ...source,
+    directory: normalizeRuntimeSourceDirectory(source.directory),
+  }
+}
+
+function normalizeRuntimeSourceDirectory(directory: string): string {
+  const resolved = directory.startsWith('file://') ? fileURLToPath(directory) : directory
+
+  if (/^\/[A-Za-z]:[\\/]/.test(resolved)) {
+    return win32Path.normalize(resolved.slice(1))
+  }
+  if (/^[A-Za-z]:[\\/]/.test(resolved) || resolved.startsWith('\\\\')) {
+    return win32Path.normalize(resolved)
+  }
+  if (resolved.startsWith('/')) {
+    return posixPath.normalize(resolved)
+  }
+  return normalizePath(resolved)
 }
 
 function runtimeSourceError(

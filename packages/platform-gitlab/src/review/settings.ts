@@ -6,7 +6,6 @@ export type GitLabReviewSettings = {
   allowedProjectIds: Array<string | number>
   webhookSecretRef?: GitLabReviewSecretRef
   tokenSecretRef?: GitLabReviewSecretRef
-  webhookSourceId?: string
   manualMentionTrigger: boolean
   webhookAutoReview: boolean
   inlineComments: boolean
@@ -51,7 +50,6 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     allowedProjectIds: idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')),
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
-    webhookSourceId: optionalString(setting(record, 'review.webhookSourceId', 'webhookSourceId')),
     manualMentionTrigger: booleanValue(setting(record, 'review.manualMentionTrigger', 'manualMentionTrigger'), defaultGitLabReviewSettings.manualMentionTrigger),
     webhookAutoReview: booleanValue(setting(record, 'review.webhookAutoReview', 'webhookAutoReview'), defaultGitLabReviewSettings.webhookAutoReview),
     inlineComments: booleanValue(setting(record, 'review.inlineComments', 'inlineComments'), defaultGitLabReviewSettings.inlineComments),

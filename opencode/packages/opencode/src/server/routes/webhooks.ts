@@ -13,6 +13,7 @@ import {
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
+  resolveGitLabReviewSecret,
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
@@ -378,8 +379,8 @@ async function triggerGitLabReviewWebhook(c: any) {
   }
 
   const platforms = await readPlatformManagerConfig()
-  const linkedSource = await validateGitLabLinkedWebhookSource(c, platforms)
-  if ("response" in linkedSource) return linkedSource.response
+  const secretValidation = await validateGitLabDedicatedWebhookSecret(c, platforms)
+  if ("response" in secretValidation) return secretValidation.response
 
   let payload: unknown
   try {
@@ -393,7 +394,7 @@ async function triggerGitLabReviewWebhook(c: any) {
     headers: Webhook.normalizeHeaders(c.req.raw.headers),
     platforms,
     secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
-    ...(linkedSource.sourceID ? { verifiedWebhookSourceId: linkedSource.sourceID } : {}),
+    ...(secretValidation.verified ? { verifiedWebhookSecret: true } : {}),
   })
 
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
@@ -410,37 +411,18 @@ async function triggerGitLabReviewWebhook(c: any) {
   return c.json(result, result.accepted ? 202 : result.httpStatus as never)
 }
 
-async function validateGitLabLinkedWebhookSource(c: any, platforms: Awaited<ReturnType<typeof readPlatformManagerConfig>>) {
-  const sourceID = c.req.param?.("sourceID")
+async function validateGitLabDedicatedWebhookSecret(c: any, platforms: Awaited<ReturnType<typeof readPlatformManagerConfig>>) {
   const secret = c.req.param?.("secret")
-  if (!sourceID && !secret) return {}
-  if (!sourceID || !secret) {
-    return { response: c.json({ accepted: false, error: "webhook_source_secret_required" }, 400) }
-  }
+  if (!secret) return {}
 
-  const settings = platforms.gitlab?.settings ?? {}
-  const linkedSourceID = typeof settings["review.webhookSourceId"] === "string"
-    ? settings["review.webhookSourceId"]
-    : typeof settings.webhookSourceId === "string"
-      ? settings.webhookSourceId
-      : ""
-  if (linkedSourceID !== sourceID) {
-    return { response: c.json({ accepted: false, error: "gitlab_webhook_source_not_linked" }, 403) }
-  }
-
-  let source
-  try {
-    source = await Webhook.getSource(sourceID)
-  } catch {
-    return { response: c.json({ accepted: false, error: "webhook_source_not_found" }, 404) }
-  }
-  if (!source.enabled || source.deletedAt) {
-    return { response: c.json({ accepted: false, error: "webhook_source_disabled" }, 403) }
-  }
-  if (!Webhook.verifySecret(source, secret)) {
-    return { response: c.json({ accepted: false, error: "invalid_webhook_source_secret" }, 401) }
-  }
-  return { sourceID }
+  const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
+  const expectedSecret = await resolveGitLabReviewSecret(
+    settings.webhookSecretRef,
+    new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+  )
+  if (!expectedSecret) return { response: c.json({ accepted: false, error: "gitlab_webhook_secret_not_configured" }, 401) }
+  if (secret !== expectedSecret) return { response: c.json({ accepted: false, error: "invalid_gitlab_webhook_secret" }, 401) }
+  return { verified: true }
 }
 
 type AcceptedGitLabReviewWithContext = Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }> & {
@@ -632,8 +614,8 @@ export const WebhookPublicRoutes = lazy(() =>
   new Hono()
     .post("/gitlab", triggerGitLabReviewWebhook)
     .post(
-      "/gitlab/:sourceID/:secret",
-      validator("param", z.object({ sourceID: z.string(), secret: z.string() })),
+      "/gitlab/:secret",
+      validator("param", z.object({ secret: z.string() })),
       triggerGitLabReviewWebhook,
     )
     .post(

@@ -144,6 +144,7 @@ export type PlatformActionResult = {
   status: 'ok' | 'failed' | 'pending' | 'requires-user-action'
   message?: string
   openUrl?: string
+  data?: Record<string, unknown>
   updatedStatus?: PlatformRuntimeStatus
   updatedSettings?: unknown
 }
@@ -154,6 +155,7 @@ export type PlatformSkillSourceDescriptor = {
   id: string
   directory: string
   namespace?: string
+  includeNamePrefix?: string
   visibility: 'default' | 'declared-only'
   lifecycle: PlatformRuntimeSourceLifecycle
 }
@@ -171,11 +173,15 @@ export type PlatformRuntimeSourcesDescriptor = {
   skills?: PlatformSkillSourceDescriptor[]
 }
 
+export type PlatformRuntimeSourcesProvider =
+  | PlatformRuntimeSourcesDescriptor
+  | ((ctx: PlatformAdapterContext) => PlatformRuntimeSourcesDescriptor | undefined)
+
 export type PlatformAdapterContribution = {
   descriptor: PlatformDescriptor
   runtime?: {
     createAdapter: (ctx: PlatformAdapterContext) => PlatformRuntimeAdapter
-    sources?: PlatformRuntimeSourcesDescriptor
+    sources?: PlatformRuntimeSourcesProvider
   }
   getStatus?: (ctx: PlatformAdapterContext) => Promise<PlatformRuntimeStatus>
   validateConfig?: (settings: unknown, ctx: PlatformAdapterContext) => Promise<PlatformValidationResult>

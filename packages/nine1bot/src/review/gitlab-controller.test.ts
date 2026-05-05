@@ -126,6 +126,38 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('accepts dedicated GitLab webhook path secret without X-Gitlab-Token', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'path-secret-head' },
+        },
+        changes: {
+          changes: [
+            { old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+          ],
+        },
+      },
+      headers: {},
+      platforms,
+      secrets: memorySecrets,
+      verifiedWebhookSecret: true,
+    })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      status: 'dry-run',
+      idempotencyKey: 'gitlab:gitlab.example.com:123:mr:10:head_sha:path-secret-head:auto:merge_request',
+    })
+  })
+
   test('accepts merge request webhook and builds dry-run context when changes are supplied', async () => {
     const result = await handleGitLabReviewWebhook({
       payload: {

@@ -97,12 +97,6 @@ export const gitlabPlatformDescriptor = {
             description: 'Automatically review configured merge request webhook events.',
           },
           {
-            key: 'review.webhookSourceId',
-            type: 'string',
-            label: 'Automation webhook source',
-            description: 'Optional Automations webhook source linked to this GitLab review setup.',
-          },
-          {
             key: 'review.modelProviderId',
             type: 'string',
             label: 'Review model provider',
@@ -136,7 +130,7 @@ export const gitlabPlatformDescriptor = {
             key: 'review.webhookSecretRef',
             type: 'password',
             label: 'Webhook secret',
-            description: 'Secret used to validate X-Gitlab-Token.',
+            description: 'Secret embedded in the dedicated GitLab webhook URL, or used to validate X-Gitlab-Token when calling /webhooks/gitlab.',
             secret: true,
           },
           {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { CheckCircle2, CircleAlert, CircleSlash, Copy, KeyRound, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
-import { gitLabReviewApi, webhookApi, type GitLabReviewRun, type WebhookSource, type WebhookStatus } from '../api/client'
+import { CheckCircle2, CircleAlert, CircleSlash, Copy, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
+import { gitLabReviewApi, webhookApi, type GitLabReviewRun, type WebhookStatus } from '../api/client'
 import type {
   PlatformActionDescriptor,
   PlatformConfigField,
@@ -35,16 +35,13 @@ const formValues = reactive<Record<string, string | number | boolean>>({})
 const secretClears = reactive<Record<string, boolean>>({})
 const jsonErrors = reactive<Record<string, string>>({})
 const gitLabReviewRuns = ref<GitLabReviewRun[]>([])
-const webhookSources = ref<WebhookSource[]>([])
 const webhookStatus = ref<WebhookStatus | null>(null)
 const loadingGitLabRuns = ref(false)
-const loadingWebhookSources = ref(false)
-const refreshingGitLabWebhookSecret = ref(false)
 const gitLabRunsError = ref('')
-const webhookSourcesError = ref('')
 const gitLabWebhookUrlMessage = ref('')
-const generatedGitLabWebhookUrl = ref('')
 const retryingGitLabRunIds = ref<Set<string>>(new Set())
+const actionFormValues = reactive<Record<string, Record<string, string | number | boolean>>>({})
+const actionJsonErrors = reactive<Record<string, Record<string, string>>>({})
 
 const configFields = computed(() => {
   return props.selectedPlatform?.config?.sections.flatMap((section) => section.fields) ?? []
@@ -53,22 +50,17 @@ const operationLocked = computed(() => props.saving || Boolean(props.actionRunni
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
 const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.slice(0, 8))
-const gitLabWebhookPath = '/webhooks/gitlab'
-const gitLabWebhookSourceFieldKey = 'review.webhookSourceId'
+const gitLabWebhookPath = '/webhooks/gitlab/{webhookSecret}'
+const gitLabWebhookSecretFieldKey = 'review.webhookSecretRef'
 const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
 const gitLabReviewModelFieldKey = 'review.modelId'
-const selectedGitLabWebhookSource = computed(() => {
-  const sourceId = textValue(gitLabWebhookSourceFieldKey)
-  return webhookSources.value.find((source) => source.id === sourceId)
-})
 const authenticatedModelCount = computed(() => {
   return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
 })
 const gitLabReviewWebhookUrl = computed(() => {
-  if (generatedGitLabWebhookUrl.value) return generatedGitLabWebhookUrl.value
   const baseUrl = gitLabWebhookBaseUrl()
-  const sourceId = selectedGitLabWebhookSource.value?.id || '{sourceId}'
-  return `${baseUrl}/webhooks/gitlab/${sourceId}/{sourceSecret}`
+  const secret = textValue(gitLabWebhookSecretFieldKey).trim() || '{webhookSecret}'
+  return `${baseUrl}/webhooks/gitlab/${encodeURIComponent(secret)}`
 })
 
 watch(
@@ -77,15 +69,11 @@ watch(
     resetForm(platform)
     if (platform?.id === 'gitlab') {
       loadGitLabReviewRuns()
-      loadWebhookSources()
       loadWebhookStatus()
     } else {
       gitLabReviewRuns.value = []
       gitLabRunsError.value = ''
-      webhookSources.value = []
       webhookStatus.value = null
-      webhookSourcesError.value = ''
-      generatedGitLabWebhookUrl.value = ''
       gitLabWebhookUrlMessage.value = ''
     }
   },
@@ -97,6 +85,8 @@ function resetForm(platform: PlatformDetail | null) {
   for (const key of Object.keys(formValues)) delete formValues[key]
   for (const key of Object.keys(secretClears)) delete secretClears[key]
   for (const key of Object.keys(jsonErrors)) delete jsonErrors[key]
+  for (const key of Object.keys(actionFormValues)) delete actionFormValues[key]
+  for (const key of Object.keys(actionJsonErrors)) delete actionJsonErrors[key]
   if (!platform) return
 
   for (const field of configFields.value) {
@@ -114,6 +104,25 @@ function resetForm(platform: PlatformDetail | null) {
       formValues[field.key] = typeof value === 'number' ? value : ''
     } else {
       formValues[field.key] = typeof value === 'string' ? value : ''
+    }
+  }
+
+  for (const action of platform.actions) {
+    if (action.kind !== 'form' || !action.inputSchema) continue
+    actionFormValues[action.id] = {}
+    for (const field of actionFields(action)) {
+      const value = platform.settings[field.key]
+      if (field.type === 'string-list') {
+        actionFormValues[action.id][field.key] = Array.isArray(value) ? value.join('\n') : ''
+      } else if (field.type === 'json') {
+        actionFormValues[action.id][field.key] = value === undefined ? '' : JSON.stringify(value, null, 2)
+      } else if (field.type === 'boolean') {
+        actionFormValues[action.id][field.key] = typeof value === 'boolean' ? value : false
+      } else if (field.type === 'number') {
+        actionFormValues[action.id][field.key] = typeof value === 'number' ? value : ''
+      } else {
+        actionFormValues[action.id][field.key] = typeof value === 'string' ? value : ''
+      }
     }
   }
 }
@@ -208,10 +217,6 @@ function setTextValue(field: PlatformConfigField, event: Event) {
   }
 }
 
-function isGitLabWebhookSourceField(field: PlatformConfigField) {
-  return isGitLabPlatform.value && field.key === gitLabWebhookSourceFieldKey
-}
-
 function isGitLabReviewModelProviderField(field: PlatformConfigField) {
   return isGitLabPlatform.value && field.key === gitLabReviewModelProviderFieldKey
 }
@@ -299,6 +304,43 @@ function parseField(field: PlatformConfigField): { include: boolean; value?: unk
   return { include: true, value }
 }
 
+function parsePlainField(
+  field: PlatformConfigField,
+  values: Record<string, string | number | boolean>,
+): { include: boolean; value?: unknown; error?: string } {
+  const value = values[field.key]
+  if (field.type === 'string-list') {
+    const values = typeof value === 'string'
+      ? value.split('\n').map((item) => item.trim()).filter(Boolean)
+      : []
+    return { include: true, value: values }
+  }
+
+  if (field.type === 'json') {
+    if (typeof value !== 'string' || !value.trim()) return { include: true, value: null }
+    try {
+      return { include: true, value: JSON.parse(value) }
+    } catch {
+      return { include: false, error: 'JSON 格式不正确' }
+    }
+  }
+
+  if (field.type === 'select') {
+    return { include: true, value: typeof value === 'string' && value.trim() ? value.trim() : null }
+  }
+
+  if (field.type === 'number') {
+    if (value === '') return { include: true, value: null }
+    const numberValue = Number(value)
+    if (!Number.isFinite(numberValue)) return { include: false, error: '请输入有效数字' }
+    return { include: true, value: numberValue }
+  }
+
+  if (field.type === 'boolean') return { include: true, value: Boolean(value) }
+  if (typeof value === 'string') return { include: true, value: value.trim() }
+  return { include: true, value }
+}
+
 function buildSettingsPatch() {
   const settings: Record<string, unknown> = {}
   for (const key of Object.keys(jsonErrors)) delete jsonErrors[key]
@@ -330,7 +372,6 @@ function refreshStatus() {
   if (props.selectedPlatform) emit('refresh', props.selectedPlatform.id)
   if (isGitLabPlatform.value) {
     loadGitLabReviewRuns()
-    loadWebhookSources()
     loadWebhookStatus()
   }
 }
@@ -340,37 +381,6 @@ async function loadWebhookStatus() {
     webhookStatus.value = await webhookApi.status()
   } catch {
     webhookStatus.value = null
-  }
-}
-
-async function loadWebhookSources() {
-  loadingWebhookSources.value = true
-  webhookSourcesError.value = ''
-  try {
-    webhookSources.value = await webhookApi.sources()
-  } catch (error: any) {
-    webhookSourcesError.value = error?.message || 'Failed to load webhook sources'
-  } finally {
-    loadingWebhookSources.value = false
-  }
-}
-
-async function refreshGitLabWebhookSecret() {
-  const source = selectedGitLabWebhookSource.value
-  if (!source || refreshingGitLabWebhookSecret.value) return
-  refreshingGitLabWebhookSecret.value = true
-  gitLabWebhookUrlMessage.value = ''
-  try {
-    const refreshed = await webhookApi.refreshSecret(source.id)
-    const baseUrl = gitLabWebhookBaseUrl()
-    generatedGitLabWebhookUrl.value = `${baseUrl}/webhooks/gitlab/${refreshed.source.id}/${refreshed.secret}`
-    webhookSources.value = webhookSources.value.map((item) => item.id === refreshed.source.id ? refreshed.source : item)
-    await navigator.clipboard.writeText(generatedGitLabWebhookUrl.value).catch(() => undefined)
-    gitLabWebhookUrlMessage.value = 'Secret refreshed. Update the GitLab Project Webhook URL with the copied URL.'
-  } catch (error: any) {
-    gitLabWebhookUrlMessage.value = error?.message || 'Failed to refresh webhook secret.'
-  } finally {
-    refreshingGitLabWebhookSecret.value = false
   }
 }
 
@@ -434,12 +444,69 @@ function reviewRunDetail(run: GitLabReviewRun) {
 function runAction(action: PlatformActionDescriptor) {
   const platform = props.selectedPlatform
   if (!platform) return
+  const input = action.kind === 'form' ? buildActionInput(action) : undefined
+  if (input === undefined && action.kind === 'form') return
   let confirmed = false
   if (action.danger) {
     confirmed = window.confirm(`确认执行「${action.label}」？`)
     if (!confirmed) return
   }
-  emit('action', platform.id, action.id, undefined, action.danger ? confirmed : undefined)
+  emit('action', platform.id, action.id, input, action.danger ? confirmed : undefined)
+}
+
+function actionFields(action: PlatformActionDescriptor): PlatformConfigField[] {
+  return action.inputSchema?.sections.flatMap((section) => section.fields) ?? []
+}
+
+function ensureActionValues(action: PlatformActionDescriptor) {
+  if (!actionFormValues[action.id]) actionFormValues[action.id] = {}
+  return actionFormValues[action.id]
+}
+
+function actionTextValue(action: PlatformActionDescriptor, key: string) {
+  const value = ensureActionValues(action)[key]
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+function actionBooleanValue(action: PlatformActionDescriptor, key: string) {
+  return Boolean(ensureActionValues(action)[key])
+}
+
+function setActionTextValue(action: PlatformActionDescriptor, field: PlatformConfigField, event: Event) {
+  ensureActionValues(action)[field.key] = (event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value
+}
+
+function setActionBooleanValue(action: PlatformActionDescriptor, field: PlatformConfigField, event: Event) {
+  ensureActionValues(action)[field.key] = (event.target as HTMLInputElement).checked
+}
+
+function actionFieldError(action: PlatformActionDescriptor, key: string) {
+  return actionJsonErrors[action.id]?.[key]
+}
+
+function actionFieldId(action: PlatformActionDescriptor, field: PlatformConfigField) {
+  return `platform-action-${action.id.replace(/[^\w-]/g, '-')}-${field.key.replace(/[^\w-]/g, '-')}`
+}
+
+function buildActionInput(action: PlatformActionDescriptor) {
+  const values = ensureActionValues(action)
+  const errors: Record<string, string> = {}
+  const input: Record<string, unknown> = {}
+  for (const field of actionFields(action)) {
+    const parsed = parsePlainField(field, values)
+    if (parsed.error) {
+      errors[field.key] = parsed.error
+      continue
+    }
+    if (parsed.include) input[field.key] = parsed.value
+  }
+
+  if (Object.keys(errors).length > 0) {
+    actionJsonErrors[action.id] = errors
+    return undefined
+  }
+  delete actionJsonErrors[action.id]
+  return input
 }
 </script>
 
@@ -508,7 +575,7 @@ function runAction(action: PlatformActionDescriptor) {
           <div v-if="isGitLabPlatform" class="platform-section gitlab-review-guide">
             <div class="platform-section-heading-row">
               <h5 class="platform-section-title">GitLab Code Review</h5>
-              <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}/...</code>
+              <code class="gitlab-webhook-path">{{ gitLabWebhookPath }}</code>
             </div>
             <div class="gitlab-webhook-url-box">
               <span class="gitlab-guide-label">Dedicated Project Webhook URL</span>
@@ -517,15 +584,6 @@ function runAction(action: PlatformActionDescriptor) {
                 <button type="button" class="btn btn-ghost btn-sm" @click="copyGitLabWebhookUrl">
                   <Copy :size="13" />
                   <span>Copy URL</span>
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-sm"
-                  :disabled="!selectedGitLabWebhookSource || refreshingGitLabWebhookSecret"
-                  @click="refreshGitLabWebhookSecret"
-                >
-                  <KeyRound :size="13" />
-                  <span>{{ refreshingGitLabWebhookSecret ? 'Refreshing' : 'Refresh source secret' }}</span>
                 </button>
               </div>
               <span v-if="gitLabWebhookUrlMessage" class="gitlab-guide-text">{{ gitLabWebhookUrlMessage }}</span>
@@ -537,11 +595,15 @@ function runAction(action: PlatformActionDescriptor) {
               </div>
               <div class="gitlab-guide-item">
                 <span class="gitlab-guide-label">Secret token</span>
-                <span class="gitlab-guide-text">Leave GitLab's Secret token field empty when using this URL. The Automations source secret is already embedded in the path.</span>
+                <span class="gitlab-guide-text">Leave GitLab's Secret token field empty when using this URL. The GitLab platform webhook secret is embedded in the path.</span>
               </div>
               <div class="gitlab-guide-item">
                 <span class="gitlab-guide-label">Review model</span>
                 <span class="gitlab-guide-text">Choose a model from authenticated Chat providers. The default option follows the current default chat model. Available models: {{ authenticatedModelCount }}.</span>
+              </div>
+              <div class="gitlab-guide-item">
+                <span class="gitlab-guide-label">Fallback endpoint</span>
+                <span class="gitlab-guide-text">If the secret must stay in a header, call /webhooks/gitlab and set GitLab's Secret token to the same webhook secret.</span>
               </div>
             </div>
           </div>
@@ -653,26 +715,7 @@ function runAction(action: PlatformActionDescriptor) {
                 <span v-if="field.description" class="platform-field-desc text-muted text-sm">{{ field.description }}</span>
 
                 <select
-                  v-if="isGitLabWebhookSourceField(field)"
-                  :value="textValue(field.key)"
-                  class="input platform-input"
-                  :disabled="loadingWebhookSources"
-                  @change="setTextValue(field, $event)"
-                >
-                  <option value="">Not linked</option>
-                  <option v-for="source in webhookSources" :key="source.id" :value="source.id">
-                    {{ source.name }} ({{ source.enabled ? 'enabled' : 'disabled' }})
-                  </option>
-                </select>
-                <span v-if="isGitLabWebhookSourceField(field) && webhookSourcesError" class="platform-field-error">
-                  {{ webhookSourcesError }}
-                </span>
-                <span v-else-if="isGitLabWebhookSourceField(field)" class="platform-field-desc text-muted text-sm">
-                  Configure webhook sources in Automations, then link one here for traceability.
-                </span>
-
-                <select
-                  v-else-if="isGitLabReviewModelField(field)"
+                  v-if="isGitLabReviewModelField(field)"
                   :value="gitLabReviewModelValue()"
                   class="input platform-input"
                   @change="setGitLabReviewModel"
@@ -749,21 +792,84 @@ function runAction(action: PlatformActionDescriptor) {
           <div v-if="selectedPlatform.actions.length" class="platform-section">
             <h5 class="platform-section-title">操作</h5>
             <div class="platform-action-list">
-              <div v-for="action in selectedPlatform.actions" :key="action.id" class="platform-action-item">
-                <div>
-                  <div class="platform-action-title">{{ action.label }}</div>
-                  <div class="platform-action-desc text-muted text-sm">{{ action.description || action.id }}</div>
+              <form
+                v-for="action in selectedPlatform.actions"
+                :key="action.id"
+                class="platform-action-item"
+                @submit.prevent="runAction(action)"
+              >
+                <div class="platform-action-header">
+                  <div>
+                    <div class="platform-action-title">{{ action.label }}</div>
+                    <div class="platform-action-desc text-muted text-sm">{{ action.description || action.id }}</div>
+                  </div>
+                  <button
+                    class="btn btn-secondary btn-sm"
+                    :class="{ danger: action.danger }"
+                    :disabled="operationLocked"
+                    type="submit"
+                  >
+                    <Play :size="13" />
+                    <span>{{ actionRunning === action.id ? '执行中' : '执行' }}</span>
+                  </button>
                 </div>
-                <button
-                  class="btn btn-secondary btn-sm"
-                  :class="{ danger: action.danger }"
-                  :disabled="operationLocked"
-                  @click="runAction(action)"
-                >
-                  <Play :size="13" />
-                  <span>{{ actionRunning === action.id ? '执行中' : '执行' }}</span>
-                </button>
-              </div>
+
+                <div v-if="action.kind === 'form' && action.inputSchema" class="platform-action-form">
+                  <div v-for="section in action.inputSchema.sections" :key="section.id" class="platform-form-section compact">
+                    <div v-if="section.title || section.description" class="platform-form-section-header">
+                      <span v-if="section.title" class="platform-form-section-title">{{ section.title }}</span>
+                      <span v-if="section.description" class="text-muted text-sm">{{ section.description }}</span>
+                    </div>
+
+                    <div v-for="field in section.fields" :key="field.key" class="platform-field">
+                      <label class="platform-field-label" :for="actionFieldId(action, field)">{{ field.label }}</label>
+                      <span v-if="field.description" class="platform-field-desc text-muted text-sm">{{ field.description }}</span>
+
+                      <select
+                        v-if="field.type === 'select'"
+                        :id="actionFieldId(action, field)"
+                        :value="actionTextValue(action, field.key)"
+                        class="input platform-input"
+                        @change="setActionTextValue(action, field, $event)"
+                      >
+                        <option v-for="option in field.options || []" :key="option" :value="option">{{ option }}</option>
+                      </select>
+
+                      <label v-else-if="field.type === 'boolean'" class="platform-switch inline">
+                        <input
+                          :id="actionFieldId(action, field)"
+                          :checked="actionBooleanValue(action, field.key)"
+                          type="checkbox"
+                          @change="setActionBooleanValue(action, field, $event)"
+                        />
+                        <span>{{ actionBooleanValue(action, field.key) ? '开启' : '关闭' }}</span>
+                      </label>
+
+                      <textarea
+                        v-else-if="field.type === 'string-list' || field.type === 'json'"
+                        :id="actionFieldId(action, field)"
+                        :value="actionTextValue(action, field.key)"
+                        class="input platform-textarea"
+                        :placeholder="field.type === 'string-list' ? '每行一个值' : '{}'"
+                        @input="setActionTextValue(action, field, $event)"
+                      ></textarea>
+
+                      <input
+                        v-else
+                        :id="actionFieldId(action, field)"
+                        :value="actionTextValue(action, field.key)"
+                        class="input platform-input"
+                        :type="fieldInputType(field)"
+                        @input="setActionTextValue(action, field, $event)"
+                      />
+
+                      <span v-if="actionFieldError(action, field.key)" class="platform-field-error">
+                        {{ actionFieldError(action, field.key) }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </form>
             </div>
             <div v-if="actionResult" class="platform-alert" :class="actionResult.status === 'ok' ? 'success' : 'warning'">
               {{ actionResult.message || actionResult.status }}
@@ -1185,6 +1291,23 @@ function runAction(action: PlatformActionDescriptor) {
   border: 0.5px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.platform-action-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.platform-action-form {
+  margin-top: var(--space-sm);
+}
+
+.platform-form-section.compact {
+  padding: 10px;
 }
 
 .platform-event {

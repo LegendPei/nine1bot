@@ -9,8 +9,8 @@
 ```text
 GitLab MR 评论 @Nine1bot review
 -> Project Webhook Comments
--> /webhooks/gitlab/{sourceId}/{secret}
--> Automations source secret 校验
+-> /webhooks/gitlab/{webhookSecret}
+-> GitLab platform webhook secret 校验
 -> GitLab note payload 解析
 -> MR headSha + noteId 幂等 key
 -> GitLab API 拉取 MR changes
@@ -47,21 +47,21 @@ modelID=deepseek-chat
 
 这避免了 GitLab review 被全局默认模型绑定。本轮遇到的 Kimi 402 也由此绕开。
 
-### 2. GitLab 专用 webhook 桥接 Automations source
+### 2. GitLab 专用 webhook 桥接 GitLab platform webhook
 
 现在支持：
 
 ```text
-POST /webhooks/gitlab/{sourceId}/{secret}
+POST /webhooks/gitlab/{webhookSecret}
 ```
 
-该路由复用 Automations source 的 secret，但不会走普通 Automations prompt，而是进入 GitLab review 专用 controller。
+该路由复用 GitLab platform webhook 的 secret，但不会走普通 Automations prompt，而是进入 GitLab review 专用 controller。
 
 当前配置方式：
 
 - Automations 创建 webhook source。
-- Platforms -> GitLab 选择或填写 `review.webhookSourceId`。
-- GitLab Project Webhook URL 使用 `/webhooks/gitlab/{sourceId}/{secret}`。
+- GitLab ????? `review.webhookSecretRef`????? webhook URL?
+- GitLab Project Webhook URL 使用 `/webhooks/gitlab/{webhookSecret}`。
 - GitLab `Secret token` 可留空。
 
 这比单独维护 GitLab webhook secret 更贴合“Automations 管 webhook，Platforms 管平台能力”的方向。
@@ -116,12 +116,12 @@ POST /webhooks/gitlab/{sourceId}/{secret}
 
 平台页现在直接面向真实 GitLab 联调流程展示配置重点：
 
-- 显示 GitLab review 专用 Project Webhook URL：`/webhooks/gitlab/{sourceId}/{sourceSecret}`。
+- 显示 GitLab review 专用 Project Webhook URL：`/webhooks/gitlab/{webhookSecret}`。
 - 明确 GitLab 侧应使用 Project Webhook。
 - 明确勾选 `Comments` / `Note events`，用于 `@Nine1bot review` 触发。
 - 明确勾选 `Merge request events`，用于后续自动审查模式。
-- 明确 GitLab 的 `Secret token` 字段留空，因为 Automations source secret 已经在 URL path 中校验。
-- 支持刷新 linked Automations source secret，并生成新的完整 GitLab review URL。
+- 明确 GitLab 的 `Secret token` 字段留空，因为 GitLab platform webhook secret 已经在 URL path 中校验。
+- 支持刷新 linked GitLab platform webhook secret，并生成新的完整 GitLab review URL。
 - Review model 使用已认证 Chat providers 的模型下拉选择，不再要求用户手写 provider/model id。
 
 ### 8. PM 输出契约收紧
@@ -158,7 +158,7 @@ POST /webhooks/gitlab/{sourceId}/{secret}
 | GitLab 插件边界 | 已完成 | GitLab API、diff、event parser、publisher、agents、skills 都在 `packages/platform-gitlab`。 |
 | Runtime 不绑定 GitLab 类型 | 基本完成 | Runtime route 启动通用 session；GitLab 类型校验和发布在 controller/platform 层。仍有 route import controller 的工程边界可后续再抽。 |
 | Web UI 显式启用 | 已完成 | `review.enabled` 默认关闭，Platforms 页面可配置。 |
-| Automations source 绑定 | 已完成 | GitLab review 可绑定 Automations webhook source，并使用专用桥接 URL。 |
+| GitLab platform webhook 绑定 | 已完成 | GitLab review 可绑定 GitLab platform webhook，并使用专用桥接 URL。 |
 | Bot mention 触发 | 已真实验证 | MR 评论 `@Nine1bot review` 已触发真实 review run。 |
 | MR webhook 自动触发 | 代码已支持 | `review.webhookAutoReview` 控制；真实联调主要验证了 comment trigger。 |
 | GitLab API token 检查 | 已完成 | 连接测试会检查 token self、active/revoked、`api` scope。 |
@@ -254,7 +254,7 @@ timeoutMs: number
 - GitLab 默认可能禁止内网 webhook，需要开启 outbound local network。
 - Project Webhook 和 System Hook 容易混淆。
 - GitLab `Secret token` 字段容易和 URL path secret 混淆。
-- Automations source secret 刷新后，GitLab webhook URL 必须同步替换。
+- GitLab platform webhook secret 刷新后，GitLab webhook URL 必须同步替换。
 
 建议在 GitLab 平台页继续优化：
 

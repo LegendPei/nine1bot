@@ -3,7 +3,6 @@ import {
   normalizeRuntimeEventEnvelope,
   type RuntimeEventEnvelope,
 } from './runtime-events'
-import { gitLabTemplateIdsForPage } from '@nine1bot/platform-gitlab/browser'
 import type { RequestPagePayload } from './page-context'
 
 const BASE_URL = ''  // 使用相对路径，由 vite proxy 或同源处理
@@ -81,14 +80,10 @@ function controllerEntry(page?: RequestPagePayload) {
     }
   }
 
-  const templateIds = ['default-user-template', 'browser-generic']
-  templateIds.push(...gitLabTemplateIdsForPage(page))
-
   return {
     source: 'browser-extension',
     platform: page.platform,
     mode: 'browser-sidepanel',
-    templateIds,
   }
 }
 
@@ -158,6 +153,21 @@ export interface SessionRuntimeSummary {
     modelID: string
     source?: string
   }
+}
+
+export interface ContextEnrichmentSummary {
+  platform: string
+  status: string
+  message: string
+  tone?: 'neutral' | 'success' | 'warning' | 'danger'
+}
+
+export interface MessageSendResult {
+  accepted: boolean
+  sessionId: string
+  turnSnapshotId?: string
+  busy?: boolean
+  contextEnrichment?: ContextEnrichmentSummary
 }
 
 export interface MetricsOverview {
@@ -840,7 +850,7 @@ export const api = {
     content: string,
     files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>,
     pageContext?: RequestPagePayload
-  ): Promise<{ accepted: boolean; sessionId: string; turnSnapshotId?: string; busy?: boolean }> {
+  ): Promise<MessageSendResult> {
     const parts: any[] = []
 
     if (content.trim()) {
@@ -1866,6 +1876,7 @@ export interface PlatformRuntimeSourceSummary {
   id: string
   directory: string
   namespace?: string
+  includeNamePrefix?: string
   visibility: string
   status: 'registered' | 'disabled' | 'error'
   error?: string
@@ -1922,6 +1933,7 @@ export interface PlatformActionResult {
   status: 'ok' | 'failed' | 'pending' | 'requires-user-action'
   message?: string
   openUrl?: string
+  data?: Record<string, unknown>
   updatedStatus?: PlatformRuntimeStatus
   updatedSettings?: unknown
 }

@@ -23,7 +23,7 @@ export type GitLabReviewWebhookInput = {
   headers: Record<string, string | undefined>
   platforms: PlatformManagerConfig
   secrets: PlatformSecretAccess
-  verifiedWebhookSourceId?: string
+  verifiedWebhookSecret?: boolean
   fetch?: typeof fetch
 }
 
@@ -113,7 +113,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     return reject(403, 'gitlab_review_disabled')
   }
 
-  if (!settings.webhookSourceId || input.verifiedWebhookSourceId !== settings.webhookSourceId) {
+  if (!input.verifiedWebhookSecret) {
     const expectedSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, input.secrets)
     const tokenValidation = validateGitLabWebhookToken({
       expectedSecret,
