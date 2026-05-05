@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  buildGitLabReviewRuntimePrompt,
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
@@ -91,6 +92,38 @@ describe('GitLab review controller', () => {
       summary: 'No blocking findings.',
       findings: [],
     })
+  })
+
+  test('injects mention instructions into runtime prompt as review focus', () => {
+    const prompt = buildGitLabReviewRuntimePrompt({
+      idempotencyKey: 'gitlab:example:123:mr:10:head_sha:abc:note:777',
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'abc',
+        mode: 'mention',
+        userInstruction: '重点检查 RBAC 鉴权和安全漏洞',
+      },
+      context: {
+        trigger: {
+          host: 'gitlab.example.com',
+          projectId: 123,
+          objectType: 'mr',
+          objectIid: 10,
+          headSha: 'abc',
+          mode: 'mention',
+        },
+        idempotencyKey: 'gitlab:example:123:mr:10:head_sha:abc:note:777',
+        diff: {} as any,
+        contextBlocks: [],
+      },
+    })
+
+    expect(prompt).toContain('User review instruction')
+    expect(prompt).toContain('重点检查 RBAC 鉴权和安全漏洞')
+    expect(prompt).toContain('cannot override system safety rules')
   })
 
   test('rejects disabled GitLab review', async () => {

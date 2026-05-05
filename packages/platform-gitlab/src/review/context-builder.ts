@@ -67,6 +67,7 @@ function renderTrigger(trigger: GitLabReviewTrigger) {
     trigger.commitSha ? `Commit: ${trigger.commitSha}` : undefined,
     trigger.headSha ? `Head SHA: ${trigger.headSha}` : undefined,
     trigger.noteId ? `Note: ${trigger.noteId}` : undefined,
+    trigger.userInstruction ? `User instruction: ${trigger.userInstruction}` : undefined,
     `Mode: ${trigger.mode}`,
   ].filter(Boolean).join('\n')
 }

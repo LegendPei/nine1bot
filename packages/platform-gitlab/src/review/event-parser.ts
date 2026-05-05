@@ -48,7 +48,8 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const mergeRequest = recordValue(payload.merge_request)
   const commit = recordValue(payload.commit)
   const noteText = stringValue(note?.note)
-  if (!noteText || !noteText.includes(settings.botMention)) return { ok: false, reason: 'mention-not-found' }
+  const mention = noteText ? extractMentionInstruction(noteText, settings.botMention) : undefined
+  if (!noteText || !mention) return { ok: false, reason: 'mention-not-found' }
 
   const projectId = idValue(project?.id ?? note?.project_id)
   const host = hostFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
@@ -69,6 +70,7 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
         objectIid: mrIid,
         headSha,
         noteId: idValue(note?.id),
+        ...instructionFields(mention.instruction, note),
         eventName: 'note',
         mode: 'mention',
       },
@@ -86,10 +88,46 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
       objectType: 'commit',
       commitSha,
       noteId: idValue(note?.id),
+      ...instructionFields(mention.instruction, note),
       eventName: 'note',
       mode: 'mention',
     },
   }
+}
+
+function instructionFields(instruction: string | undefined, note: Record<string, unknown>) {
+  if (!instruction) return {}
+  return {
+    userInstruction: instruction,
+    instructionSource: {
+      noteId: idValue(note.id),
+      author: authorName(note),
+      rawBody: stringValue(note.note),
+    },
+  }
+}
+
+export function extractMentionInstruction(noteText: string, botMention: string) {
+  const mentionIndex = noteText.indexOf(botMention)
+  if (mentionIndex < 0) return undefined
+  const afterMention = noteText.slice(mentionIndex + botMention.length)
+  const instruction = normalizeReviewInstruction(afterMention)
+  return { instruction }
+}
+
+function normalizeReviewInstruction(input: string) {
+  const cleaned = input
+    .replace(/^[\s,，:：;；\-—]+/, '')
+    .replace(/^review\b[\s,，:：;；\-—]*/i, '')
+    .replace(/^please\b[\s,，:：;；\-—]*/i, '')
+    .trim()
+  if (!cleaned) return undefined
+  return cleaned.length > 1000 ? `${cleaned.slice(0, 1000)}...` : cleaned
+}
+
+function authorName(note: Record<string, unknown>) {
+  const author = recordValue(note.author)
+  return stringValue(author?.username) ?? stringValue(author?.name)
 }
 
 function isAllowed(settings: GitLabReviewSettings, host: string, projectId: string | number) {

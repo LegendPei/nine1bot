@@ -13,6 +13,12 @@ export type GitLabReviewTrigger = {
   noteId?: string | number
   eventName?: string
   mode: GitLabReviewTriggerMode
+  userInstruction?: string
+  instructionSource?: {
+    noteId?: string | number
+    author?: string
+    rawBody?: string
+  }
 }
 
 export type GitLabDiffRefs = {

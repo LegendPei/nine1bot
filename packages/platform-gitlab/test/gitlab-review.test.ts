@@ -250,7 +250,10 @@ describe('GitLab review foundation', () => {
       },
       object_attributes: {
         id: 777,
-        note: '@Nine1bot review this',
+        note: '@Nine1bot, 这是一个优化 RBAC 鉴权的 MR，请帮我对安全性漏洞进行重点检查',
+        author: {
+          username: 'alice',
+        },
       },
       merge_request: {
         iid: 10,
@@ -271,6 +274,11 @@ describe('GitLab review foundation', () => {
         headSha: 'abc123',
         noteId: 777,
         mode: 'mention',
+        userInstruction: '这是一个优化 RBAC 鉴权的 MR，请帮我对安全性漏洞进行重点检查',
+        instructionSource: {
+          noteId: 777,
+          author: 'alice',
+        },
       },
     })
   })
@@ -285,7 +293,7 @@ describe('GitLab review foundation', () => {
       },
       object_attributes: {
         id: 778,
-        note: '@Nine1bot review commit',
+        note: '@Nine1bot review commit security focus',
       },
       commit: {
         id: 'commit123',
@@ -304,6 +312,7 @@ describe('GitLab review foundation', () => {
         commitSha: 'commit123',
         noteId: 778,
         mode: 'mention',
+        userInstruction: 'commit security focus',
       },
     })
   })
@@ -316,6 +325,7 @@ describe('GitLab review foundation', () => {
         objectType: 'mr',
         objectIid: 10,
         headSha: 'abc123',
+        userInstruction: 'Focus on auth and RBAC.',
         mode: 'webhook',
       },
       changes: {
@@ -328,6 +338,7 @@ describe('GitLab review foundation', () => {
       'platform.gitlab.review.trigger',
       'platform.gitlab.review.diff',
     ])
+    expect(context.contextBlocks[0]?.content).toContain('User instruction: Focus on auth and RBAC.')
   })
 
   test('publishes valid inline comments and one summary note', async () => {
