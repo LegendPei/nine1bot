@@ -14,6 +14,8 @@ export type GitLabReviewTrigger = {
   eventName?: string
   mode: GitLabReviewTriggerMode
   userInstruction?: string
+  instructionRisk?: 'normal' | 'prompt-injection-suspected'
+  focusTags?: string[]
   instructionSource?: {
     noteId?: string | number
     author?: string

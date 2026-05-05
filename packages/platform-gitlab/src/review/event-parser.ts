@@ -50,6 +50,8 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const noteText = stringValue(note?.note)
   const mention = noteText ? extractMentionInstruction(noteText, settings.botMention) : undefined
   if (!noteText || !mention) return { ok: false, reason: 'mention-not-found' }
+  const intent = classifyMentionIntent(mention.instruction)
+  if (intent.kind !== 'review') return { ok: false, reason: `mention-${intent.kind}` }
 
   const projectId = idValue(project?.id ?? note?.project_id)
   const host = hostFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
@@ -70,7 +72,7 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
         objectIid: mrIid,
         headSha,
         noteId: idValue(note?.id),
-        ...instructionFields(mention.instruction, note),
+        ...instructionFields(intent, note),
         eventName: 'note',
         mode: 'mention',
       },
@@ -88,17 +90,35 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
       objectType: 'commit',
       commitSha,
       noteId: idValue(note?.id),
-      ...instructionFields(mention.instruction, note),
+      ...instructionFields(intent, note),
       eventName: 'note',
       mode: 'mention',
     },
   }
 }
 
-function instructionFields(instruction: string | undefined, note: Record<string, unknown>) {
-  if (!instruction) return {}
+type MentionIntent =
+  | {
+      kind: 'review'
+      instruction?: string
+      focusTags: string[]
+      risk: 'normal' | 'prompt-injection-suspected'
+    }
+  | {
+      kind: 'out-of-scope'
+      reason: string
+    }
+  | {
+      kind: 'sensitive-request'
+      reason: string
+    }
+
+function instructionFields(intent: Extract<MentionIntent, { kind: 'review' }>, note: Record<string, unknown>) {
+  if (!intent.instruction && intent.risk === 'normal' && intent.focusTags.length === 0) return {}
   return {
-    userInstruction: instruction,
+    ...(intent.instruction ? { userInstruction: intent.instruction } : {}),
+    instructionRisk: intent.risk,
+    focusTags: intent.focusTags,
     instructionSource: {
       noteId: idValue(note.id),
       author: authorName(note),
@@ -115,6 +135,26 @@ export function extractMentionInstruction(noteText: string, botMention: string) 
   return { instruction }
 }
 
+export function classifyMentionIntent(instruction: string | undefined): MentionIntent {
+  if (!instruction) return { kind: 'review', focusTags: [], risk: 'normal' }
+  const text = instruction.toLowerCase()
+  if (isSensitiveExfiltrationRequest(text)) {
+    return { kind: 'sensitive-request', reason: 'sensitive-information-requested' }
+  }
+
+  const focusTags = reviewFocusTags(text)
+  const risk = hasPromptInjectionMarkers(text) ? 'prompt-injection-suspected' : 'normal'
+  if (focusTags.length === 0 && !hasGeneralReviewIntent(text)) {
+    return { kind: 'out-of-scope', reason: 'not-a-code-review-request' }
+  }
+  return {
+    kind: 'review',
+    instruction,
+    focusTags,
+    risk,
+  }
+}
+
 function normalizeReviewInstruction(input: string) {
   const cleaned = input
     .replace(/^[\s,，:：;；\-—]+/, '')
@@ -123,6 +163,101 @@ function normalizeReviewInstruction(input: string) {
     .trim()
   if (!cleaned) return undefined
   return cleaned.length > 1000 ? `${cleaned.slice(0, 1000)}...` : cleaned
+}
+
+function isSensitiveExfiltrationRequest(text: string) {
+  const sensitiveTerms = [
+    'token',
+    'secret',
+    'api key',
+    'apikey',
+    'password',
+    'passwd',
+    'env',
+    'environment variable',
+    'system prompt',
+    'developer message',
+    'nine1bot_platform_secrets_path',
+    'gitlab_token',
+    '密钥',
+    '令牌',
+    '密码',
+    '环境变量',
+    '系统提示词',
+    '开发者消息',
+  ]
+  const exfiltrationTerms = [
+    'show',
+    'print',
+    'display',
+    'reveal',
+    'leak',
+    'send',
+    'give me',
+    'dump',
+    '输出',
+    '打印',
+    '显示',
+    '发给我',
+    '给我',
+    '泄露',
+    '暴露',
+    '展示',
+  ]
+  return sensitiveTerms.some((term) => text.includes(term)) &&
+    exfiltrationTerms.some((term) => text.includes(term))
+}
+
+function reviewFocusTags(text: string) {
+  const tagTerms: Array<[string, string[]]> = [
+    ['security', ['security', 'vulnerability', '漏洞', '安全', 'xss', 'csrf', 'ssrf']],
+    ['auth', ['auth', 'authentication', 'authorization', 'permission', 'rbac', '鉴权', '认证', '权限']],
+    ['token-safety', ['token storage', 'token 使用', 'token 安全', 'token 存储', 'secret storage', '密钥存储']],
+    ['sql', ['sql', 'injection', '注入']],
+    ['performance', ['performance', 'perf', '性能', '并发', '缓存']],
+    ['test', ['test', 'tests', '测试', '用例']],
+    ['architecture', ['architecture', '架构', '设计']],
+    ['frontend', ['frontend', 'ui', 'ux', '前端', '交互', '样式']],
+    ['bug', ['bug', 'bugs', 'defect', '错误', '缺陷', '问题']],
+    ['review', ['review', 'code review', 'mr', 'merge request', 'commit', 'diff', '审查', '检查', '代码', '变更']],
+  ]
+  const tags = tagTerms
+    .filter(([, terms]) => terms.some((term) => text.includes(term)))
+    .map(([tag]) => tag)
+  return Array.from(new Set(tags))
+}
+
+function hasGeneralReviewIntent(text: string) {
+  return [
+    'review',
+    'check',
+    'inspect',
+    'scan',
+    'look at',
+    '看看',
+    '看一下',
+    '帮我看',
+    '审查',
+    '检查',
+    '代码',
+    '变更',
+  ].some((term) => text.includes(term))
+}
+
+function hasPromptInjectionMarkers(text: string) {
+  return [
+    'ignore previous instructions',
+    'ignore all previous',
+    'system prompt',
+    'developer message',
+    'gitlab_review_result',
+    '```',
+    '忽略之前',
+    '不要遵守',
+    '你现在是',
+    '直接输出',
+    '系统提示词',
+  ].some((term) => text.includes(term))
 }
 
 function authorName(note: Record<string, unknown>) {
