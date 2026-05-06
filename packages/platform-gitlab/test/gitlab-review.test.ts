@@ -539,14 +539,16 @@ describe('GitLab review foundation', () => {
       }],
     })
     const calls: string[] = []
+    const notes: string[] = []
     const result = await publishGitLabReviewResult({
       client: {
         async createDiscussion() {
           calls.push('discussion')
           return {}
         },
-        async createNote() {
+        async createNote(input) {
           calls.push('note')
+          notes.push(input.body)
           return {}
         },
       },
@@ -567,6 +569,10 @@ describe('GitLab review foundation', () => {
 
     expect(result).toMatchObject({ summaryPosted: true, inlinePosted: 1, fallbackPosted: 0 })
     expect(calls).toEqual(['discussion', 'note'])
+    expect(notes[0]).toContain('### Inline Comments')
+    expect(notes[0]).toContain('Changed line')
+    expect(notes[0]).toContain('src/app.ts:2')
+    expect(notes[0]).not.toContain('Inline body')
   })
 
   test('serializes GitLab inline positions as nested form fields', async () => {
@@ -726,7 +732,8 @@ describe('GitLab review foundation', () => {
     })
 
     expect(result.fallbackPosted).toBe(1)
-    expect(notes[0]).toContain('Inline Fallbacks')
+    expect(notes[0]).toContain('### Findings')
+    expect(notes[0]).toContain('Fallback body')
   })
 
   test('renders top-level findings with file groups and diff evidence snippets', async () => {

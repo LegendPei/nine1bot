@@ -14,15 +14,18 @@ export function renderReviewSummaryComment(input: {
   title?: string
   summary: string
   findings: AggregatedReviewFinding[]
+  inlineFindings?: AggregatedReviewFinding[]
   manifest?: GitLabDiffManifest
   warnings?: string[]
 }) {
+  const inlineFindings = input.inlineFindings ?? []
+  const findingCount = input.findings.length + inlineFindings.length
   const lines = [
     `## ${input.title ?? 'Nine1bot GitLab Review'}`,
     '',
     input.summary,
     '',
-    `Findings: ${input.findings.length}`,
+    `Findings: ${findingCount}`,
   ]
 
   if (input.manifest) {
@@ -36,12 +39,21 @@ export function renderReviewSummaryComment(input: {
     lines.push('', '### Warnings', ...input.warnings.map((warning) => `- ${warning}`))
   }
 
+  if (inlineFindings.length) {
+    lines.push('', '### Inline Comments')
+    lines.push('', `${inlineFindings.length} finding${inlineFindings.length === 1 ? '' : 's'} were posted as GitLab diff threads.`)
+    for (const finding of inlineFindings) {
+      const location = findingLocation(finding)
+      lines.push(`- **${finding.severity.toUpperCase()}** ${finding.title}${location ? ` (${location})` : ''}`)
+    }
+  }
+
   if (input.findings.length) {
-    lines.push('', '### Findings')
+    lines.push('', inlineFindings.length ? '### Summary Findings' : '### Findings')
     for (const group of groupFindingsByFile(input.findings)) {
       lines.push('', `#### ${group.file ? `\`${group.file}\`` : 'General'}`)
       for (const finding of group.findings) {
-        const location = finding.newLine || finding.oldLine ? `:${finding.newLine ?? finding.oldLine}` : ''
+        const location = findingLocation(finding)
         lines.push(
           '',
           `- **${finding.severity.toUpperCase()}** ${finding.title}${location ? ` (${location})` : ''}`,
@@ -64,6 +76,14 @@ export function renderReviewSummaryComment(input: {
   }
 
   return lines.join('\n')
+}
+
+function findingLocation(finding: AggregatedReviewFinding) {
+  if (!finding.file && !finding.newLine && !finding.oldLine) return ''
+  const line = finding.newLine ?? finding.oldLine
+  if (finding.file && line !== undefined) return `${finding.file}:${line}`
+  if (finding.file) return finding.file
+  return line !== undefined ? `:${line}` : ''
 }
 
 function groupFindingsByFile(findings: AggregatedReviewFinding[]) {
