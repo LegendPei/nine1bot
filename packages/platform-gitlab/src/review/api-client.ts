@@ -37,6 +37,16 @@ export type GitLabProjectHook = {
   enable_ssl_verification?: boolean
 }
 
+export type GitLabProjectSummary = {
+  id: number
+  path_with_namespace?: string
+  web_url?: string
+  name?: string
+  namespace?: {
+    full_path?: string
+  }
+}
+
 export type GitLabProjectHookInput = {
   projectId: string | number
   url: string
@@ -86,6 +96,15 @@ export class GitLabApiClient {
 
   async getTokenSelf(): Promise<GitLabTokenSelf> {
     return await this.request<GitLabTokenSelf>('/api/v4/personal_access_tokens/self')
+  }
+
+  async searchProjects(query: string, limit = 20): Promise<GitLabProjectSummary[]> {
+    const params = new URLSearchParams({
+      simple: 'true',
+      per_page: String(limit),
+    })
+    if (query.trim()) params.set('search', query.trim())
+    return await this.request<GitLabProjectSummary[]>(`/api/v4/projects?${params}`)
   }
 
   async listProjectHooks(projectId: string | number): Promise<GitLabProjectHook[]> {

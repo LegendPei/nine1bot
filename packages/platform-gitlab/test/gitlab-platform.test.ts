@@ -291,6 +291,50 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('searches GitLab projects for review scope selection', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push(url)
+      return jsonResponse([{
+        id: 3,
+        path_with_namespace: 'root/uftest',
+        web_url: 'https://gitlab.example.com/root/uftest',
+      }])
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('projects.search', { query: 'uftest' }, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+        },
+        features: {},
+        env: {},
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'ok',
+        data: {
+          projects: [{
+            id: 3,
+            pathWithNamespace: 'root/uftest',
+            webUrl: 'https://gitlab.example.com/root/uftest',
+          }],
+        },
+      })
+      expect(calls).toEqual(['https://gitlab.example.com/api/v4/projects?simple=true&per_page=20&search=uftest'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('declares concrete GitLab review subagents for runtime task delegation', async () => {
     const files = await readdir(reviewAgentsDir)
     expect(files).toEqual(expect.arrayContaining([

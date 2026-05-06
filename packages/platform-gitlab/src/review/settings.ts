@@ -4,6 +4,9 @@ export type GitLabReviewSettings = {
   botMention: string
   allowedHosts: string[]
   allowedProjectIds: Array<string | number>
+  scopeMode: GitLabReviewScopeMode
+  includedProjects: GitLabProjectRef[]
+  excludedProjects: GitLabProjectRef[]
   webhookSecretRef?: GitLabReviewSecretRef
   tokenSecretRef?: GitLabReviewSecretRef
   manualMentionTrigger: boolean
@@ -17,6 +20,14 @@ export type GitLabReviewSettings = {
   modelId?: string
 }
 
+export type GitLabReviewScopeMode = 'all-received' | 'selected-only'
+
+export type GitLabProjectRef = {
+  id: string | number
+  pathWithNamespace?: string
+  webUrl?: string
+}
+
 export type GitLabReviewSecretRef = string | {
   provider: 'nine1bot-local' | 'env' | 'external'
   key: string
@@ -28,6 +39,9 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   botMention: '@Nine1bot',
   allowedHosts: [],
   allowedProjectIds: [],
+  scopeMode: 'all-received',
+  includedProjects: [],
+  excludedProjects: [],
   manualMentionTrigger: true,
   webhookAutoReview: false,
   inlineComments: true,
@@ -41,13 +55,20 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
 
 export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSettings {
   const record = isRecord(input) ? input : {}
+  const legacyAllowedProjectIds = idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds'))
+  const explicitScopeMode = scopeModeValue(setting(record, 'review.scopeMode', 'scopeMode'))
+  const includedProjects = projectRefList(setting(record, 'review.includedProjects', 'includedProjects'))
+  const scopeMode = explicitScopeMode ?? (legacyAllowedProjectIds.length > 0 && includedProjects.length === 0 ? 'selected-only' : defaultGitLabReviewSettings.scopeMode)
   return {
     ...defaultGitLabReviewSettings,
     enabled: booleanValue(setting(record, 'review.enabled', 'enabled'), defaultGitLabReviewSettings.enabled),
     baseUrl: optionalString(setting(record, 'review.baseUrl', 'baseUrl')),
     botMention: stringValue(setting(record, 'review.botMention', 'botMention'), defaultGitLabReviewSettings.botMention),
     allowedHosts: stringList(setting(record, 'allowedHosts')),
-    allowedProjectIds: idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds')),
+    allowedProjectIds: legacyAllowedProjectIds,
+    scopeMode,
+    includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
+    excludedProjects: projectRefList(setting(record, 'review.excludedProjects', 'excludedProjects')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')),
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
     manualMentionTrigger: booleanValue(setting(record, 'review.manualMentionTrigger', 'manualMentionTrigger'), defaultGitLabReviewSettings.manualMentionTrigger),
@@ -62,8 +83,47 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
   }
 }
 
+export function isGitLabReviewProjectInScope(
+  settings: GitLabReviewSettings,
+  project: { id: string | number; pathWithNamespace?: string },
+) {
+  if (projectRefMatches(settings.excludedProjects, project)) return false
+  if (settings.scopeMode === 'selected-only') {
+    return projectRefMatches(settings.includedProjects, project)
+  }
+  return true
+}
+
+export function gitLabReviewProjectIdsForHookSync(settings: GitLabReviewSettings): Array<string | number> {
+  const candidates = settings.scopeMode === 'selected-only'
+    ? settings.includedProjects
+    : settings.includedProjects.length > 0
+      ? settings.includedProjects
+      : settings.allowedProjectIds.map((id) => ({ id }))
+  return uniqueIds(candidates.map((project) => project.id))
+}
+
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input)
+}
+
+function projectRefMatches(projects: GitLabProjectRef[], project: { id: string | number; pathWithNamespace?: string }) {
+  return projects.some((candidate) => {
+    if (String(candidate.id) === String(project.id)) return true
+    return Boolean(candidate.pathWithNamespace && project.pathWithNamespace && candidate.pathWithNamespace === project.pathWithNamespace)
+  })
+}
+
+function uniqueIds(ids: Array<string | number>) {
+  const seen = new Set<string>()
+  const output: Array<string | number> = []
+  for (const id of ids) {
+    const key = String(id)
+    if (seen.has(key)) continue
+    seen.add(key)
+    output.push(id)
+  }
+  return output
 }
 
 function booleanValue(input: unknown, fallback: boolean) {
@@ -103,6 +163,27 @@ function idList(input: unknown) {
   return Array.isArray(input)
     ? input.filter((item): item is string | number => typeof item === 'string' || typeof item === 'number')
     : []
+}
+
+function scopeModeValue(input: unknown): GitLabReviewScopeMode | undefined {
+  return input === 'selected-only' || input === 'all-received' ? input : undefined
+}
+
+function projectRefList(input: unknown): GitLabProjectRef[] {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((item) => {
+      if (typeof item === 'string' || typeof item === 'number') return { id: item }
+      if (!isRecord(item)) return undefined
+      const id = item.id
+      if (typeof id !== 'string' && typeof id !== 'number') return undefined
+      return {
+        id,
+        pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
+        webUrl: optionalString(item.webUrl) ?? optionalString(item.web_url),
+      }
+    })
+    .filter((item): item is GitLabProjectRef => Boolean(item))
 }
 
 function positiveNumber(input: unknown, fallback: number) {

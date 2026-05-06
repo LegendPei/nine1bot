@@ -1,4 +1,4 @@
-import type { GitLabReviewSettings } from './settings'
+import { isGitLabReviewProjectInScope, type GitLabReviewSettings } from './settings'
 import type { GitLabReviewTrigger } from './types'
 
 export type GitLabParsedEvent =
@@ -24,7 +24,7 @@ function parseMergeRequestWebhook(payload: Record<string, unknown>, settings: Gi
   const host = hostFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
   const headSha = stringValue(attrs?.last_commit && recordValue(attrs.last_commit)?.id) ?? stringValue(attrs?.last_commit_id) ?? stringValue(attrs?.sha)
   if (!projectId || !mrIid || !host || !headSha) return { ok: false, reason: 'missing-merge-request-identity' }
-  if (!isAllowed(settings, host, projectId)) return { ok: false, reason: 'project-not-allowed' }
+  if (!isAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) return { ok: false, reason: 'project-not-allowed' }
 
   return {
     ok: true,
@@ -58,7 +58,7 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const projectId = idValue(project?.id ?? note?.project_id)
   const host = hostFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
   if (!projectId || !host) return { ok: false, reason: 'missing-project-identity' }
-  if (!isAllowed(settings, host, projectId)) return { ok: false, reason: 'project-not-allowed' }
+  if (!isAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) return { ok: false, reason: 'project-not-allowed' }
 
   if (mergeRequest) {
     const mrIid = idValue(mergeRequest.iid)
@@ -282,9 +282,12 @@ function isBotAuthor(author: string | undefined, botMention: string) {
   return author.trim().toLowerCase() === botName
 }
 
-function isAllowed(settings: GitLabReviewSettings, host: string, projectId: string | number) {
+function isAllowed(settings: GitLabReviewSettings, host: string, projectId: string | number, projectPath?: string) {
   const hostAllowed = settings.allowedHosts.length === 0 || settings.allowedHosts.includes(host)
-  const projectAllowed = settings.allowedProjectIds.length === 0 || settings.allowedProjectIds.map(String).includes(String(projectId))
+  const projectAllowed = isGitLabReviewProjectInScope(settings, {
+    id: projectId,
+    pathWithNamespace: projectPath,
+  })
   return hostAllowed && projectAllowed
 }
 

@@ -7,7 +7,7 @@ import {
 } from './shared'
 import { fileURLToPath } from 'node:url'
 import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
-import { normalizeGitLabReviewSettings } from './review/settings'
+import { gitLabReviewProjectIdsForHookSync, normalizeGitLabReviewSettings } from './review/settings'
 import type {
   PlatformActionResult,
   PlatformAdapterContext,
@@ -121,10 +121,23 @@ export const gitlabPlatformDescriptor = {
             description: 'Build review context without writing comments back to GitLab.',
           },
           {
-            key: 'review.allowedProjectIds',
-            type: 'string-list',
-            label: 'Allowed project ids',
-            description: 'GitLab project ids allowed to trigger review runs.',
+            key: 'review.scopeMode',
+            type: 'select',
+            label: 'Review scope mode',
+            description: 'Use all projects received by the hook, or only selected projects.',
+            options: ['all-received', 'selected-only'],
+          },
+          {
+            key: 'review.includedProjects',
+            type: 'json',
+            label: 'Included projects',
+            description: 'Selected GitLab projects for selected-only mode or project hook sync.',
+          },
+          {
+            key: 'review.excludedProjects',
+            type: 'json',
+            label: 'Excluded projects',
+            description: 'GitLab projects that should never trigger review.',
           },
           {
             key: 'review.webhookSecretRef',
@@ -169,6 +182,28 @@ export const gitlabPlatformDescriptor = {
       label: 'Test GitLab webhook',
       description: 'Ask GitLab to send a Note event test request through the configured project hooks.',
       kind: 'button',
+    },
+    {
+      id: 'projects.search',
+      label: 'Search GitLab projects',
+      description: 'Search GitLab projects by name or namespace for review scope configuration.',
+      kind: 'form',
+      inputSchema: {
+        sections: [
+          {
+            id: 'query',
+            title: 'Project search',
+            fields: [
+              {
+                key: 'query',
+                type: 'string',
+                label: 'Search query',
+                description: 'Project name or namespace.',
+              },
+            ],
+          },
+        ],
+      },
     },
   ],
 } satisfies PlatformDescriptor
@@ -236,10 +271,10 @@ async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<Pla
   const cards: PlatformRuntimeStatus['cards'] = [
     { id: 'context', label: 'Page context', value: 'enabled', tone: 'success' },
     { id: 'review', label: 'Code review', value: settings.enabled ? 'enabled' : 'disabled', tone: settings.enabled ? 'success' : 'neutral' },
-    { id: 'mode', label: 'Review mode', value: settings.executionMode, tone: settings.dryRun ? 'warning' : 'neutral' },
+    { id: 'mode', label: 'Review publish', value: settings.dryRun ? 'dry-run' : 'publish', tone: settings.dryRun ? 'warning' : 'success' },
     { id: 'model', label: 'Review model', value: settings.modelProviderId && settings.modelId ? `${settings.modelProviderId}/${settings.modelId}` : 'default', tone: 'neutral' },
     { id: 'webhook-url', label: 'Dedicated webhook', value: await dedicatedWebhookUrlDisplay(settings, ctx), tone: 'neutral' },
-    { id: 'webhook-projects', label: 'Allowed projects', value: settings.allowedProjectIds.length ? settings.allowedProjectIds.map(String).join(', ') : 'not configured', tone: settings.allowedProjectIds.length ? 'neutral' : 'warning' },
+    { id: 'scope', label: 'Review scope', value: scopeStatusText(settings), tone: settings.scopeMode === 'selected-only' && settings.includedProjects.length === 0 ? 'warning' : 'neutral' },
   ]
 
   if (!settings.enabled) {
@@ -311,6 +346,9 @@ async function handleGitLabPlatformAction(
   if (actionId === 'webhook.test') {
     return await testGitLabProjectHooks(ctx, status)
   }
+  if (actionId === 'projects.search') {
+    return await searchGitLabProjects(_input, ctx, status)
+  }
   return { status: 'failed', message: `Unsupported GitLab action: ${actionId}` }
 }
 
@@ -358,6 +396,44 @@ async function testGitLabConnection(
     return {
       status: 'failed',
       message: `GitLab API token check failed: ${error instanceof Error ? error.message : String(error)}.`,
+      updatedStatus: status,
+    }
+  }
+}
+
+async function searchGitLabProjects(
+  input: unknown,
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const query = typeof input === 'object' && input && 'query' in input && typeof input.query === 'string'
+    ? input.query
+    : ''
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, ctx.secrets)
+  if (!token) return { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status }
+  try {
+    const client = new GitLabApiClient({
+      baseUrl: settings.baseUrl || 'https://gitlab.com',
+      token,
+    })
+    const projects = await client.searchProjects(query, 20)
+    return {
+      status: 'ok',
+      message: `Found ${projects.length} GitLab project(s).`,
+      data: {
+        projects: projects.map((project) => ({
+          id: project.id,
+          pathWithNamespace: project.path_with_namespace,
+          webUrl: project.web_url,
+        })),
+      },
+      updatedStatus: status,
+    }
+  } catch (error) {
+    return {
+      status: 'failed',
+      message: `GitLab project search failed: ${error instanceof Error ? error.message : String(error)}.`,
       updatedStatus: status,
     }
   }
@@ -510,11 +586,12 @@ async function prepareGitLabWebhookAction(ctx: PlatformAdapterContext, status: P
       },
     }
   }
-  if (settings.allowedProjectIds.length === 0) {
+  const projectIds = gitLabReviewProjectIdsForHookSync(settings)
+  if (projectIds.length === 0) {
     return {
       error: {
         status: 'failed',
-        message: 'Allowed project ids must be configured before Nine1Bot can sync GitLab project hooks.',
+        message: 'Select at least one included project before Nine1Bot can sync project hooks. Group/System hooks can still use the dedicated URL manually.',
         updatedStatus: status,
       },
     }
@@ -525,10 +602,18 @@ async function prepareGitLabWebhookAction(ctx: PlatformAdapterContext, status: P
       baseUrl: settings.baseUrl || 'https://gitlab.com',
       token,
     }),
-    projectIds: settings.allowedProjectIds,
+    projectIds,
     webhookSecret,
     webhookUrl,
   }
+}
+
+function scopeStatusText(settings: ReturnType<typeof normalizeGitLabReviewSettings>) {
+  const excluded = settings.excludedProjects.length
+  if (settings.scopeMode === 'selected-only') {
+    return `${settings.includedProjects.length} selected${excluded ? `, ${excluded} excluded` : ''}`
+  }
+  return excluded ? `all received except ${excluded}` : 'all received'
 }
 
 async function dedicatedWebhookUrlDisplay(

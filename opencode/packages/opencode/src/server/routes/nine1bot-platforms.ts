@@ -91,6 +91,7 @@ export const Nine1BotPlatformRoutes = () =>
     .get("/:id", async (c) => {
       try {
         const manager = await syncManagerFromConfig()
+        await manager.refreshStatus(c.req.param("id"))
         const detail = await manager.getDetail(c.req.param("id"))
         if (!detail) throw new PlatformNotFoundError(c.req.param("id"))
         return c.json(detail)

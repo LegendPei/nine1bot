@@ -284,6 +284,98 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('normalizes GitLab review scope and migrates legacy allowed project ids', () => {
+    expect(normalizeGitLabReviewSettings({
+      'review.allowedProjectIds': [123],
+    })).toMatchObject({
+      scopeMode: 'selected-only',
+      includedProjects: [{ id: 123 }],
+      excludedProjects: [],
+    })
+
+    expect(normalizeGitLabReviewSettings({
+      'review.scopeMode': 'all-received',
+      'review.includedProjects': [{ id: 3, pathWithNamespace: 'root/uftest' }],
+      'review.excludedProjects': [{ id: 4, pathWithNamespace: 'root/legacy' }],
+    })).toMatchObject({
+      scopeMode: 'all-received',
+      includedProjects: [{ id: 3, pathWithNamespace: 'root/uftest' }],
+      excludedProjects: [{ id: 4, pathWithNamespace: 'root/legacy' }],
+    })
+  })
+
+  test('applies GitLab review project blacklist before triggering review', () => {
+    const payload = {
+      object_kind: 'note',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 777,
+        note: '@Nine1bot review',
+        author: { username: 'alice' },
+      },
+      merge_request: {
+        iid: 10,
+        last_commit: { id: 'abc123' },
+      },
+    }
+
+    expect(parseGitLabWebhookEvent(payload, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      scopeMode: 'all-received',
+      excludedProjects: [{ id: 123, pathWithNamespace: 'nine1/nine1bot' }],
+    })).toEqual({ ok: false, reason: 'project-not-allowed' })
+
+    expect(parseGitLabWebhookEvent(payload, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      scopeMode: 'all-received',
+      excludedProjects: [],
+    })).toMatchObject({ ok: true })
+  })
+
+  test('allows selected-only GitLab review scope only for selected projects', () => {
+    const payload = {
+      object_kind: 'note',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 777,
+        note: '@Nine1bot review',
+        author: { username: 'alice' },
+      },
+      merge_request: {
+        iid: 10,
+        last_commit: { id: 'abc123' },
+      },
+    }
+
+    expect(parseGitLabWebhookEvent(payload, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      scopeMode: 'selected-only',
+      includedProjects: [{ id: 456, pathWithNamespace: 'other/project' }],
+    })).toEqual({ ok: false, reason: 'project-not-allowed' })
+
+    expect(parseGitLabWebhookEvent(payload, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      scopeMode: 'selected-only',
+      includedProjects: [{ id: 123, pathWithNamespace: 'nine1/nine1bot' }],
+    })).toMatchObject({ ok: true })
+  })
+
   test('validates GitLab webhook tokens without accepting missing secrets', () => {
     expect(validateGitLabWebhookToken({ expectedSecret: 'secret', receivedToken: 'secret' })).toEqual({ ok: true })
     expect(validateGitLabWebhookToken({ expectedSecret: 'secret', receivedToken: 'wrong' })).toMatchObject({ ok: false })

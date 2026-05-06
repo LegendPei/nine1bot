@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { CheckCircle2, CircleAlert, CircleSlash, Copy, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
-import { gitLabReviewApi, webhookApi, type GitLabReviewRun, type WebhookStatus } from '../api/client'
+import { gitLabReviewApi, platformApi, webhookApi, type GitLabReviewRun, type WebhookStatus } from '../api/client'
 import type {
   PlatformActionDescriptor,
   PlatformConfigField,
@@ -39,6 +39,10 @@ const webhookStatus = ref<WebhookStatus | null>(null)
 const loadingGitLabRuns = ref(false)
 const gitLabRunsError = ref('')
 const gitLabWebhookUrlMessage = ref('')
+const gitLabProjectSearchQuery = ref('')
+const gitLabProjectSearchResults = ref<GitLabProjectRef[]>([])
+const gitLabProjectSearchError = ref('')
+const searchingGitLabProjects = ref(false)
 const retryingGitLabRunIds = ref<Set<string>>(new Set())
 const actionFormValues = reactive<Record<string, Record<string, string | number | boolean>>>({})
 const actionJsonErrors = reactive<Record<string, Record<string, string>>>({})
@@ -61,7 +65,7 @@ const configFormSections = computed(() => {
       id: 'gitlab-trigger',
       title: '触发入口',
       description: '配置评论触发词、自动审查开关和允许触发 review 的项目范围。',
-      keys: ['review.botMention', 'review.webhookAutoReview', 'review.allowedProjectIds'],
+      keys: ['review.botMention', 'review.webhookAutoReview', 'review.scopeMode', 'review.includedProjects', 'review.excludedProjects'],
     },
     {
       id: 'gitlab-review-policy',
@@ -107,9 +111,20 @@ const gitLabWebhookPath = '/webhooks/gitlab/{webhookSecret}'
 const gitLabWebhookSecretFieldKey = 'review.webhookSecretRef'
 const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
 const gitLabReviewModelFieldKey = 'review.modelId'
+const gitLabIncludedProjectsFieldKey = 'review.includedProjects'
+const gitLabExcludedProjectsFieldKey = 'review.excludedProjects'
+const gitLabScopeModeFieldKey = 'review.scopeMode'
+type GitLabProjectRef = {
+  id: string | number
+  pathWithNamespace?: string
+  webUrl?: string
+}
 const authenticatedModelCount = computed(() => {
   return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
 })
+const gitLabIncludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabIncludedProjectsFieldKey)))
+const gitLabExcludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabExcludedProjectsFieldKey)))
+const gitLabScopeMode = computed(() => textValue(gitLabScopeModeFieldKey) || 'all-received')
 const gitLabRuntimeWebhookUrl = computed(() => {
   const actionWebhookUrl = props.actionResult?.data?.webhookUrl
   if (typeof actionWebhookUrl === 'string' && actionWebhookUrl.startsWith('http')) return actionWebhookUrl
@@ -135,6 +150,9 @@ watch(
       gitLabRunsError.value = ''
       webhookStatus.value = null
       gitLabWebhookUrlMessage.value = ''
+      gitLabProjectSearchQuery.value = ''
+      gitLabProjectSearchResults.value = []
+      gitLabProjectSearchError.value = ''
     }
   },
   { immediate: true },
@@ -285,6 +303,10 @@ function isGitLabReviewModelField(field: PlatformConfigField) {
   return isGitLabPlatform.value && field.key === gitLabReviewModelFieldKey
 }
 
+function isGitLabProjectScopeJsonField(field: PlatformConfigField) {
+  return isGitLabPlatform.value && (field.key === gitLabIncludedProjectsFieldKey || field.key === gitLabExcludedProjectsFieldKey)
+}
+
 function gitLabReviewModelValue() {
   const providerId = textValue(gitLabReviewModelProviderFieldKey)
   const modelId = textValue(gitLabReviewModelFieldKey)
@@ -317,6 +339,83 @@ async function copyGitLabWebhookUrl() {
   } catch {
     gitLabWebhookUrlMessage.value = '复制失败，请手动选中 URL 复制。'
   }
+}
+
+function parseGitLabProjectRefs(input: string): GitLabProjectRef[] {
+  if (!input.trim()) return []
+  try {
+    const parsed = JSON.parse(input)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((item) => {
+        if (typeof item === 'string' || typeof item === 'number') return { id: item }
+        if (!item || typeof item !== 'object') return undefined
+        const id = (item as any).id
+        if (typeof id !== 'string' && typeof id !== 'number') return undefined
+        return {
+          id,
+          pathWithNamespace: typeof (item as any).pathWithNamespace === 'string'
+            ? (item as any).pathWithNamespace
+            : typeof (item as any).path_with_namespace === 'string'
+              ? (item as any).path_with_namespace
+              : undefined,
+          webUrl: typeof (item as any).webUrl === 'string'
+            ? (item as any).webUrl
+            : typeof (item as any).web_url === 'string'
+              ? (item as any).web_url
+              : undefined,
+        }
+      })
+      .filter((item): item is GitLabProjectRef => Boolean(item))
+  } catch {
+    return []
+  }
+}
+
+function setGitLabProjectRefs(key: string, projects: GitLabProjectRef[]) {
+  formValues[key] = JSON.stringify(projects, null, 2)
+}
+
+function gitLabProjectLabel(project: GitLabProjectRef) {
+  return project.pathWithNamespace || String(project.id)
+}
+
+function hasGitLabProject(projects: GitLabProjectRef[], project: GitLabProjectRef) {
+  return projects.some((item) => String(item.id) === String(project.id))
+}
+
+async function searchGitLabProjects() {
+  const platform = props.selectedPlatform
+  if (!platform || searchingGitLabProjects.value) return
+  searchingGitLabProjects.value = true
+  gitLabProjectSearchError.value = ''
+  try {
+    const result = await platformApi.action(platform.id, 'projects.search', {
+      input: { query: gitLabProjectSearchQuery.value },
+    })
+    const projects = Array.isArray(result.data?.projects) ? result.data.projects : []
+    gitLabProjectSearchResults.value = projects
+      .map((item: any) => ({
+        id: item.id,
+        pathWithNamespace: item.pathWithNamespace,
+        webUrl: item.webUrl,
+      }))
+      .filter((item: GitLabProjectRef) => typeof item.id === 'string' || typeof item.id === 'number')
+  } catch (error: any) {
+    gitLabProjectSearchError.value = error?.message || 'GitLab project search failed'
+  } finally {
+    searchingGitLabProjects.value = false
+  }
+}
+
+function addGitLabProject(key: string, project: GitLabProjectRef) {
+  const current = parseGitLabProjectRefs(textValue(key))
+  if (hasGitLabProject(current, project)) return
+  setGitLabProjectRefs(key, [...current, project])
+}
+
+function removeGitLabProject(key: string, project: GitLabProjectRef) {
+  setGitLabProjectRefs(key, parseGitLabProjectRefs(textValue(key)).filter((item) => String(item.id) !== String(project.id)))
 }
 
 function runGitLabAction(actionId: string) {
@@ -712,6 +811,75 @@ function actionResultDetails(result: PlatformActionResult) {
                 <span class="gitlab-guide-text">模型来自已认证的 Chat providers。当前可选模型数：{{ authenticatedModelCount }}。</span>
               </div>
             </div>
+            <div class="gitlab-scope-picker">
+              <div class="platform-section-heading-row">
+                <h5 class="platform-section-title">Review 范围</h5>
+                <span class="gitlab-guide-text">{{ gitLabScopeMode === 'selected-only' ? '仅处理选中的项目' : '处理 Hook 收到的项目，排除黑名单' }}</span>
+              </div>
+              <div class="gitlab-project-search-row">
+                <input
+                  v-model="gitLabProjectSearchQuery"
+                  class="input platform-input"
+                  placeholder="搜索 GitLab 项目，例如 root/uftest"
+                  @keydown.enter.prevent="searchGitLabProjects"
+                />
+                <button type="button" class="btn btn-secondary btn-sm" :disabled="searchingGitLabProjects" @click="searchGitLabProjects">
+                  <RefreshCw :size="13" />
+                  <span>{{ searchingGitLabProjects ? '搜索中' : '搜索项目' }}</span>
+                </button>
+              </div>
+              <div v-if="gitLabProjectSearchError" class="platform-alert warning">{{ gitLabProjectSearchError }}</div>
+              <div v-if="gitLabProjectSearchResults.length" class="gitlab-project-result-list">
+                <div v-for="project in gitLabProjectSearchResults" :key="String(project.id)" class="gitlab-project-row">
+                  <div>
+                    <strong>{{ gitLabProjectLabel(project) }}</strong>
+                    <span class="text-muted text-sm">ID {{ project.id }}</span>
+                  </div>
+                  <div class="gitlab-project-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabProject(gitLabIncludedProjectsFieldKey, project)">
+                      加入包含
+                    </button>
+                    <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabProject(gitLabExcludedProjectsFieldKey, project)">
+                      加入排除
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="gitlab-selected-project-grid">
+                <div class="gitlab-selected-project-box">
+                  <span class="gitlab-guide-label">包含项目</span>
+                  <p class="gitlab-guide-text">selected-only 模式下只处理这里的项目；all-received 模式下也用于 Project Hook 同步。</p>
+                  <div v-if="gitLabIncludedProjects.length" class="gitlab-project-chip-list">
+                    <button
+                      v-for="project in gitLabIncludedProjects"
+                      :key="String(project.id)"
+                      type="button"
+                      class="gitlab-project-chip"
+                      @click="removeGitLabProject(gitLabIncludedProjectsFieldKey, project)"
+                    >
+                      {{ gitLabProjectLabel(project) }} ×
+                    </button>
+                  </div>
+                  <span v-else class="text-muted text-sm">尚未选择项目</span>
+                </div>
+                <div class="gitlab-selected-project-box">
+                  <span class="gitlab-guide-label">排除项目</span>
+                  <p class="gitlab-guide-text">这些项目不会触发手动 mention 或自动 review。</p>
+                  <div v-if="gitLabExcludedProjects.length" class="gitlab-project-chip-list">
+                    <button
+                      v-for="project in gitLabExcludedProjects"
+                      :key="String(project.id)"
+                      type="button"
+                      class="gitlab-project-chip"
+                      @click="removeGitLabProject(gitLabExcludedProjectsFieldKey, project)"
+                    >
+                      {{ gitLabProjectLabel(project) }} ×
+                    </button>
+                  </div>
+                  <span v-else class="text-muted text-sm">没有排除项目</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="platform-section">
@@ -816,7 +984,7 @@ function actionResultDetails(result: PlatformActionResult) {
 
               <label
                 v-for="field in section.fields"
-                v-show="!isGitLabReviewModelProviderField(field)"
+                v-show="!isGitLabReviewModelProviderField(field) && !isGitLabProjectScopeJsonField(field)"
                 :key="field.key"
                 class="platform-field"
               >
@@ -903,6 +1071,7 @@ function actionResultDetails(result: PlatformActionResult) {
             <div class="platform-action-list">
               <form
                 v-for="action in selectedPlatform.actions"
+                v-show="!(isGitLabPlatform && action.id === 'projects.search')"
                 :key="action.id"
                 class="platform-action-item"
                 @submit.prevent="runAction(action)"
@@ -1204,6 +1373,68 @@ function actionResultDetails(result: PlatformActionResult) {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs);
+}
+
+.gitlab-scope-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: 12px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.gitlab-project-search-row,
+.gitlab-project-row,
+.gitlab-project-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.gitlab-project-search-row .platform-input {
+  flex: 1;
+}
+
+.gitlab-project-result-list,
+.gitlab-project-chip-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.gitlab-project-row {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+.gitlab-selected-project-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.gitlab-selected-project-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: 10px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.gitlab-project-chip {
+  text-align: left;
+  padding: 6px 8px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
 }
 
 .gitlab-hook-mode-grid {
