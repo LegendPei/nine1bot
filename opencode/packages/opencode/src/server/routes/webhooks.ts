@@ -4,6 +4,7 @@ import { RuntimeControllerProtocol } from "@/runtime/controller/protocol"
 import { Webhook } from "@/webhook/webhook"
 import { Hono } from "hono"
 import { describeRoute, resolver, validator } from "hono-openapi"
+import { networkInterfaces, type NetworkInterfaceInfo } from "os"
 import z from "zod"
 import { lazy } from "../../util/lazy"
 import { errors } from "../error"
@@ -79,6 +80,34 @@ function projectDirectory(project: Project.Info) {
 
 function currentOrigin(c: { req: { url: string } }) {
   return new URL(c.req.url).origin
+}
+
+export function webhookLocalOrigin(input: {
+  requestOrigin: string
+  envLocalUrl?: string
+  interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>
+}) {
+  if (input.envLocalUrl?.trim()) return input.envLocalUrl.trim().replace(/\/$/, "")
+  const request = new URL(input.requestOrigin)
+  if (!isLoopbackHost(request.hostname)) return request.origin
+  const address = firstReachableIPv4(input.interfaces ?? networkInterfaces())
+  if (!address) return request.origin
+  request.hostname = address
+  return request.origin
+}
+
+function firstReachableIPv4(interfaces: NodeJS.Dict<NetworkInterfaceInfo[]>) {
+  for (const infos of Object.values(interfaces)) {
+    for (const info of infos ?? []) {
+      if (info.family === "IPv4" && !info.internal && info.address) return info.address
+    }
+  }
+  return undefined
+}
+
+function isLoopbackHost(hostname: string) {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase()
+  return host === "localhost" || host === "::1" || host.startsWith("127.")
 }
 
 function webhookTemplateUrl(baseUrl: string) {
@@ -634,7 +663,10 @@ export const WebhookRoutes = lazy(() =>
         operationId: "webhooks.status",
       }),
       async (c) => {
-        const localUrl = process.env.NINE1BOT_LOCAL_URL || currentOrigin(c)
+        const localUrl = webhookLocalOrigin({
+          requestOrigin: currentOrigin(c),
+          envLocalUrl: process.env.NINE1BOT_LOCAL_URL,
+        })
         const publicUrl = process.env.NINE1BOT_PUBLIC_URL || ""
         return c.json({
           listening: true,
