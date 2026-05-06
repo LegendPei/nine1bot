@@ -559,6 +559,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       }
     },
     async onFinished(finished) {
+      if (publishAttempted) return
       const current = ReviewRunStore.get(result.runId)
       if (current?.publishedAt) return
       if (finished.status === "succeeded") {

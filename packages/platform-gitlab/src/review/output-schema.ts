@@ -31,6 +31,15 @@ export const reviewStageResultJsonSchema = {
           file: { type: 'string' },
           oldLine: { type: 'number' },
           newLine: { type: 'number' },
+          suggestion: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['replacement'],
+            properties: {
+              replacement: { type: 'string' },
+              confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+            },
+          },
           source: { type: 'string' },
         },
       },
@@ -66,6 +75,7 @@ function parseFinding(input: unknown): ReviewFinding {
     file: optionalString(input.file),
     oldLine: optionalNumber(input.oldLine),
     newLine: optionalNumber(input.newLine),
+    suggestion: optionalSuggestion(input.suggestion),
     source: optionalString(input.source),
   }
 }
@@ -85,6 +95,22 @@ function optionalString(input: unknown) {
 
 function optionalNumber(input: unknown) {
   return typeof input === 'number' && Number.isFinite(input) ? input : undefined
+}
+
+function optionalSuggestion(input: unknown): ReviewFinding['suggestion'] {
+  if (!isRecord(input)) return undefined
+  const replacement = optionalString(input.replacement)
+  if (!replacement) return undefined
+  const confidence = suggestionConfidence(input.confidence)
+  return {
+    replacement,
+    confidence,
+  }
+}
+
+function suggestionConfidence(input: unknown): NonNullable<ReviewFinding['suggestion']>['confidence'] | undefined {
+  if (input === 'low' || input === 'medium' || input === 'high') return input
+  return undefined
 }
 
 function statusField(input: unknown): ReviewStageResult['status'] {

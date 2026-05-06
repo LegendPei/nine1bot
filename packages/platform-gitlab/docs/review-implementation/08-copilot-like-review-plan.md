@@ -118,3 +118,19 @@
 ## 当前优先级
 
 本轮先完成 Phase 1：顶层评论证据展示。它不依赖 GitLab inline API，风险最低，但能显著接近 Copilot 的 review 观感。
+
+## 2026-05-06 实施进展
+
+已完成：
+
+- Phase 1 顶层评论证据展示：summary note 按文件分组，展示 finding 正文，并从原始 diff 自动提取 evidence 片段。
+- Phase 3 的最小 suggestion 契约：finding 支持可选 `suggestion.replacement/confidence`，inline discussion 校验通过时可渲染 GitLab suggestion block。
+- suggestion 安全降级：replacement 含 markdown fence 或过长时不渲染 suggestion block，避免破坏评论格式。
+- webhook 自触发防护：忽略 bot 自己发布的 note，避免说明评论中的 `@Nine1bot` 示例再次触发 review。
+- runtime 发布竞态修复：一旦检测到可发布结果并开始 publish，`onFinished` 不再追加误报 failure note。
+
+UFTest MR 联调结果：
+
+- 新 run `review_mothjstp_m` 成功完成并回写 GitLab。
+- 顶层评论已经包含文件分组和 fenced diff evidence。
+- PM 输出了一个 suggestion，当前配置 `review.inlineComments=false`，因此 suggestion 先保留在结构化结果中；开启 inline 后才会以 GitLab suggestion block 形式发布。

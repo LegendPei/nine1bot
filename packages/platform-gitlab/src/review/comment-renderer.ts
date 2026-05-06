@@ -51,6 +51,9 @@ export function renderReviewSummaryComment(input: {
         if (finding.sources.length > 1) {
           lines.push('', `Sources: ${finding.sources.map((source) => `\`${source}\``).join(', ')}`)
         }
+        if (finding.suggestion?.replacement) {
+          lines.push('', 'Suggested replacement:', '', safeCodeBlock(finding.suggestion.replacement))
+        }
         const snippet = input.manifest ? diffSnippetForFinding(finding, input.manifest.files) : undefined
         if (snippet) {
           const fence = markdownFence(snippet)
@@ -151,6 +154,15 @@ function trimSnippet(lines: string[], maxLines = 16, maxChars = 1800) {
   let text = trimmed.join('\n')
   if (text.length > maxChars) text = `${text.slice(0, maxChars).trimEnd()}\n...`
   return text
+}
+
+function safeCodeBlock(content: string) {
+  const fence = markdownFence(content)
+  return [
+    fence,
+    content,
+    fence,
+  ].join('\n')
 }
 
 function markdownFence(content: string) {

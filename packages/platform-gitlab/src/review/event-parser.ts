@@ -48,6 +48,7 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const mergeRequest = recordValue(payload.merge_request)
   const commit = recordValue(payload.commit)
   const noteText = stringValue(note?.note)
+  if (isBotAuthor(noteAuthorName(payload, note), settings.botMention)) return { ok: false, reason: 'mention-from-bot' }
   const mention = noteText ? extractMentionInstruction(noteText, settings.botMention) : undefined
   if (!noteText || !mention) return { ok: false, reason: 'mention-not-found' }
   const intent = classifyMentionIntent(mention.instruction)
@@ -263,6 +264,21 @@ function hasPromptInjectionMarkers(text: string) {
 function authorName(note: Record<string, unknown>) {
   const author = recordValue(note.author)
   return stringValue(author?.username) ?? stringValue(author?.name)
+}
+
+function noteAuthorName(payload: Record<string, unknown>, note?: Record<string, unknown>) {
+  if (note) {
+    const fromNote = authorName(note)
+    if (fromNote) return fromNote
+  }
+  const user = recordValue(payload.user)
+  return stringValue(user?.username) ?? stringValue(user?.name) ?? stringValue(payload.user_username)
+}
+
+function isBotAuthor(author: string | undefined, botMention: string) {
+  if (!author) return false
+  const botName = botMention.replace(/^@/, '').trim().toLowerCase()
+  return author.trim().toLowerCase() === botName
 }
 
 function isAllowed(settings: GitLabReviewSettings, host: string, projectId: string | number) {

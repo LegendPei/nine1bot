@@ -43,6 +43,10 @@ Do not wrap the result in another object. Do not add Markdown prose outside the 
   "file": "src/example.ts",
   "oldLine": 12,
   "newLine": 18,
+  "suggestion": {
+    "replacement": "return validate(input)",
+    "confidence": "high"
+  },
   "source": "pm-coordinator"
 }
 ```
@@ -59,11 +63,30 @@ Optional finding fields:
 - `file`
 - `oldLine`
 - `newLine`
+- `suggestion`
 - `source`
 
 Allowed severities: `info`, `minor`, `major`, `critical`, `blocker`.
 
 Allowed categories: `correctness`, `security`, `testing`, `performance`, `maintainability`, `frontend`, `architecture`, `docs`, `config`.
+
+## Suggestion Rules
+
+Use `suggestion` only for a small, local replacement that can be applied to a changed diff line. The publisher may render it as a GitLab suggestion block only after inline position validation passes.
+
+`suggestion` fields:
+
+- `replacement`: replacement code only. Do not include markdown fences.
+- `confidence`: `low`, `medium`, or `high`.
+
+Do not include a suggestion when:
+
+- the location is uncertain.
+- the fix spans multiple files or multiple hunks.
+- the fix needs product, security, or architecture approval.
+- the replacement includes markdown fences.
+
+When in doubt, put the recommendation in `body` instead of `suggestion`.
 
 ## Evidence Rules
 

@@ -78,7 +78,28 @@ export function renderInlineFallbackFinding(finding: ReviewFinding, reason: stri
     finding.file ? `File: \`${finding.file}\`${finding.newLine || finding.oldLine ? `:${finding.newLine ?? finding.oldLine}` : ''}` : undefined,
     '',
     finding.body,
+    finding.suggestion ? ['', 'Suggested replacement:', '', safeCodeBlock(finding.suggestion.replacement)].join('\n') : undefined,
   ].filter(Boolean).join('\n')
+}
+
+export function renderInlineFindingBody(finding: ReviewFinding) {
+  const suggestion = renderSuggestionBlock(finding)
+  return [
+    finding.body,
+    suggestion ? ['', suggestion].join('\n') : undefined,
+  ].filter(Boolean).join('\n')
+}
+
+export function renderSuggestionBlock(finding: ReviewFinding) {
+  const replacement = finding.suggestion?.replacement
+  if (!replacement) return undefined
+  if (replacement.includes('```')) return undefined
+  if (replacement.length > 4000) return undefined
+  return [
+    '```suggestion',
+    replacement.trimEnd(),
+    '```',
+  ].join('\n')
 }
 
 function fallback(finding: ReviewFinding, reason: string): GitLabInlineValidation {
@@ -87,4 +108,18 @@ function fallback(finding: ReviewFinding, reason: string): GitLabInlineValidatio
     reason,
     fallbackMarkdown: renderInlineFallbackFinding(finding, reason),
   }
+}
+
+function safeCodeBlock(content: string) {
+  const fence = markdownFence(content)
+  return [
+    fence,
+    content,
+    fence,
+  ].join('\n')
+}
+
+function markdownFence(content: string) {
+  const longest = Math.max(2, ...Array.from(content.matchAll(/`+/g)).map((match) => match[0].length))
+  return '`'.repeat(longest + 1)
 }

@@ -93,7 +93,13 @@ export type ReviewFinding = {
   file?: string
   oldLine?: number
   newLine?: number
+  suggestion?: ReviewSuggestion
   source?: string
+}
+
+export type ReviewSuggestion = {
+  replacement: string
+  confidence?: 'low' | 'medium' | 'high'
 }
 
 export type AggregatedReviewFinding = ReviewFinding & {

@@ -10,6 +10,7 @@ import {
   GitLabApiError,
   normalizeGitLabReviewSettings,
   parseSubagentStageResult,
+  parseReviewStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
   validateGitLabInlinePosition,
@@ -219,6 +220,32 @@ describe('GitLab review foundation', () => {
     expect(result).toMatchObject({ stage: 'closed', status: 'ok', summary: 'done' })
   })
 
+  test('parses optional review suggestions from PM output', () => {
+    expect(parseReviewStageResult({
+      stage: 'closed',
+      status: 'ok',
+      summary: 'Review complete.',
+      findings: [{
+        title: 'Use validated value',
+        body: 'The changed line should use the validated value.',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+        suggestion: {
+          replacement: 'return validated',
+          confidence: 'high',
+        },
+      }],
+    })).toMatchObject({
+      findings: [{
+        suggestion: {
+          replacement: 'return validated',
+          confidence: 'high',
+        },
+      }],
+    })
+  })
+
   test('keeps GitLab code review disabled by default', () => {
     expect(defaultGitLabReviewSettings.enabled).toBe(false)
     expect(defaultGitLabReviewSettings.executionMode).toBe('dry-run')
@@ -345,6 +372,35 @@ describe('GitLab review foundation', () => {
     })
 
     expect(result).toEqual({ ok: false, reason: 'mention-out-of-scope' })
+  })
+
+  test('ignores bot-authored notes so review comments do not self-trigger', () => {
+    const result = parseGitLabWebhookEvent({
+      object_kind: 'note',
+      user: {
+        username: 'Nine1bot',
+      },
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 800,
+        note: 'Try `@Nine1bot review` to start a review.',
+      },
+      merge_request: {
+        iid: 10,
+        last_commit: { id: 'abc123' },
+      },
+    }, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      allowedProjectIds: [123],
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'mention-from-bot' })
   })
 
   test('rejects mention requests for secrets while allowing security review of token usage', () => {
@@ -490,6 +546,92 @@ describe('GitLab review foundation', () => {
     expect(calls).toEqual(['discussion', 'note'])
   })
 
+  test('renders validated inline suggestions in GitLab discussion bodies', async () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+return raw\n',
+      }],
+    })
+    const discussions: string[] = []
+    await publishGitLabReviewResult({
+      client: {
+        async createDiscussion(input) {
+          discussions.push(input.body)
+          return {}
+        },
+        async createNote() {
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Return validated value',
+        body: 'Use the validated value here.',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+        suggestion: {
+          replacement: 'return validated',
+          confidence: 'high',
+        },
+      }],
+    })
+
+    expect(discussions[0]).toContain('Use the validated value here.')
+    expect(discussions[0]).toContain('```suggestion\nreturn validated\n```')
+  })
+
+  test('omits unsafe suggestion fences from inline discussion bodies', async () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+return raw\n',
+      }],
+    })
+    const discussions: string[] = []
+    await publishGitLabReviewResult({
+      client: {
+        async createDiscussion(input) {
+          discussions.push(input.body)
+          return {}
+        },
+        async createNote() {
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [{
+        title: 'Unsafe suggestion',
+        body: 'Replacement contains markdown fences.',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+        suggestion: {
+          replacement: '```\nreturn validated\n```',
+          confidence: 'low',
+        },
+      }],
+    })
+
+    expect(discussions[0]).toContain('Replacement contains markdown fences.')
+    expect(discussions[0]).not.toContain('```suggestion')
+  })
+
   test('falls back to summary note when inline line is outside diff hunks', async () => {
     const manifest = buildGitLabDiffManifest({
       changes: [{
@@ -559,12 +701,18 @@ describe('GitLab review foundation', () => {
         severity: 'major',
         file: 'src/app.ts',
         newLine: 2,
+        suggestion: {
+          replacement: 'return validated',
+          confidence: 'high',
+        },
         source: 'pm-coordinator',
       }],
     })
 
     expect(notes[0]).toContain('#### `src/app.ts`')
     expect(notes[0]).toContain('The new value needs validation before use.')
+    expect(notes[0]).toContain('Suggested replacement:')
+    expect(notes[0]).toContain('return validated')
     expect(notes[0]).toContain('Evidence:')
     expect(notes[0]).toContain('```diff')
     expect(notes[0]).toContain('@@ -1,2 +1,3 @@')

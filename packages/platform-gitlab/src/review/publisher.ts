@@ -1,7 +1,7 @@
 import { GitLabApiError, type GitLabApiClient } from './api-client'
 import { aggregateReviewFindings } from './finding-aggregator'
 import { renderReviewSummaryComment } from './comment-renderer'
-import { renderInlineFallbackFinding, validateGitLabInlinePosition } from './inline-position'
+import { renderInlineFallbackFinding, renderInlineFindingBody, validateGitLabInlinePosition } from './inline-position'
 import type { GitLabDiffManifest, GitLabReviewObjectType, ReviewFinding } from './types'
 
 export type PublishGitLabReviewInput = {
@@ -45,7 +45,7 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
           projectId: input.projectId,
           resource,
           resourceId: input.objectId,
-          body: finding.body,
+          body: renderInlineFindingBody(finding),
           position: validation.position,
         })
         inlinePosted += 1

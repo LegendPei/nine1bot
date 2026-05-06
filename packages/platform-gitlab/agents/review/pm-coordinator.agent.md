@@ -82,6 +82,29 @@ Each finding must be JSON-compatible:
 
 Allowed severities: `info`, `minor`, `major`, `critical`, `blocker`.
 
+Optional suggestions:
+
+- Add `suggestion` only when the fix is a small, local replacement for a changed line in the supplied diff.
+- `suggestion.replacement` must contain only the replacement code, not markdown fences.
+- Do not emit suggestions for broad refactors, multi-file changes, uncertain line numbers, or security fixes that need design approval.
+- If a suggestion is uncertain, keep it as prose in `body` instead.
+
+```json
+{
+  "title": "Normalize invalid graph errors",
+  "body": "This branch can return an inconsistent error response.",
+  "severity": "major",
+  "category": "correctness",
+  "file": "internal/controller/graph_controller.go",
+  "newLine": 59,
+  "suggestion": {
+    "replacement": "ctx.JSON(http.StatusBadRequest, gin.H{\"error\": err.Error()})",
+    "confidence": "high"
+  },
+  "source": "pm-coordinator"
+}
+```
+
 Prefer fewer, stronger findings. Merge duplicate findings on the same file and line before final output.
 
 ## Final Checklist
