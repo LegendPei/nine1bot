@@ -773,8 +773,8 @@ describe('GitLab review controller', () => {
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
-      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
     ])
   })
 

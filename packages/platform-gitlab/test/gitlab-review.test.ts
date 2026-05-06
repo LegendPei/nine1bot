@@ -568,7 +568,7 @@ describe('GitLab review foundation', () => {
     })
 
     expect(result).toMatchObject({ summaryPosted: true, inlinePosted: 1, fallbackPosted: 0 })
-    expect(calls).toEqual(['discussion', 'note'])
+    expect(calls).toEqual(['note', 'discussion'])
     expect(notes[0]).toContain('### Inline Comments')
     expect(notes[0]).toContain('Changed line')
     expect(notes[0]).toContain('src/app.ts:2')
@@ -793,12 +793,17 @@ describe('GitLab review foundation', () => {
         diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
       }],
     })
+    const notes: string[] = []
+    const calls: string[] = []
     const result = await publishGitLabReviewResult({
       client: {
         async createDiscussion() {
+          calls.push('discussion')
           throw new GitLabApiError(400, 'Bad Request', '{"error":"position is invalid"}')
         },
-        async createNote() {
+        async createNote(input) {
+          calls.push('note')
+          notes.push(input.body)
           return {}
         },
       },
@@ -820,6 +825,10 @@ describe('GitLab review foundation', () => {
     expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 1 })
     expect(result.warnings[0]).toContain('GitLab API returned 400')
     expect(result.warnings[0]).toContain('position is invalid')
+    expect(calls).toEqual(['note', 'discussion', 'note'])
+    expect(notes[0]).toContain('### Inline Comments')
+    expect(notes[1]).toContain('Nine1bot Inline Publish Fallback')
+    expect(notes[1]).toContain('Inline body')
   })
 
   test('publishes commit reviews as summary comments without inline discussions', async () => {

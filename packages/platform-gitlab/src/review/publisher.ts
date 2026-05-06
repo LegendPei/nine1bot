@@ -31,6 +31,7 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
   let fallbackPosted = 0
   const inlineFindings: typeof aggregated = []
   const summaryFindings: typeof aggregated = input.inlineComments && input.objectType === 'mr' ? [] : [...aggregated]
+  const inlineCandidates: Array<{ finding: (typeof aggregated)[number]; position: Record<string, unknown> }> = []
 
   if (input.inlineComments && input.objectType === 'mr') {
     for (const finding of aggregated) {
@@ -41,26 +42,8 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
         warnings.push(`Inline fallback for ${finding.file ?? finding.title}: ${validation.reason}`)
         continue
       }
-      try {
-        await input.client.createDiscussion({
-          projectId: input.projectId,
-          resource,
-          resourceId: input.objectId,
-          body: renderInlineFindingBody(finding),
-          position: validation.position,
-        })
-        inlinePosted += 1
-        inlineFindings.push(finding)
-      } catch (error) {
-        if (error instanceof GitLabApiError && error.status === 400) {
-          const detail = summarizeGitLabApiError(error)
-          summaryFindings.push(finding)
-          fallbackPosted += 1
-          warnings.push(`Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400${detail ? `: ${detail}` : ''}.`)
-          continue
-        }
-        throw error
-      }
+      inlineCandidates.push({ finding, position: validation.position })
+      inlineFindings.push(finding)
     }
   } else if (input.inlineComments && input.objectType === 'commit') {
     warnings.push('Inline comments are skipped for commit review runs; findings are included in the summary comment.')
@@ -82,6 +65,45 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
     resourceId: input.objectId,
     body: summaryBody,
   })
+
+  if (inlineCandidates.length) {
+    const publishFallbacks: ReviewFinding[] = []
+    for (const candidate of inlineCandidates) {
+      try {
+        await input.client.createDiscussion({
+          projectId: input.projectId,
+          resource,
+          resourceId: input.objectId,
+          body: renderInlineFindingBody(candidate.finding),
+          position: candidate.position,
+        })
+        inlinePosted += 1
+      } catch (error) {
+        if (error instanceof GitLabApiError && error.status === 400) {
+          const detail = summarizeGitLabApiError(error)
+          publishFallbacks.push(candidate.finding)
+          fallbackPosted += 1
+          warnings.push(`Inline fallback for ${candidate.finding.file ?? candidate.finding.title}: GitLab API returned 400${detail ? `: ${detail}` : ''}.`)
+          continue
+        }
+        throw error
+      }
+    }
+    if (publishFallbacks.length) {
+      await input.client.createNote({
+        projectId: input.projectId,
+        resource,
+        resourceId: input.objectId,
+        body: renderReviewSummaryComment({
+          title: 'Nine1bot Inline Publish Fallback',
+          summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+          findings: publishFallbacks,
+          manifest: input.manifest,
+          warnings,
+        }),
+      })
+    }
+  }
 
   return {
     summaryPosted: true,
