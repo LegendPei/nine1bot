@@ -51,9 +51,10 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
         inlinePosted += 1
       } catch (error) {
         if (error instanceof GitLabApiError && error.status === 400) {
-          fallbackMarkdown.push(renderInlineFallbackFinding(finding, 'GitLab rejected the inline discussion position.'))
+          const detail = summarizeGitLabApiError(error)
+          fallbackMarkdown.push(renderInlineFallbackFinding(finding, detail ? `GitLab rejected the inline discussion position: ${detail}` : 'GitLab rejected the inline discussion position.'))
           fallbackPosted += 1
-          warnings.push(`Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400.`)
+          warnings.push(`Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400${detail ? `: ${detail}` : ''}.`)
           continue
         }
         throw error
@@ -90,4 +91,10 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
 
 function resourceForObject(objectType: GitLabReviewObjectType): 'merge_requests' | 'repository/commits' {
   return objectType === 'mr' ? 'merge_requests' : 'repository/commits'
+}
+
+function summarizeGitLabApiError(error: GitLabApiError) {
+  const body = error.responseBody?.trim()
+  if (!body) return undefined
+  return body.length > 240 ? `${body.slice(0, 237)}...` : body
 }

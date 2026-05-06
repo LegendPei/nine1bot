@@ -8,6 +8,7 @@ import {
   compileSubagentStageResults,
   defaultGitLabReviewSettings,
   GitLabApiError,
+  GitLabApiClient,
   normalizeGitLabReviewSettings,
   parseSubagentStageResult,
   parseReviewStageResult,
@@ -546,6 +547,42 @@ describe('GitLab review foundation', () => {
     expect(calls).toEqual(['discussion', 'note'])
   })
 
+  test('serializes GitLab inline positions as nested form fields', async () => {
+    let capturedBody = ''
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (_url, init) => {
+        capturedBody = String(init?.body)
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as typeof fetch,
+    })
+
+    await client.createDiscussion({
+      projectId: 123,
+      resource: 'merge_requests',
+      resourceId: 10,
+      body: 'Inline body',
+      position: {
+        position_type: 'text',
+        base_sha: 'base',
+        start_sha: 'start',
+        head_sha: 'head',
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        new_line: 2,
+      },
+    })
+
+    expect(capturedBody).toContain('body=Inline+body')
+    expect(capturedBody).toContain('position%5Bbase_sha%5D=base')
+    expect(capturedBody).toContain('position%5Bnew_line%5D=2')
+    expect(capturedBody).not.toContain('position=%7B')
+  })
+
   test('renders validated inline suggestions in GitLab discussion bodies', async () => {
     const manifest = buildGitLabDiffManifest({
       diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
@@ -730,7 +767,7 @@ describe('GitLab review foundation', () => {
     const result = await publishGitLabReviewResult({
       client: {
         async createDiscussion() {
-          throw new GitLabApiError(400, 'Bad Request')
+          throw new GitLabApiError(400, 'Bad Request', '{"error":"position is invalid"}')
         },
         async createNote() {
           return {}
@@ -753,6 +790,7 @@ describe('GitLab review foundation', () => {
 
     expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 1 })
     expect(result.warnings[0]).toContain('GitLab API returned 400')
+    expect(result.warnings[0]).toContain('position is invalid')
   })
 
   test('publishes commit reviews as summary comments without inline discussions', async () => {

@@ -33,7 +33,7 @@ export class GitLabApiError extends Error {
     readonly statusText: string,
     readonly responseBody?: string,
   ) {
-    super(`GitLab API request failed: ${status} ${statusText}`)
+    super(responseBody ? `GitLab API request failed: ${status} ${statusText}: ${responseBody}` : `GitLab API request failed: ${status} ${statusText}`)
     this.name = 'GitLabApiError'
   }
 }
@@ -81,7 +81,7 @@ export class GitLabApiClient {
 
   async createDiscussion(input: GitLabCreateDiscussionInput): Promise<unknown> {
     const body = new URLSearchParams({ body: input.body })
-    if (input.position) body.set('position', JSON.stringify(input.position))
+    if (input.position) appendNestedFormFields(body, 'position', input.position)
     return await this.request(`/api/v4/projects/${encodeURIComponent(String(input.projectId))}/${input.resource}/${encodeURIComponent(String(input.resourceId))}/discussions`, {
       method: 'POST',
       body,
@@ -100,5 +100,12 @@ export class GitLabApiClient {
       throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
     }
     return await response.json() as T
+  }
+}
+
+function appendNestedFormFields(body: URLSearchParams, prefix: string, value: Record<string, unknown>) {
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (nestedValue === undefined || nestedValue === null) continue
+    body.set(`${prefix}[${key}]`, String(nestedValue))
   }
 }
