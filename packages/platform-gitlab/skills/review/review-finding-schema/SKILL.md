@@ -90,9 +90,15 @@ When in doubt, put the recommendation in `body` instead of `suggestion`.
 
 ## Evidence Rules
 
-Only include `file`, `oldLine`, or `newLine` when the location is grounded in the supplied diff manifest.
+Only include `file`, `oldLine`, or `newLine` when the location is grounded in the supplied GitLab diff evidence and review line map.
 
-Never guess line numbers. If the exact changed line is uncertain, omit line fields and let the publisher create a top-level summary finding.
+Never guess line numbers. Use the `Review line map for file/newLine/oldLine fields` rows when present:
+
+- added lines use `newLine`.
+- deleted lines use `oldLine`.
+- unchanged context lines inside a hunk may use `newLine`; the publisher can map it to the matching `oldLine`.
+
+If the exact diff hunk line is uncertain, omit line fields and let the publisher create a top-level summary finding.
 
 Do not create findings for:
 

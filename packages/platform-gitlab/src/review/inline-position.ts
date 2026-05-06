@@ -17,10 +17,23 @@ export function validateGitLabInlinePosition(
   const oldLine = finding.oldLine
   const validNewLine = newLine !== undefined && ranges.newLines.has(newLine)
   const validOldLine = oldLine !== undefined && ranges.oldLines.has(oldLine)
+  const contextOldLineFromNew = newLine !== undefined ? ranges.contextNewToOld.get(newLine) : undefined
+  const contextNewLineFromOld = oldLine !== undefined ? ranges.contextOldToNew.get(oldLine) : undefined
+  const validContextNewLine = newLine !== undefined && contextOldLineFromNew !== undefined
+  const validContextOldLine = oldLine !== undefined && contextNewLineFromOld !== undefined
 
-  if (!validNewLine && !validOldLine) {
-    return fallback(finding, `Line ${newLine ?? oldLine} is not an added or removed line in the diff hunk.`)
+  if (!validNewLine && !validOldLine && !validContextNewLine && !validContextOldLine) {
+    return fallback(finding, `Line ${newLine ?? oldLine} is not inside the diff hunk.`)
   }
+
+  const positionLines = resolvePositionLines({
+    newLine,
+    oldLine,
+    validNewLine,
+    validOldLine,
+    contextOldLineFromNew,
+    contextNewLineFromOld,
+  })
 
   return {
     ok: true,
@@ -31,8 +44,8 @@ export function validateGitLabInlinePosition(
       head_sha: diffRefs?.headSha,
       old_path: file.oldPath,
       new_path: file.newPath,
-      old_line: validOldLine ? oldLine : undefined,
-      new_line: validNewLine ? newLine : undefined,
+      old_line: positionLines.oldLine,
+      new_line: positionLines.newLine,
     },
   }
 }
@@ -40,10 +53,12 @@ export function validateGitLabInlinePosition(
 export function changedLineRanges(diff: string) {
   const oldLines = new Set<number>()
   const newLines = new Set<number>()
+  const contextNewToOld = new Map<number, number>()
+  const contextOldToNew = new Map<number, number>()
   let oldLine = 0
   let newLine = 0
 
-  for (const line of diff.split('\n')) {
+  for (const line of diffLines(diff)) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
     if (hunk) {
       oldLine = Number(hunk[1])
@@ -62,12 +77,41 @@ export function changedLineRanges(diff: string) {
       continue
     }
     if (!line.startsWith('\\')) {
+      contextNewToOld.set(newLine, oldLine)
+      contextOldToNew.set(oldLine, newLine)
       oldLine += 1
       newLine += 1
     }
   }
 
-  return { oldLines, newLines }
+  return { oldLines, newLines, contextNewToOld, contextOldToNew }
+}
+
+function resolvePositionLines(input: {
+  newLine?: number
+  oldLine?: number
+  validNewLine: boolean
+  validOldLine: boolean
+  contextOldLineFromNew?: number
+  contextNewLineFromOld?: number
+}) {
+  if (input.validNewLine) {
+    return { newLine: input.newLine, oldLine: undefined }
+  }
+  if (input.validOldLine) {
+    return { newLine: undefined, oldLine: input.oldLine }
+  }
+  if (input.newLine !== undefined && input.contextOldLineFromNew !== undefined) {
+    return { newLine: input.newLine, oldLine: input.contextOldLineFromNew }
+  }
+  if (input.oldLine !== undefined && input.contextNewLineFromOld !== undefined) {
+    return { newLine: input.contextNewLineFromOld, oldLine: input.oldLine }
+  }
+  return { newLine: undefined, oldLine: undefined }
+}
+
+function diffLines(diff: string) {
+  return diff.endsWith('\n') ? diff.slice(0, -1).split('\n') : diff.split('\n')
 }
 
 export function renderInlineFallbackFinding(finding: ReviewFinding, reason: string) {

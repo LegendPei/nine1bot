@@ -137,11 +137,58 @@ function renderGitLabDiffEvidence(context: ReturnType<typeof buildGitLabReviewCo
       file.diff,
       '```',
       '',
+      'Review line map for file/newLine/oldLine fields:',
+      '```text',
+      renderReviewLineMap(file.diff),
+      '```',
+      '',
     ]),
     skipped.length > 0 ? 'Skipped files:' : undefined,
     ...skipped.map((file) => `- ${file.path}: ${file.reason}`),
   ].filter(Boolean)
   return parts.join('\n')
+}
+
+function renderReviewLineMap(diff: string) {
+  const rows: string[] = []
+  let oldLine = 0
+  let newLine = 0
+
+  for (const line of diffLines(diff)) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (hunk) {
+      oldLine = Number(hunk[1])
+      newLine = Number(hunk[2])
+      rows.push(line)
+      continue
+    }
+    if (!oldLine && !newLine) continue
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      rows.push(`${lineRef(undefined, newLine)} ${line}`)
+      newLine += 1
+      continue
+    }
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      rows.push(`${lineRef(oldLine, undefined)} ${line}`)
+      oldLine += 1
+      continue
+    }
+    if (!line.startsWith('\\')) {
+      rows.push(`${lineRef(oldLine, newLine)} ${line}`)
+      oldLine += 1
+      newLine += 1
+    }
+  }
+
+  return rows.join('\n')
+}
+
+function lineRef(oldLine?: number, newLine?: number) {
+  return `[old:${oldLine ?? '-'} new:${newLine ?? '-'}]`
+}
+
+function diffLines(diff: string) {
+  return diff.endsWith('\n') ? diff.slice(0, -1).split('\n') : diff.split('\n')
 }
 
 export function extractGitLabReviewStageResultFromRuntimeText(text: string): unknown | undefined {

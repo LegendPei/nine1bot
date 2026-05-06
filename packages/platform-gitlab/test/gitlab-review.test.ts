@@ -76,7 +76,7 @@ describe('GitLab review foundation', () => {
     expect(manifest.files).toEqual([])
   })
 
-  test('validates inline positions against changed diff lines', () => {
+  test('validates inline positions against changed and context diff lines', () => {
     const response: GitLabRawChangesResponse = {
       diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
       changes: [{
@@ -97,10 +97,32 @@ describe('GitLab review foundation', () => {
 
     expect(validateGitLabInlinePosition({
       title: 'Context line',
-      body: 'Invalid line',
+      body: 'Valid context line',
       severity: 'major',
       file: 'src/app.ts',
       newLine: 10,
+    }, manifest.files, manifest.diffRefs)).toMatchObject({
+      ok: true,
+      position: {
+        old_line: 10,
+        new_line: 10,
+      },
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Outside hunk',
+      body: 'Invalid line',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 99,
+    }, manifest.files, manifest.diffRefs)).toMatchObject({ ok: false })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Trailing newline phantom',
+      body: 'Invalid phantom line',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 13,
     }, manifest.files, manifest.diffRefs)).toMatchObject({ ok: false })
   })
 
@@ -699,7 +721,7 @@ describe('GitLab review foundation', () => {
         body: 'Fallback body',
         severity: 'major',
         file: 'src/app.ts',
-        newLine: 1,
+        newLine: 99,
       }],
     })
 

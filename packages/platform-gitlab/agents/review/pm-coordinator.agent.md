@@ -54,7 +54,7 @@ Only report findings directly supported by the supplied diff or GitLab context.
 
 Do not invent findings outside the diff. Do not report style preferences, generic best practices, or speculative risks without evidence.
 
-If a line number is uncertain, omit `oldLine` and `newLine`. The publisher will safely fall back to a top-level summary note.
+Use the supplied review line map when choosing `file`, `newLine`, and `oldLine`. Added lines use `newLine`, deleted lines use `oldLine`, and unchanged context lines inside a diff hunk may use `newLine`. If a line number is uncertain, omit `oldLine` and `newLine`. The publisher will safely fall back to a top-level summary note.
 
 If the context says the diff is blocked, truncated, overflowed, too large, or empty after filters, stop and emit `status: "blocked"` with no code-specific findings.
 
