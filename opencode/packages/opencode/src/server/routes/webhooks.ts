@@ -20,6 +20,7 @@ import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
+import { registerBuiltinPlatformAdapters } from "../../../../../../packages/nine1bot/src/platform/builtin"
 import { normalizeGitLabReviewSettings } from "../../../../../../packages/platform-gitlab/src/review/settings"
 
 const WEBHOOK_CLIENT_CAPABILITIES = {
@@ -485,6 +486,10 @@ function gitLabReviewRuntimeInputFromRecord(run: ReviewRunRecord): GitLabReviewR
 async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
   const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
   const platforms = await readPlatformManagerConfig()
+  registerBuiltinPlatformAdapters({
+    config: platforms,
+    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+  })
   const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
   let publishAttempted = false
   const entry = {
