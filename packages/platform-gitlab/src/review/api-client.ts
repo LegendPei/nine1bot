@@ -47,8 +47,26 @@ export type GitLabProjectSummary = {
   }
 }
 
+export type GitLabGroupSummary = {
+  id: number
+  full_path?: string
+  web_url?: string
+  name?: string
+  path?: string
+}
+
 export type GitLabProjectHookInput = {
   projectId: string | number
+  url: string
+  hookId?: string | number
+  noteEvents?: boolean
+  mergeRequestEvents?: boolean
+  pushEvents?: boolean
+  enableSslVerification?: boolean
+}
+
+export type GitLabGroupHookInput = {
+  groupId: string | number
   url: string
   hookId?: string | number
   noteEvents?: boolean
@@ -107,6 +125,14 @@ export class GitLabApiClient {
     return await this.request<GitLabProjectSummary[]>(`/api/v4/projects?${params}`)
   }
 
+  async searchGroups(query: string, limit = 20): Promise<GitLabGroupSummary[]> {
+    const params = new URLSearchParams({
+      per_page: String(limit),
+    })
+    if (query.trim()) params.set('search', query.trim())
+    return await this.request<GitLabGroupSummary[]>(`/api/v4/groups?${params}`)
+  }
+
   async listProjectHooks(projectId: string | number): Promise<GitLabProjectHook[]> {
     return await this.request<GitLabProjectHook[]>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/hooks`,
@@ -142,6 +168,47 @@ export class GitLabApiClient {
   ): Promise<unknown> {
     return await this.request<unknown>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/hooks/${encodeURIComponent(String(hookId))}/test/${trigger}`,
+      {
+        method: 'POST',
+      },
+    )
+  }
+
+  async listGroupHooks(groupId: string | number): Promise<GitLabProjectHook[]> {
+    return await this.request<GitLabProjectHook[]>(
+      `/api/v4/groups/${encodeURIComponent(String(groupId))}/hooks`,
+    )
+  }
+
+  async createGroupHook(input: GitLabGroupHookInput): Promise<GitLabProjectHook> {
+    const body = groupHookBody(input)
+    return await this.request<GitLabProjectHook>(
+      `/api/v4/groups/${encodeURIComponent(String(input.groupId))}/hooks`,
+      {
+        method: 'POST',
+        body,
+      },
+    )
+  }
+
+  async updateGroupHook(input: GitLabGroupHookInput & { hookId: string | number }): Promise<GitLabProjectHook> {
+    const body = groupHookBody(input)
+    return await this.request<GitLabProjectHook>(
+      `/api/v4/groups/${encodeURIComponent(String(input.groupId))}/hooks/${encodeURIComponent(String(input.hookId))}`,
+      {
+        method: 'PUT',
+        body,
+      },
+    )
+  }
+
+  async testGroupHook(
+    groupId: string | number,
+    hookId: string | number,
+    trigger: GitLabHookTestTrigger,
+  ): Promise<unknown> {
+    return await this.request<unknown>(
+      `/api/v4/groups/${encodeURIComponent(String(groupId))}/hooks/${encodeURIComponent(String(hookId))}/test/${trigger}`,
       {
         method: 'POST',
       },
@@ -188,6 +255,17 @@ export class GitLabApiClient {
 }
 
 function projectHookBody(input: GitLabProjectHookInput) {
+  const body = new URLSearchParams({
+    url: input.url,
+    note_events: String(input.noteEvents ?? true),
+    merge_requests_events: String(input.mergeRequestEvents ?? true),
+    push_events: String(input.pushEvents ?? false),
+    enable_ssl_verification: String(input.enableSslVerification ?? true),
+  })
+  return body
+}
+
+function groupHookBody(input: GitLabGroupHookInput) {
   const body = new URLSearchParams({
     url: input.url,
     note_events: String(input.noteEvents ?? true),

@@ -297,10 +297,12 @@ describe('GitLab review foundation', () => {
       'review.scopeMode': 'all-received',
       'review.includedProjects': [{ id: 3, pathWithNamespace: 'root/uftest' }],
       'review.excludedProjects': [{ id: 4, pathWithNamespace: 'root/legacy' }],
+      'review.hookGroups': [{ id: 9, fullPath: 'root' }],
     })).toMatchObject({
       scopeMode: 'all-received',
       includedProjects: [{ id: 3, pathWithNamespace: 'root/uftest' }],
       excludedProjects: [{ id: 4, pathWithNamespace: 'root/legacy' }],
+      hookGroups: [{ id: 9, fullPath: 'root' }],
     })
   })
 

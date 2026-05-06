@@ -7,6 +7,7 @@ export type GitLabReviewSettings = {
   scopeMode: GitLabReviewScopeMode
   includedProjects: GitLabProjectRef[]
   excludedProjects: GitLabProjectRef[]
+  hookGroups: GitLabGroupRef[]
   webhookSecretRef?: GitLabReviewSecretRef
   tokenSecretRef?: GitLabReviewSecretRef
   manualMentionTrigger: boolean
@@ -28,6 +29,12 @@ export type GitLabProjectRef = {
   webUrl?: string
 }
 
+export type GitLabGroupRef = {
+  id: string | number
+  fullPath?: string
+  webUrl?: string
+}
+
 export type GitLabReviewSecretRef = string | {
   provider: 'nine1bot-local' | 'env' | 'external'
   key: string
@@ -42,6 +49,7 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   scopeMode: 'all-received',
   includedProjects: [],
   excludedProjects: [],
+  hookGroups: [],
   manualMentionTrigger: true,
   webhookAutoReview: false,
   inlineComments: true,
@@ -69,6 +77,7 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     scopeMode,
     includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
     excludedProjects: projectRefList(setting(record, 'review.excludedProjects', 'excludedProjects')),
+    hookGroups: groupRefList(setting(record, 'review.hookGroups', 'hookGroups')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')),
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
     manualMentionTrigger: booleanValue(setting(record, 'review.manualMentionTrigger', 'manualMentionTrigger'), defaultGitLabReviewSettings.manualMentionTrigger),
@@ -184,6 +193,23 @@ function projectRefList(input: unknown): GitLabProjectRef[] {
       }
     })
     .filter((item): item is GitLabProjectRef => Boolean(item))
+}
+
+function groupRefList(input: unknown): GitLabGroupRef[] {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((item) => {
+      if (typeof item === 'string' || typeof item === 'number') return { id: item }
+      if (!isRecord(item)) return undefined
+      const id = item.id
+      if (typeof id !== 'string' && typeof id !== 'number') return undefined
+      return {
+        id,
+        fullPath: optionalString(item.fullPath) ?? optionalString(item.full_path),
+        webUrl: optionalString(item.webUrl) ?? optionalString(item.web_url),
+      }
+    })
+    .filter((item): item is GitLabGroupRef => Boolean(item))
 }
 
 function positiveNumber(input: unknown, fallback: number) {

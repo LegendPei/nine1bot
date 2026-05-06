@@ -140,6 +140,12 @@ export const gitlabPlatformDescriptor = {
             description: 'GitLab projects that should never trigger review.',
           },
           {
+            key: 'review.hookGroups',
+            type: 'json',
+            label: 'Hook groups',
+            description: 'GitLab groups whose group hooks should be managed by Nine1Bot.',
+          },
+          {
             key: 'review.webhookSecretRef',
             type: 'password',
             label: 'Webhook secret',
@@ -184,6 +190,18 @@ export const gitlabPlatformDescriptor = {
       kind: 'button',
     },
     {
+      id: 'group-hooks.sync-current-url',
+      label: 'Sync GitLab group hooks',
+      description: 'Create or update selected group hooks so they point at the current dedicated Nine1Bot URL.',
+      kind: 'button',
+    },
+    {
+      id: 'group-hooks.test',
+      label: 'Test GitLab group hooks',
+      description: 'Ask GitLab to send a Note event test request through the selected group hooks.',
+      kind: 'button',
+    },
+    {
       id: 'projects.search',
       label: 'Search GitLab projects',
       description: 'Search GitLab projects by name or namespace for review scope configuration.',
@@ -199,6 +217,28 @@ export const gitlabPlatformDescriptor = {
                 type: 'string',
                 label: 'Search query',
                 description: 'Project name or namespace.',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      id: 'groups.search',
+      label: 'Search GitLab groups',
+      description: 'Search GitLab groups by name or namespace for group hook management.',
+      kind: 'form',
+      inputSchema: {
+        sections: [
+          {
+            id: 'query',
+            title: 'Group search',
+            fields: [
+              {
+                key: 'query',
+                type: 'string',
+                label: 'Search query',
+                description: 'Group name or namespace.',
               },
             ],
           },
@@ -349,6 +389,15 @@ async function handleGitLabPlatformAction(
   if (actionId === 'projects.search') {
     return await searchGitLabProjects(_input, ctx, status)
   }
+  if (actionId === 'groups.search') {
+    return await searchGitLabGroups(_input, ctx, status)
+  }
+  if (actionId === 'group-hooks.sync-current-url') {
+    return await syncGitLabGroupHooks(ctx, status)
+  }
+  if (actionId === 'group-hooks.test') {
+    return await testGitLabGroupHooks(ctx, status)
+  }
   return { status: 'failed', message: `Unsupported GitLab action: ${actionId}` }
 }
 
@@ -439,6 +488,44 @@ async function searchGitLabProjects(
   }
 }
 
+async function searchGitLabGroups(
+  input: unknown,
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const query = typeof input === 'object' && input && 'query' in input && typeof input.query === 'string'
+    ? input.query
+    : ''
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, ctx.secrets)
+  if (!token) return { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status }
+  try {
+    const client = new GitLabApiClient({
+      baseUrl: settings.baseUrl || 'https://gitlab.com',
+      token,
+    })
+    const groups = await client.searchGroups(query, 20)
+    return {
+      status: 'ok',
+      message: `Found ${groups.length} GitLab group(s).`,
+      data: {
+        groups: groups.map((group) => ({
+          id: group.id,
+          fullPath: group.full_path,
+          webUrl: group.web_url,
+        })),
+      },
+      updatedStatus: status,
+    }
+  } catch (error) {
+    return {
+      status: 'failed',
+      message: `GitLab group search failed: ${error instanceof Error ? error.message : String(error)}.`,
+      updatedStatus: status,
+    }
+  }
+}
+
 async function syncGitLabProjectHooks(
   ctx: PlatformAdapterContext,
   status: PlatformRuntimeStatus,
@@ -495,6 +582,129 @@ async function syncGitLabProjectHooks(
     message: failed.length
       ? `Webhook URL sync finished with ${failed.length} failed project(s).`
       : `Webhook URL synced to ${results.length} GitLab project hook(s).`,
+    data: {
+      webhookUrl: prepared.webhookUrl,
+      results,
+    },
+    updatedStatus: await getGitLabPlatformStatus(ctx),
+  }
+}
+
+async function syncGitLabGroupHooks(
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const prepared = await prepareGitLabGroupHookAction(ctx, status)
+  if ('error' in prepared) return prepared.error
+
+  const results = []
+  for (const group of prepared.groups) {
+    try {
+      const hooks = await prepared.client.listGroupHooks(group.id)
+      const existing = findNine1BotHook(hooks, prepared.webhookSecret)
+      const hookInput = {
+        groupId: group.id,
+        url: prepared.webhookUrl,
+        noteEvents: true,
+        mergeRequestEvents: true,
+        pushEvents: false,
+        enableSslVerification: prepared.webhookUrl.startsWith('https://'),
+      }
+      const hook = existing
+        ? await prepared.client.updateGroupHook({ ...hookInput, hookId: existing.id })
+        : await prepared.client.createGroupHook(hookInput)
+      let testStatus = 'ok'
+      let testMessage = 'Note event test accepted.'
+      try {
+        await prepared.client.testGroupHook(group.id, hook.id, 'note_events')
+      } catch (error) {
+        testStatus = 'failed'
+        testMessage = error instanceof Error ? error.message : String(error)
+      }
+      results.push({
+        groupId: String(group.id),
+        groupPath: group.fullPath,
+        hookId: hook.id,
+        action: existing ? (existing.url === prepared.webhookUrl ? 'refreshed' : 'updated') : 'created',
+        previousUrl: existing?.url,
+        url: prepared.webhookUrl,
+        testStatus,
+        testMessage,
+      })
+    } catch (error) {
+      results.push({
+        groupId: String(group.id),
+        groupPath: group.fullPath,
+        action: 'failed',
+        url: prepared.webhookUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const failed = results.filter((result) => result.action === 'failed' || result.testStatus === 'failed')
+  return {
+    status: failed.length ? 'failed' : 'ok',
+    message: failed.length
+      ? `Group hook URL sync finished with ${failed.length} failed group(s).`
+      : `Webhook URL synced to ${results.length} GitLab group hook(s).`,
+    data: {
+      webhookUrl: prepared.webhookUrl,
+      results,
+    },
+    updatedStatus: await getGitLabPlatformStatus(ctx),
+  }
+}
+
+async function testGitLabGroupHooks(
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const prepared = await prepareGitLabGroupHookAction(ctx, status)
+  if ('error' in prepared) return prepared.error
+
+  const results = []
+  for (const group of prepared.groups) {
+    try {
+      const hooks = await prepared.client.listGroupHooks(group.id)
+      const hook = findNine1BotHook(hooks, prepared.webhookSecret)
+      if (!hook) {
+        results.push({
+          groupId: String(group.id),
+          groupPath: group.fullPath,
+          action: 'missing',
+          error: 'No Nine1Bot group hook found for this group.',
+        })
+        continue
+      }
+      await prepared.client.testGroupHook(group.id, hook.id, 'note_events')
+      results.push({
+        groupId: String(group.id),
+        groupPath: group.fullPath,
+        hookId: hook.id,
+        action: hook.url === prepared.webhookUrl ? 'tested' : 'tested-url-mismatch',
+        url: hook.url,
+        expectedUrl: prepared.webhookUrl,
+      })
+    } catch (error) {
+      results.push({
+        groupId: String(group.id),
+        groupPath: group.fullPath,
+        action: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const failed = results.filter((result) => result.action === 'failed' || result.action === 'missing')
+  const mismatched = results.filter((result) => result.action === 'tested-url-mismatch')
+  return {
+    status: failed.length || mismatched.length ? 'failed' : 'ok',
+    message: failed.length
+      ? `GitLab group hook test failed for ${failed.length} group(s).`
+      : mismatched.length
+        ? `GitLab group hook test reached Nine1Bot, but ${mismatched.length} hook URL(s) differ from the current service URL.`
+        : `GitLab group hook test succeeded for ${results.length} group hook(s).`,
     data: {
       webhookUrl: prepared.webhookUrl,
       results,
@@ -603,6 +813,56 @@ async function prepareGitLabWebhookAction(ctx: PlatformAdapterContext, status: P
       token,
     }),
     projectIds,
+    webhookSecret,
+    webhookUrl,
+  }
+}
+
+async function prepareGitLabGroupHookAction(ctx: PlatformAdapterContext, status: PlatformRuntimeStatus): Promise<
+  | {
+      settings: ReturnType<typeof normalizeGitLabReviewSettings>
+      client: GitLabApiClient
+      groups: Array<{ id: string | number; fullPath?: string }>
+      webhookSecret: string
+      webhookUrl: string
+    }
+  | { error: PlatformActionResult }
+> {
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, ctx.secrets)
+  if (!token) {
+    return { error: { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status } }
+  }
+  const webhookSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  if (!webhookSecret) {
+    return { error: { status: 'failed', message: 'GitLab webhook secret is missing.', updatedStatus: status } }
+  }
+  const webhookUrl = dedicatedWebhookUrl(ctx, webhookSecret)
+  if (!webhookUrl) {
+    return {
+      error: {
+        status: 'failed',
+        message: 'NINE1BOT_LOCAL_URL is not configured, so the current dedicated webhook URL cannot be generated.',
+        updatedStatus: status,
+      },
+    }
+  }
+  if (settings.hookGroups.length === 0) {
+    return {
+      error: {
+        status: 'failed',
+        message: 'Select at least one hook group before Nine1Bot can sync group hooks.',
+        updatedStatus: status,
+      },
+    }
+  }
+  return {
+    settings,
+    client: new GitLabApiClient({
+      baseUrl: settings.baseUrl || 'https://gitlab.com',
+      token,
+    }),
+    groups: settings.hookGroups,
     webhookSecret,
     webhookUrl,
   }

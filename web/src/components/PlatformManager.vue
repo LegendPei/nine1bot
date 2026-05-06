@@ -43,6 +43,10 @@ const gitLabProjectSearchQuery = ref('')
 const gitLabProjectSearchResults = ref<GitLabProjectRef[]>([])
 const gitLabProjectSearchError = ref('')
 const searchingGitLabProjects = ref(false)
+const gitLabGroupSearchQuery = ref('')
+const gitLabGroupSearchResults = ref<GitLabGroupRef[]>([])
+const gitLabGroupSearchError = ref('')
+const searchingGitLabGroups = ref(false)
 const retryingGitLabRunIds = ref<Set<string>>(new Set())
 const actionFormValues = reactive<Record<string, Record<string, string | number | boolean>>>({})
 const actionJsonErrors = reactive<Record<string, Record<string, string>>>({})
@@ -65,7 +69,7 @@ const configFormSections = computed(() => {
       id: 'gitlab-trigger',
       title: '触发入口',
       description: '配置评论触发词、自动审查开关和允许触发 review 的项目范围。',
-      keys: ['review.botMention', 'review.webhookAutoReview', 'review.scopeMode', 'review.includedProjects', 'review.excludedProjects'],
+      keys: ['review.botMention', 'review.webhookAutoReview', 'review.scopeMode', 'review.includedProjects', 'review.excludedProjects', 'review.hookGroups'],
     },
     {
       id: 'gitlab-review-policy',
@@ -114,9 +118,15 @@ const gitLabReviewModelFieldKey = 'review.modelId'
 const gitLabIncludedProjectsFieldKey = 'review.includedProjects'
 const gitLabExcludedProjectsFieldKey = 'review.excludedProjects'
 const gitLabScopeModeFieldKey = 'review.scopeMode'
+const gitLabHookGroupsFieldKey = 'review.hookGroups'
 type GitLabProjectRef = {
   id: string | number
   pathWithNamespace?: string
+  webUrl?: string
+}
+type GitLabGroupRef = {
+  id: string | number
+  fullPath?: string
   webUrl?: string
 }
 const authenticatedModelCount = computed(() => {
@@ -124,6 +134,7 @@ const authenticatedModelCount = computed(() => {
 })
 const gitLabIncludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabIncludedProjectsFieldKey)))
 const gitLabExcludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabExcludedProjectsFieldKey)))
+const gitLabHookGroups = computed(() => parseGitLabGroupRefs(textValue(gitLabHookGroupsFieldKey)))
 const gitLabScopeMode = computed(() => textValue(gitLabScopeModeFieldKey) || 'all-received')
 const gitLabRuntimeWebhookUrl = computed(() => {
   const actionWebhookUrl = props.actionResult?.data?.webhookUrl
@@ -153,6 +164,9 @@ watch(
       gitLabProjectSearchQuery.value = ''
       gitLabProjectSearchResults.value = []
       gitLabProjectSearchError.value = ''
+      gitLabGroupSearchQuery.value = ''
+      gitLabGroupSearchResults.value = []
+      gitLabGroupSearchError.value = ''
     }
   },
   { immediate: true },
@@ -304,7 +318,11 @@ function isGitLabReviewModelField(field: PlatformConfigField) {
 }
 
 function isGitLabProjectScopeJsonField(field: PlatformConfigField) {
-  return isGitLabPlatform.value && (field.key === gitLabIncludedProjectsFieldKey || field.key === gitLabExcludedProjectsFieldKey)
+  return isGitLabPlatform.value && (
+    field.key === gitLabIncludedProjectsFieldKey ||
+    field.key === gitLabExcludedProjectsFieldKey ||
+    field.key === gitLabHookGroupsFieldKey
+  )
 }
 
 function gitLabReviewModelValue() {
@@ -376,12 +394,55 @@ function setGitLabProjectRefs(key: string, projects: GitLabProjectRef[]) {
   formValues[key] = JSON.stringify(projects, null, 2)
 }
 
+function parseGitLabGroupRefs(input: string): GitLabGroupRef[] {
+  if (!input.trim()) return []
+  try {
+    const parsed = JSON.parse(input)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((item) => {
+        if (typeof item === 'string' || typeof item === 'number') return { id: item }
+        if (!item || typeof item !== 'object') return undefined
+        const id = (item as any).id
+        if (typeof id !== 'string' && typeof id !== 'number') return undefined
+        return {
+          id,
+          fullPath: typeof (item as any).fullPath === 'string'
+            ? (item as any).fullPath
+            : typeof (item as any).full_path === 'string'
+              ? (item as any).full_path
+              : undefined,
+          webUrl: typeof (item as any).webUrl === 'string'
+            ? (item as any).webUrl
+            : typeof (item as any).web_url === 'string'
+              ? (item as any).web_url
+              : undefined,
+        }
+      })
+      .filter((item): item is GitLabGroupRef => Boolean(item))
+  } catch {
+    return []
+  }
+}
+
+function setGitLabGroupRefs(key: string, groups: GitLabGroupRef[]) {
+  formValues[key] = JSON.stringify(groups, null, 2)
+}
+
 function gitLabProjectLabel(project: GitLabProjectRef) {
   return project.pathWithNamespace || String(project.id)
 }
 
+function gitLabGroupLabel(group: GitLabGroupRef) {
+  return group.fullPath || String(group.id)
+}
+
 function hasGitLabProject(projects: GitLabProjectRef[], project: GitLabProjectRef) {
   return projects.some((item) => String(item.id) === String(project.id))
+}
+
+function hasGitLabGroup(groups: GitLabGroupRef[], group: GitLabGroupRef) {
+  return groups.some((item) => String(item.id) === String(group.id))
 }
 
 async function searchGitLabProjects() {
@@ -408,10 +469,44 @@ async function searchGitLabProjects() {
   }
 }
 
+async function searchGitLabGroups() {
+  const platform = props.selectedPlatform
+  if (!platform || searchingGitLabGroups.value) return
+  searchingGitLabGroups.value = true
+  gitLabGroupSearchError.value = ''
+  try {
+    const result = await platformApi.action(platform.id, 'groups.search', {
+      input: { query: gitLabGroupSearchQuery.value },
+    })
+    const groups = Array.isArray(result.data?.groups) ? result.data.groups : []
+    gitLabGroupSearchResults.value = groups
+      .map((item: any) => ({
+        id: item.id,
+        fullPath: item.fullPath,
+        webUrl: item.webUrl,
+      }))
+      .filter((item: GitLabGroupRef) => typeof item.id === 'string' || typeof item.id === 'number')
+  } catch (error: any) {
+    gitLabGroupSearchError.value = error?.message || 'GitLab group search failed'
+  } finally {
+    searchingGitLabGroups.value = false
+  }
+}
+
 function addGitLabProject(key: string, project: GitLabProjectRef) {
   const current = parseGitLabProjectRefs(textValue(key))
   if (hasGitLabProject(current, project)) return
   setGitLabProjectRefs(key, [...current, project])
+}
+
+function addGitLabGroup(key: string, group: GitLabGroupRef) {
+  const current = parseGitLabGroupRefs(textValue(key))
+  if (hasGitLabGroup(current, group)) return
+  setGitLabGroupRefs(key, [...current, group])
+}
+
+function removeGitLabGroup(key: string, group: GitLabGroupRef) {
+  setGitLabGroupRefs(key, parseGitLabGroupRefs(textValue(key)).filter((item) => String(item.id) !== String(group.id)))
 }
 
 function removeGitLabProject(key: string, project: GitLabProjectRef) {
@@ -880,6 +975,72 @@ function actionResultDetails(result: PlatformActionResult) {
                 </div>
               </div>
             </div>
+            <div class="gitlab-scope-picker">
+              <div class="platform-section-heading-row">
+                <h5 class="platform-section-title">Group Hook 管理</h5>
+                <span class="gitlab-guide-text">Group Hook 决定能收到哪些项目事件；Review 范围继续决定实际处理哪些项目。</span>
+              </div>
+              <div class="gitlab-project-search-row">
+                <input
+                  v-model="gitLabGroupSearchQuery"
+                  class="input platform-input"
+                  placeholder="搜索 GitLab Group，例如 root 或 backend"
+                  @keydown.enter.prevent="searchGitLabGroups"
+                />
+                <button type="button" class="btn btn-secondary btn-sm" :disabled="searchingGitLabGroups" @click="searchGitLabGroups">
+                  <RefreshCw :size="13" />
+                  <span>{{ searchingGitLabGroups ? '搜索中' : '搜索 Group' }}</span>
+                </button>
+              </div>
+              <div class="gitlab-webhook-actions">
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="operationLocked"
+                  @click="runGitLabAction('group-hooks.sync-current-url')"
+                >
+                  <RefreshCw :size="13" />
+                  <span>{{ actionRunning === 'group-hooks.sync-current-url' ? '同步中' : '同步 Group Hooks' }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="operationLocked"
+                  @click="runGitLabAction('group-hooks.test')"
+                >
+                  <Play :size="13" />
+                  <span>{{ actionRunning === 'group-hooks.test' ? '测试中' : '测试 Group Hooks' }}</span>
+                </button>
+              </div>
+              <div v-if="gitLabGroupSearchError" class="platform-alert warning">{{ gitLabGroupSearchError }}</div>
+              <div v-if="gitLabGroupSearchResults.length" class="gitlab-project-result-list">
+                <div v-for="group in gitLabGroupSearchResults" :key="String(group.id)" class="gitlab-project-row">
+                  <div>
+                    <strong>{{ gitLabGroupLabel(group) }}</strong>
+                    <span class="text-muted text-sm">ID {{ group.id }}</span>
+                  </div>
+                  <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabGroup(gitLabHookGroupsFieldKey, group)">
+                    加入 Hook Groups
+                  </button>
+                </div>
+              </div>
+              <div class="gitlab-selected-project-box">
+                <span class="gitlab-guide-label">Hook Groups</span>
+                <p class="gitlab-guide-text">Nine1Bot 会为这些 group 创建或更新 group hook；System Hook 仍需在 GitLab 管理后台手动配置。</p>
+                <div v-if="gitLabHookGroups.length" class="gitlab-project-chip-list">
+                  <button
+                    v-for="group in gitLabHookGroups"
+                    :key="String(group.id)"
+                    type="button"
+                    class="gitlab-project-chip"
+                    @click="removeGitLabGroup(gitLabHookGroupsFieldKey, group)"
+                  >
+                    {{ gitLabGroupLabel(group) }} ×
+                  </button>
+                </div>
+                <span v-else class="text-muted text-sm">尚未选择 Group</span>
+              </div>
+            </div>
           </div>
 
           <div class="platform-section">
@@ -1071,7 +1232,7 @@ function actionResultDetails(result: PlatformActionResult) {
             <div class="platform-action-list">
               <form
                 v-for="action in selectedPlatform.actions"
-                v-show="!(isGitLabPlatform && action.id === 'projects.search')"
+                v-show="!(isGitLabPlatform && (action.id === 'projects.search' || action.id === 'groups.search'))"
                 :key="action.id"
                 class="platform-action-item"
                 @submit.prevent="runAction(action)"

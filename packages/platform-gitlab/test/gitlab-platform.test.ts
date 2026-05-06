@@ -335,6 +335,125 @@ describe('GitLab platform adapter package', () => {
     }
   })
 
+  test('searches GitLab groups for group hook management', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push(url)
+      return jsonResponse([{
+        id: 9,
+        full_path: 'root',
+        web_url: 'https://gitlab.example.com/groups/root',
+      }])
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('groups.search', { query: 'root' }, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+        },
+        features: {},
+        env: {},
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'ok',
+        data: {
+          groups: [{
+            id: 9,
+            fullPath: 'root',
+            webUrl: 'https://gitlab.example.com/groups/root',
+          }],
+        },
+      })
+      expect(calls).toEqual(['https://gitlab.example.com/api/v4/groups?per_page=20&search=root'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('syncs GitLab group hooks to the current dedicated webhook URL', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; method: string; body?: string }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method || 'GET'
+      const body = init?.body instanceof URLSearchParams ? init.body.toString() : undefined
+      calls.push({ url, method, body })
+      if (url.endsWith('/api/v4/groups/9/hooks') && method === 'GET') {
+        return jsonResponse([{
+          id: 5,
+          url: 'http://old.example.com/webhooks/gitlab/sec_old',
+          note_events: true,
+          merge_requests_events: true,
+        }])
+      }
+      if (url.endsWith('/api/v4/groups/9/hooks/5') && method === 'PUT') {
+        return jsonResponse({
+          id: 5,
+          url: 'http://192.168.53.6:4096/webhooks/gitlab/sec_test',
+          note_events: true,
+          merge_requests_events: true,
+        })
+      }
+      if (url.endsWith('/api/v4/groups/9/hooks/5/test/note_events') && method === 'POST') {
+        return jsonResponse({ message: '201 Created' })
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('group-hooks.sync-current-url', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+          'review.webhookSecretRef': 'sec_test',
+          'review.hookGroups': [{ id: 9, fullPath: 'root' }],
+        },
+        features: {},
+        env: {
+          NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+        },
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'ok',
+        data: {
+          webhookUrl: 'http://192.168.53.6:4096/webhooks/gitlab/sec_test',
+          results: [{
+            groupId: '9',
+            groupPath: 'root',
+            hookId: 5,
+            action: 'updated',
+          }],
+        },
+      })
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'GET https://gitlab.example.com/api/v4/groups/9/hooks',
+        'PUT https://gitlab.example.com/api/v4/groups/9/hooks/5',
+        'POST https://gitlab.example.com/api/v4/groups/9/hooks/5/test/note_events',
+      ])
+      expect(calls[1]?.body).toContain('url=http%3A%2F%2F192.168.53.6%3A4096%2Fwebhooks%2Fgitlab%2Fsec_test')
+      expect(calls[1]?.body).toContain('note_events=true')
+      expect(calls[1]?.body).toContain('merge_requests_events=true')
+      expect(calls[1]?.body).toContain('push_events=false')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('declares concrete GitLab review subagents for runtime task delegation', async () => {
     const files = await readdir(reviewAgentsDir)
     expect(files).toEqual(expect.arrayContaining([
