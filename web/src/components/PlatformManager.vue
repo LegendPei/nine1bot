@@ -47,6 +47,7 @@ const gitLabGroupSearchQuery = ref('')
 const gitLabGroupSearchResults = ref<GitLabGroupRef[]>([])
 const gitLabGroupSearchError = ref('')
 const searchingGitLabGroups = ref(false)
+const gitLabAdvancedConfig = ref(false)
 const retryingGitLabRunIds = ref<Set<string>>(new Set())
 const actionFormValues = reactive<Record<string, Record<string, string | number | boolean>>>({})
 const actionJsonErrors = reactive<Record<string, Record<string, string>>>({})
@@ -107,6 +108,15 @@ const configFormSections = computed(() => {
   }
   return groups
 })
+const gitLabFieldMap = computed(() => new Map(configFields.value.map((field) => [field.key, field])))
+const gitLabMvpFields = computed(() => [
+  'review.baseUrl',
+  'review.webhookSecretRef',
+  'review.tokenSecretRef',
+  'review.enabled',
+  'review.dryRun',
+  'review.modelId',
+].map((key) => gitLabFieldMap.value.get(key)).filter((field): field is PlatformConfigField => Boolean(field)))
 const operationLocked = computed(() => props.saving || Boolean(props.actionRunning))
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
@@ -116,6 +126,15 @@ const gitLabWebhookPath = '/webhooks/gitlab/{webhookSecret}'
 const gitLabWebhookSecretFieldKey = 'review.webhookSecretRef'
 const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
 const gitLabReviewModelFieldKey = 'review.modelId'
+const gitLabMvpFieldKeys = new Set([
+  'review.baseUrl',
+  'review.webhookSecretRef',
+  'review.tokenSecretRef',
+  'review.enabled',
+  'review.dryRun',
+  'review.modelProviderId',
+  'review.modelId',
+])
 const gitLabIncludedProjectsFieldKey = 'review.includedProjects'
 const gitLabExcludedProjectsFieldKey = 'review.excludedProjects'
 const gitLabScopeModeFieldKey = 'review.scopeMode'
@@ -324,6 +343,22 @@ function isGitLabProjectScopeJsonField(field: PlatformConfigField) {
     field.key === gitLabExcludedProjectsFieldKey ||
     field.key === gitLabHookGroupsFieldKey
   )
+}
+
+function shouldShowGitLabGenericField(field: PlatformConfigField) {
+  if (!isGitLabPlatform.value) return true
+  if (!gitLabAdvancedConfig.value) return false
+  if (gitLabMvpFieldKeys.has(field.key)) return false
+  return !isGitLabReviewModelProviderField(field) && !isGitLabProjectScopeJsonField(field)
+}
+
+function gitLabMvpFieldClass(field: PlatformConfigField) {
+  return {
+    wide: field.key === 'review.baseUrl' ||
+      field.key === 'review.webhookSecretRef' ||
+      field.key === 'review.tokenSecretRef' ||
+      field.key === 'review.modelId',
+  }
 }
 
 function gitLabReviewModelValue() {
@@ -877,6 +912,10 @@ function actionResultDetails(result: PlatformActionResult) {
             <p class="gitlab-guide-intro text-muted text-sm">
               这个 URL 是 GitLab 平台 review 的专用入口，可以同时填到多个 Project、Group 或 System Hook。Nine1Bot 会根据 GitLab payload 里的 project id 和允许项目列表判断是否处理。
             </p>
+            <div class="gitlab-mvp-callout">
+              <strong>最小运行路径</strong>
+              <span>填 GitLab base URL 和 API token，复制下方 webhook URL 到 GitLab Project/Group Hook，只勾选 Comments / Note events，然后在 MR 评论 `@Nine1bot review`。</span>
+            </div>
             <div class="gitlab-webhook-url-box">
               <span class="gitlab-guide-label">专用 Webhook URL</span>
               <code class="gitlab-webhook-url">{{ gitLabReviewWebhookUrl }}</code>
@@ -908,7 +947,102 @@ function actionResultDetails(result: PlatformActionResult) {
               </div>
               <span v-if="gitLabWebhookUrlMessage" class="gitlab-guide-text">{{ gitLabWebhookUrlMessage }}</span>
             </div>
-            <div class="gitlab-hook-mode-grid">
+            <form class="gitlab-mvp-form" @submit.prevent="saveSettings">
+              <div class="platform-section-heading-row">
+                <h5 class="platform-section-title">MVP 配置</h5>
+                <span class="gitlab-guide-text">默认只启用 @Nine1bot 手动审查，自动 MR 审查放在高级配置里。</span>
+              </div>
+              <div class="gitlab-mvp-field-grid">
+                <label
+                  v-for="field in gitLabMvpFields"
+                  :key="field.key"
+                  class="platform-field gitlab-mvp-field"
+                  :class="gitLabMvpFieldClass(field)"
+                >
+                  <span class="platform-field-label">{{ field.label }}</span>
+                  <span v-if="field.description" class="platform-field-desc text-muted text-sm">{{ field.description }}</span>
+
+                  <select
+                    v-if="isGitLabReviewModelField(field)"
+                    :value="gitLabReviewModelValue()"
+                    class="input platform-input"
+                    @change="setGitLabReviewModel"
+                  >
+                    <option value="">Use default chat model</option>
+                    <optgroup
+                      v-for="provider in providers.filter((item) => item.authenticated)"
+                      :key="provider.id"
+                      :label="provider.name"
+                    >
+                      <option
+                        v-for="model in provider.models"
+                        :key="`${provider.id}:${model.id}`"
+                        :value="`${provider.id}\t${model.id}`"
+                      >
+                        {{ model.name || model.id }}
+                      </option>
+                    </optgroup>
+                  </select>
+
+                  <label v-else-if="field.type === 'boolean'" class="platform-switch inline">
+                    <input v-model="formValues[field.key]" type="checkbox" />
+                    <span>{{ formValues[field.key] ? '开启' : '关闭' }}</span>
+                  </label>
+
+                  <div v-else-if="isSecretField(field)" class="platform-secret-input">
+                    <input
+                      :type="fieldInputType(field)"
+                      :value="textValue(field.key)"
+                      class="input platform-input"
+                      :placeholder="secretStatus(field)"
+                      @input="setTextValue(field, $event)"
+                    />
+                    <button
+                      v-if="isRedactedSecret(selectedPlatform.settings[field.key]) && !secretClears[field.key]"
+                      type="button"
+                      class="btn btn-ghost btn-sm"
+                      @click="clearSecretField(field)"
+                    >
+                      <Trash2 :size="13" />
+                      <span>清除</span>
+                    </button>
+                  </div>
+
+                  <input
+                    v-else
+                    :type="fieldInputType(field)"
+                    :value="textValue(field.key)"
+                    class="input platform-input"
+                    placeholder=""
+                    @input="setTextValue(field, $event)"
+                  />
+
+                  <span v-if="isSecretField(field) && secretStatus(field)" class="platform-field-desc text-muted text-sm">
+                    {{ secretStatus(field) }}
+                  </span>
+                  <span v-if="jsonErrors[field.key]" class="platform-field-error">{{ jsonErrors[field.key] }}</span>
+                </label>
+              </div>
+              <div class="gitlab-webhook-actions">
+                <button class="btn btn-primary btn-sm" type="submit" :disabled="operationLocked">
+                  <Save :size="13" />
+                  <span>{{ saving ? '保存中' : '保存 MVP 配置' }}</span>
+                </button>
+                <button type="button" class="btn btn-ghost btn-sm" :disabled="operationLocked" @click="runGitLabAction('connection.test')">
+                  <Play :size="13" />
+                  <span>{{ actionRunning === 'connection.test' ? '测试中' : '测试 API token' }}</span>
+                </button>
+                <button type="button" class="btn btn-ghost btn-sm" :disabled="operationLocked" @click="runGitLabAction('webhook.test')">
+                  <Play :size="13" />
+                  <span>{{ actionRunning === 'webhook.test' ? '测试中' : '测试 Project Hook' }}</span>
+                </button>
+                <label class="platform-switch inline gitlab-advanced-toggle">
+                  <input v-model="gitLabAdvancedConfig" type="checkbox" />
+                  <span>高级配置</span>
+                </label>
+              </div>
+            </form>
+            <div v-if="gitLabAdvancedConfig" class="gitlab-hook-mode-grid">
               <div class="gitlab-hook-mode-card">
                 <span class="gitlab-guide-label">Project Hook</span>
                 <span class="gitlab-guide-text">适合少量项目测试。每个项目单独配置，边界最清楚。</span>
@@ -922,7 +1056,7 @@ function actionResultDetails(result: PlatformActionResult) {
                 <span class="gitlab-guide-text">适合自托管管理员统一接入。事件范围最大，必须配合允许项目列表。</span>
               </div>
             </div>
-            <div class="gitlab-guide-grid">
+            <div v-if="gitLabAdvancedConfig" class="gitlab-guide-grid">
               <div class="gitlab-guide-item">
                 <span class="gitlab-guide-label">需要勾选的事件</span>
                 <span class="gitlab-guide-text">勾选 Comments / Note events 用于 @Nine1bot review。需要自动审查时，再勾选 Merge request events。</span>
@@ -940,7 +1074,7 @@ function actionResultDetails(result: PlatformActionResult) {
                 <span class="gitlab-guide-text">模型来自已认证的 Chat providers。当前可选模型数：{{ authenticatedModelCount }}。</span>
               </div>
             </div>
-            <div class="gitlab-scope-picker">
+            <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
               <div class="platform-section-heading-row">
                 <h5 class="platform-section-title">Review 范围</h5>
                 <span class="gitlab-guide-text">{{ gitLabScopeMode === 'selected-only' ? '仅处理选中的项目' : '处理 Hook 收到的项目，排除黑名单' }}</span>
@@ -1009,7 +1143,7 @@ function actionResultDetails(result: PlatformActionResult) {
                 </div>
               </div>
             </div>
-            <div class="gitlab-scope-picker">
+            <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
               <div class="platform-section-heading-row">
                 <h5 class="platform-section-title">Group Hook 管理</h5>
                 <span class="gitlab-guide-text">Group Hook 决定能收到哪些项目事件；Review 范围继续决定实际处理哪些项目。</span>
@@ -1160,7 +1294,7 @@ function actionResultDetails(result: PlatformActionResult) {
             </p>
           </div>
 
-          <div class="platform-section">
+          <div v-if="!isGitLabPlatform || gitLabAdvancedConfig" class="platform-section">
             <h5 class="platform-section-title">能力</h5>
             <div class="platform-chip-row">
               <span v-for="label in capabilityLabels(selectedPlatform)" :key="label" class="platform-chip">
@@ -1169,7 +1303,7 @@ function actionResultDetails(result: PlatformActionResult) {
             </div>
           </div>
 
-          <div v-if="isGitLabPlatform" class="platform-section">
+          <div v-if="isGitLabPlatform && gitLabAdvancedConfig" class="platform-section">
             <div class="platform-section-heading-row">
               <h5 class="platform-section-title">Ignored GitLab Events</h5>
               <button class="btn btn-ghost btn-sm" :disabled="loadingGitLabRuns" @click="loadGitLabReviewRuns">
@@ -1197,7 +1331,7 @@ function actionResultDetails(result: PlatformActionResult) {
             </p>
           </div>
 
-          <form v-if="configFormSections.length" class="platform-section" @submit.prevent="saveSettings">
+          <form v-if="configFormSections.length && (!isGitLabPlatform || gitLabAdvancedConfig)" class="platform-section" @submit.prevent="saveSettings">
             <h5 class="platform-section-title">{{ isGitLabPlatform ? 'GitLab Review 配置' : '配置' }}</h5>
             <div v-for="section in configFormSections" :key="section.id" class="platform-form-section">
               <div class="platform-form-section-header">
@@ -1207,7 +1341,7 @@ function actionResultDetails(result: PlatformActionResult) {
 
               <label
                 v-for="field in section.fields"
-                v-show="!isGitLabReviewModelProviderField(field) && !isGitLabProjectScopeJsonField(field)"
+                v-show="shouldShowGitLabGenericField(field)"
                 :key="field.key"
                 class="platform-field"
               >
@@ -1606,6 +1740,47 @@ function actionResultDetails(result: PlatformActionResult) {
   border: 0.5px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
+}
+
+.gitlab-mvp-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 0.5px solid color-mix(in srgb, var(--accent) 24%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-primary));
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.gitlab-mvp-callout strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.gitlab-mvp-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.gitlab-mvp-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+}
+
+.gitlab-mvp-field.wide {
+  grid-column: 1 / -1;
+}
+
+.gitlab-advanced-toggle {
+  margin-left: auto;
 }
 
 .gitlab-project-search-row,
