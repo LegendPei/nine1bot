@@ -1,4 +1,4 @@
-import type { AggregatedReviewFinding, GitLabChangedFile, GitLabDiffManifest } from './types'
+import type { AggregatedReviewFinding, GitLabDiffManifest } from './types'
 
 export function renderBlockedDiffComment(reason: string) {
   return [
@@ -66,11 +66,6 @@ export function renderReviewSummaryComment(input: {
         if (finding.suggestion?.replacement) {
           lines.push('', 'Suggested replacement:', '', safeCodeBlock(finding.suggestion.replacement))
         }
-        const snippet = input.manifest ? diffSnippetForFinding(finding, input.manifest.files) : undefined
-        if (snippet) {
-          const fence = markdownFence(snippet)
-          lines.push('', 'Evidence:', '', `${fence}diff`, snippet, fence)
-        }
       }
     }
   }
@@ -101,16 +96,6 @@ function groupFindingsByFile(findings: AggregatedReviewFinding[]) {
     })
   }
   return Array.from(groups.values())
-}
-
-function diffSnippetForFinding(finding: AggregatedReviewFinding, files: GitLabChangedFile[]) {
-  if (!finding.file) return undefined
-  const file = files.find((candidate) => candidate.newPath === finding.file || candidate.oldPath === finding.file)
-  if (!file) return undefined
-  return diffSnippet(file.diff, {
-    newLine: finding.newLine,
-    oldLine: finding.oldLine,
-  })
 }
 
 export function diffSnippet(diff: string, input: { newLine?: number; oldLine?: number } = {}) {

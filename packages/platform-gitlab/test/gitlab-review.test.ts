@@ -828,9 +828,11 @@ describe('GitLab review foundation', () => {
     expect(result.fallbackPosted).toBe(1)
     expect(notes[0]).toContain('### Findings')
     expect(notes[0]).toContain('Fallback body')
+    expect(notes[0]).not.toContain('Evidence:')
+    expect(notes[0]).not.toContain('```diff')
   })
 
-  test('renders top-level findings with file groups and diff evidence snippets', async () => {
+  test('renders top-level findings with file groups and no diff evidence snippets', async () => {
     const manifest = buildGitLabDiffManifest({
       changes: [{
         old_path: 'src/app.ts',
@@ -873,10 +875,10 @@ describe('GitLab review foundation', () => {
     expect(notes[0]).toContain('The new value needs validation before use.')
     expect(notes[0]).toContain('Suggested replacement:')
     expect(notes[0]).toContain('return validated')
-    expect(notes[0]).toContain('Evidence:')
-    expect(notes[0]).toContain('```diff')
-    expect(notes[0]).toContain('@@ -1,2 +1,3 @@')
-    expect(notes[0]).toContain('+new')
+    expect(notes[0]).not.toContain('Evidence:')
+    expect(notes[0]).not.toContain('```diff')
+    expect(notes[0]).not.toContain('@@ -1,2 +1,3 @@')
+    expect(notes[0]).not.toContain('+new')
   })
 
   test('falls back to summary note when GitLab rejects inline position', async () => {
@@ -923,6 +925,8 @@ describe('GitLab review foundation', () => {
     expect(notes[0]).toContain('### Inline Comments')
     expect(notes[1]).toContain('Nine1bot Inline Publish Fallback')
     expect(notes[1]).toContain('Inline body')
+    expect(notes[1]).not.toContain('Evidence:')
+    expect(notes[1]).not.toContain('```diff')
   })
 
   test('publishes commit reviews as summary comments without inline discussions', async () => {
