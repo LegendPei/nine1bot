@@ -103,6 +103,9 @@ export function buildGitLabReviewRuntimePrompt(input: {
       : undefined,
     '',
     'Use the declared GitLab review skills. Produce structured review findings only from the supplied diff context. If an inline position is uncertain, omit line fields and prefer a top-level finding without a guessed line.',
+    'The diff evidence below is the source of truth. Do not fetch the GitLab web page or local repository files just to recover diff content.',
+    '',
+    renderGitLabDiffEvidence(input.context),
     '',
     input.trigger.userInstruction
       ? 'When the instruction highlights a risk domain such as RBAC, auth, permissions, secrets, SQL, tokens, privacy, frontend UX, performance, concurrency, or tests, bias subagent routing and checklist depth toward that domain while still scanning for obvious blockers.'
@@ -114,6 +117,31 @@ export function buildGitLabReviewRuntimePrompt(input: {
     'The first content line inside the fence must be GITLAB_REVIEW_RESULT:, followed by JSON matching the review finding schema.',
     'Use stage="closed"; status must be one of ok, blocked, failed; findings and nextActions must be arrays.',
   ].filter(Boolean).join('\n')
+}
+
+function renderGitLabDiffEvidence(context: ReturnType<typeof buildGitLabReviewContext>) {
+  const files = context.diff.files ?? []
+  const skipped = context.diff.skipped ?? []
+  const parts = [
+    'GitLab diff evidence:',
+    `Files included: ${files.length}`,
+    `Skipped files: ${skipped.length}`,
+    context.diff.diffRefs?.headSha ? `Diff head SHA: ${context.diff.diffRefs.headSha}` : undefined,
+    '',
+    ...files.flatMap((file, index) => [
+      `### File ${index + 1}: ${file.newPath}`,
+      `Old path: ${file.oldPath}`,
+      `New path: ${file.newPath}`,
+      `Added: ${String(file.added)} Renamed: ${String(file.renamed)} Deleted: ${String(file.deleted)}`,
+      '```diff',
+      file.diff,
+      '```',
+      '',
+    ]),
+    skipped.length > 0 ? 'Skipped files:' : undefined,
+    ...skipped.map((file) => `- ${file.path}: ${file.reason}`),
+  ].filter(Boolean)
+  return parts.join('\n')
 }
 
 export function extractGitLabReviewStageResultFromRuntimeText(text: string): unknown | undefined {
