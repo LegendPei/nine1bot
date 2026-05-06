@@ -6,6 +6,7 @@ import {
   parseReviewStageResult,
   publishGitLabReviewResult,
   renderBlockedDiffComment,
+  isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   validateGitLabWebhookToken,
@@ -216,7 +217,7 @@ function fencedJson(input: unknown) {
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (!settings.enabled) {
-    return reject(403, 'gitlab_review_disabled')
+    return reject(403, 'gitlab_review_disabled', undefined, summarizeGitLabWebhookEvent(input.payload, 'gitlab_review_disabled'))
   }
 
   if (!input.verifiedWebhookSecret) {
@@ -226,7 +227,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       receivedToken: header(input.headers, 'x-gitlab-token'),
     })
     if (!tokenValidation.ok) {
-      return reject(401, tokenValidation.reason ?? 'invalid_gitlab_webhook_token')
+      return reject(401, tokenValidation.reason ?? 'invalid_gitlab_webhook_token', undefined, summarizeGitLabWebhookEvent(input.payload, tokenValidation.reason ?? 'invalid_gitlab_webhook_token'))
     }
   }
 
@@ -254,7 +255,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         secrets: input.secrets,
         fetch: input.fetch,
       })
-      return reject(202, parsed.reason, commented ? rejectedMention.idempotencyKey : undefined)
+      return reject(202, parsed.reason, commented ? rejectedMention.idempotencyKey : undefined, summarizeGitLabWebhookEvent(input.payload, parsed.reason))
     }
     await maybeWriteRejectedMentionComment({
       payload: input.payload,
@@ -263,7 +264,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       secrets: input.secrets,
       fetch: input.fetch,
     })
-    return reject(202, parsed.reason)
+    return reject(202, parsed.reason, undefined, summarizeGitLabWebhookEvent(input.payload, parsed.reason))
   }
 
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
@@ -646,7 +647,7 @@ function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings)
     settings.baseUrl,
   )
   if (!projectId || !host) return undefined
-  if (!isAllowedGitLabTarget(settings, host, projectId)) return undefined
+  if (!isAllowedGitLabTarget(settings, host, projectId, stringValue(project?.path_with_namespace))) return undefined
   if (mergeRequest) {
     const mrIid = idValue(mergeRequest.iid)
     if (!mrIid) return undefined
@@ -670,10 +671,12 @@ function buildRejectedMentionIdempotencyKey(reason: string, target: RejectedMent
   ].join(':')
 }
 
-function isAllowedGitLabTarget(settings: GitLabReviewSettings, host: string, projectId: string | number) {
+function isAllowedGitLabTarget(settings: GitLabReviewSettings, host: string, projectId: string | number, projectPath?: string) {
   const hostAllowed = settings.allowedHosts.length === 0 || settings.allowedHosts.includes(host)
-  const projectAllowed = settings.allowedProjectIds.length === 0 ||
-    settings.allowedProjectIds.map(String).includes(String(projectId))
+  const projectAllowed = isGitLabReviewProjectInScope(settings, {
+    id: projectId,
+    pathWithNamespace: projectPath,
+  })
   return hostAllowed && projectAllowed
 }
 
@@ -763,12 +766,18 @@ export async function resolveGitLabReviewSecret(
   return await secrets.get(ref satisfies PlatformSecretRef)
 }
 
-function reject(httpStatus: number, error: string, idempotencyKey?: string): GitLabReviewWebhookResult {
+function reject(
+  httpStatus: number,
+  error: string,
+  idempotencyKey?: string,
+  trigger?: Record<string, unknown>,
+): GitLabReviewWebhookResult {
   const run = ReviewRunStore.create({
     platform: 'gitlab',
     idempotencyKey,
     status: 'rejected',
     error,
+    ...(trigger ? { trigger } : {}),
   })
   return {
     accepted: false,
@@ -776,6 +785,44 @@ function reject(httpStatus: number, error: string, idempotencyKey?: string): Git
     error,
     httpStatus,
     runId: run.id,
+  }
+}
+
+function summarizeGitLabWebhookEvent(payload: unknown, reason: string): Record<string, unknown> | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { eventName: 'unknown', reason }
+  const record = payload as Record<string, unknown>
+  const project = recordValue(record.project)
+  const attrs = recordValue(record.object_attributes)
+  const mergeRequest = recordValue(record.merge_request)
+  const commit = recordValue(record.commit)
+  const objectKind = stringValue(record.object_kind) ?? 'unknown'
+  const projectId = idValue(project?.id ?? attrs?.project_id ?? attrs?.target_project_id)
+  const projectPath = stringValue(project?.path_with_namespace)
+  const host = hostFromUrl(
+    stringValue(project?.web_url) ??
+    stringValue(project?.git_http_url) ??
+    stringValue(project?.homepage),
+  )
+  const noteId = objectKind === 'note' ? idValue(attrs?.id) : undefined
+  const mrIid = idValue(mergeRequest?.iid ?? attrs?.iid)
+  const commitSha = stringValue(commit?.id) ?? stringValue(attrs?.commit_id)
+  const headSha = stringValue(recordValue(mergeRequest?.last_commit)?.id) ??
+    stringValue(recordValue(attrs?.last_commit)?.id) ??
+    stringValue(mergeRequest?.last_commit_id) ??
+    stringValue(attrs?.last_commit_id) ??
+    stringValue(attrs?.sha)
+
+  return {
+    reason,
+    eventName: objectKind,
+    mode: objectKind === 'note' ? 'mention' : 'webhook',
+    ...(host ? { host } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(projectPath ? { projectPath } : {}),
+    ...(objectKind === 'note' && noteId ? { noteId } : {}),
+    ...(mrIid ? { objectType: 'mr', objectIid: mrIid } : {}),
+    ...(headSha ? { headSha } : {}),
+    ...(!mrIid && commitSha ? { objectType: 'commit', commitSha } : {}),
   }
 }
 

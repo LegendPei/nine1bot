@@ -110,7 +110,8 @@ const configFormSections = computed(() => {
 const operationLocked = computed(() => props.saving || Boolean(props.actionRunning))
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
-const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.slice(0, 8))
+const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.filter((run) => run.status !== 'rejected').slice(0, 8))
+const visibleGitLabIgnoredEvents = computed(() => gitLabReviewRuns.value.filter((run) => run.status === 'rejected').slice(0, 8))
 const gitLabWebhookPath = '/webhooks/gitlab/{webhookSecret}'
 const gitLabWebhookSecretFieldKey = 'review.webhookSecretRef'
 const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
@@ -700,6 +701,39 @@ function reviewRunDetail(run: GitLabReviewRun) {
   return parts.length ? parts.join(' · ') : run.idempotencyKey || 'No details'
 }
 
+function gitLabIgnoredEventTitle(run: GitLabReviewRun) {
+  const trigger = run.trigger || {}
+  const project = trigger.projectPath || trigger.projectId || 'unknown project'
+  const event = trigger.eventName || 'event'
+  const target = reviewRunObject(run)
+  return `${String(project)} · ${String(event)} · ${target}`
+}
+
+function gitLabIgnoredEventDetail(run: GitLabReviewRun) {
+  const trigger = run.trigger || {}
+  const parts = [
+    trigger.host ? `host ${String(trigger.host)}` : '',
+    trigger.noteId ? `note ${String(trigger.noteId)}` : '',
+    trigger.headSha ? `head ${String(trigger.headSha).slice(0, 8)}` : '',
+    run.idempotencyKey ? `key ${run.idempotencyKey}` : '',
+  ].filter(Boolean)
+  return parts.length ? parts.join(' · ') : run.id
+}
+
+function gitLabIgnoredReasonLabel(run: GitLabReviewRun) {
+  const reason = run.error || String(run.trigger?.reason || 'ignored')
+  const labels: Record<string, string> = {
+    'project-not-allowed': 'Project excluded by review scope',
+    'webhook-auto-review-disabled': 'Auto review disabled',
+    'manual-trigger-disabled': 'Manual mention disabled',
+    'mention-not-found': 'No bot mention',
+    'mention-from-bot': 'Bot-authored note ignored',
+    'mention-out-of-scope': 'Mention is not a review request',
+    'mention-sensitive-request': 'Sensitive request rejected',
+  }
+  return labels[reason] || reason
+}
+
 function runAction(action: PlatformActionDescriptor) {
   const platform = props.selectedPlatform
   if (!platform) return
@@ -1133,6 +1167,34 @@ function actionResultDetails(result: PlatformActionResult) {
                 {{ label }}
               </span>
             </div>
+          </div>
+
+          <div v-if="isGitLabPlatform" class="platform-section">
+            <div class="platform-section-heading-row">
+              <h5 class="platform-section-title">Ignored GitLab Events</h5>
+              <button class="btn btn-ghost btn-sm" :disabled="loadingGitLabRuns" @click="loadGitLabReviewRuns">
+                <RefreshCw :size="13" />
+                <span>{{ loadingGitLabRuns ? 'Loading' : 'Refresh' }}</span>
+              </button>
+            </div>
+            <p class="text-muted text-sm">
+              最近被 Nine1Bot 收到但没有触发 review 的 webhook。这里主要用来排查 Project/Group/System Hook 范围、黑名单、mention 和自动审查开关。
+            </p>
+            <div v-if="visibleGitLabIgnoredEvents.length" class="gitlab-run-list">
+              <div v-for="run in visibleGitLabIgnoredEvents" :key="run.id" class="gitlab-run-row ignored">
+                <div class="gitlab-run-main">
+                  <span class="gitlab-run-title">{{ gitLabIgnoredEventTitle(run) }}</span>
+                  <span class="gitlab-run-meta">{{ formatRunTime(run.updatedAt) }}</span>
+                  <span class="gitlab-run-meta">{{ gitLabIgnoredEventDetail(run) }}</span>
+                </div>
+                <div class="gitlab-run-side">
+                  <span class="platform-status-pill tone-warning">{{ gitLabIgnoredReasonLabel(run) }}</span>
+                </div>
+              </div>
+            </div>
+            <p v-else class="text-muted text-sm">
+              No ignored GitLab events yet.
+            </p>
           </div>
 
           <form v-if="configFormSections.length" class="platform-section" @submit.prevent="saveSettings">
@@ -1696,6 +1758,11 @@ function actionResultDetails(result: PlatformActionResult) {
   border: 0.5px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
+}
+
+.gitlab-run-row.ignored {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 8%, var(--bg-primary));
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 30%, var(--border-subtle));
 }
 
 .gitlab-run-row:has(.gitlab-run-details[open]) {

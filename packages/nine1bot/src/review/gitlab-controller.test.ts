@@ -408,7 +408,7 @@ describe('GitLab review controller', () => {
     const fetchMock = (async () => new Response('Forbidden', {
       status: 403,
       statusText: 'Forbidden',
-    })) as typeof fetch
+    })) as unknown as typeof fetch
 
     const result = await handleGitLabReviewWebhook({
       payload: {
@@ -446,6 +446,63 @@ describe('GitLab review controller', () => {
       status: 'failed',
       error: 'gitlab_api_load_changes_failed:403:Forbidden',
     })
+  })
+
+  test('records rejected GitLab events with safe scope-debug metadata', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'note',
+        project: {
+          id: 456,
+          path_with_namespace: 'nine1/ignored',
+          web_url: 'https://gitlab.example.com/nine1/ignored',
+        },
+        object_attributes: {
+          id: 88,
+          note: '@Nine1bot review this MR',
+          project_id: 456,
+        },
+        merge_request: {
+          iid: 12,
+          last_commit: { id: 'ignored-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.scopeMode': 'all-received',
+            'review.excludedProjects': [{ id: 456, pathWithNamespace: 'nine1/ignored' }],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      httpStatus: 202,
+      error: 'project-not-allowed',
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'rejected',
+      error: 'project-not-allowed',
+      trigger: {
+        reason: 'project-not-allowed',
+        eventName: 'note',
+        mode: 'mention',
+        host: 'gitlab.example.com',
+        projectId: 456,
+        projectPath: 'nine1/ignored',
+        noteId: 88,
+        objectType: 'mr',
+        objectIid: 12,
+        headSha: 'ignored-sha',
+      },
+    })
+    expect(JSON.stringify(ReviewRunStore.get(result.runId ?? ''))).not.toContain('review this MR')
   })
 
   test('writes guidance comment for out-of-scope mention requests', async () => {

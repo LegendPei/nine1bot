@@ -509,7 +509,6 @@ export interface GitLabReviewRun {
   createdAt: number
   updatedAt: number
   error?: string
-  trigger?: Record<string, unknown>
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number
@@ -517,6 +516,20 @@ export interface GitLabReviewRun {
   retryCount?: number
   lastRetryAt?: number
   warnings?: string[]
+  trigger?: {
+    eventName?: string
+    mode?: string
+    reason?: string
+    host?: string
+    projectId?: string | number
+    projectPath?: string
+    objectType?: string
+    objectIid?: string | number
+    commitSha?: string
+    headSha?: string
+    noteId?: string | number
+    [key: string]: unknown
+  }
 }
 
 export interface GitLabReviewRetryResult {
