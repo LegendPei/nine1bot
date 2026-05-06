@@ -528,6 +528,49 @@ describe('GitLab review foundation', () => {
     expect(notes[0]).toContain('Inline Fallbacks')
   })
 
+  test('renders top-level findings with file groups and diff evidence snippets', async () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n-old\n+new\n',
+      }],
+    })
+    const notes: string[] = []
+    await publishGitLabReviewResult({
+      client: {
+        async createDiscussion() {
+          throw new Error('should not post inline')
+        },
+        async createNote(input) {
+          notes.push(input.body)
+          return {}
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: false,
+      findings: [{
+        title: 'Validate changed value',
+        body: 'The new value needs validation before use.',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+        source: 'pm-coordinator',
+      }],
+    })
+
+    expect(notes[0]).toContain('#### `src/app.ts`')
+    expect(notes[0]).toContain('The new value needs validation before use.')
+    expect(notes[0]).toContain('Evidence:')
+    expect(notes[0]).toContain('```diff')
+    expect(notes[0]).toContain('@@ -1,2 +1,3 @@')
+    expect(notes[0]).toContain('+new')
+  })
+
   test('falls back to summary note when GitLab rejects inline position', async () => {
     const manifest = buildGitLabDiffManifest({
       changes: [{
