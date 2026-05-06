@@ -47,6 +47,7 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const note = recordValue(payload.object_attributes)
   const mergeRequest = recordValue(payload.merge_request)
   const commit = recordValue(payload.commit)
+  if (!note) return { ok: false, reason: 'missing-note-attributes' }
   const noteText = stringValue(note?.note)
   if (isBotAuthor(noteAuthorName(payload, note), settings.botMention)) return { ok: false, reason: 'mention-from-bot' }
   const mention = noteText ? extractMentionInstruction(noteText, settings.botMention) : undefined

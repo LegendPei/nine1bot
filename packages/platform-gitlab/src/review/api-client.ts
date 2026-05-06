@@ -27,6 +27,28 @@ export type GitLabTokenSelf = {
   expires_at?: string | null
 }
 
+export type GitLabProjectHook = {
+  id: number
+  url: string
+  project_id?: number
+  push_events?: boolean
+  merge_requests_events?: boolean
+  note_events?: boolean
+  enable_ssl_verification?: boolean
+}
+
+export type GitLabProjectHookInput = {
+  projectId: string | number
+  url: string
+  hookId?: string | number
+  noteEvents?: boolean
+  mergeRequestEvents?: boolean
+  pushEvents?: boolean
+  enableSslVerification?: boolean
+}
+
+export type GitLabHookTestTrigger = 'push_events' | 'merge_requests_events' | 'note_events'
+
 export class GitLabApiError extends Error {
   constructor(
     readonly status: number,
@@ -66,6 +88,47 @@ export class GitLabApiClient {
     return await this.request<GitLabTokenSelf>('/api/v4/personal_access_tokens/self')
   }
 
+  async listProjectHooks(projectId: string | number): Promise<GitLabProjectHook[]> {
+    return await this.request<GitLabProjectHook[]>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/hooks`,
+    )
+  }
+
+  async createProjectHook(input: GitLabProjectHookInput): Promise<GitLabProjectHook> {
+    const body = projectHookBody(input)
+    return await this.request<GitLabProjectHook>(
+      `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/hooks`,
+      {
+        method: 'POST',
+        body,
+      },
+    )
+  }
+
+  async updateProjectHook(input: GitLabProjectHookInput & { hookId: string | number }): Promise<GitLabProjectHook> {
+    const body = projectHookBody(input)
+    return await this.request<GitLabProjectHook>(
+      `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/hooks/${encodeURIComponent(String(input.hookId))}`,
+      {
+        method: 'PUT',
+        body,
+      },
+    )
+  }
+
+  async testProjectHook(
+    projectId: string | number,
+    hookId: string | number,
+    trigger: GitLabHookTestTrigger,
+  ): Promise<unknown> {
+    return await this.request<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/hooks/${encodeURIComponent(String(hookId))}/test/${trigger}`,
+      {
+        method: 'POST',
+      },
+    )
+  }
+
   async createNote(input: GitLabCreateNoteInput): Promise<unknown> {
     const notePath = input.resource === 'repository/commits'
       ? `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/repository/commits/${encodeURIComponent(String(input.resourceId))}/comments`
@@ -99,8 +162,21 @@ export class GitLabApiClient {
     if (!response.ok) {
       throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
     }
-    return await response.json() as T
+    const text = await response.text()
+    if (!text.trim()) return undefined as T
+    return JSON.parse(text) as T
   }
+}
+
+function projectHookBody(input: GitLabProjectHookInput) {
+  const body = new URLSearchParams({
+    url: input.url,
+    note_events: String(input.noteEvents ?? true),
+    merge_requests_events: String(input.mergeRequestEvents ?? true),
+    push_events: String(input.pushEvents ?? false),
+    enable_ssl_verification: String(input.enableSslVerification ?? true),
+  })
+  return body
 }
 
 function appendNestedFormFields(body: URLSearchParams, prefix: string, value: Record<string, unknown>) {

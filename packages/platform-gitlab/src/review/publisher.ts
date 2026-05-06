@@ -67,7 +67,7 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
   })
 
   if (inlineCandidates.length) {
-    const publishFallbacks: ReviewFinding[] = []
+    const publishFallbacks: typeof aggregated = []
     for (const candidate of inlineCandidates) {
       try {
         await input.client.createDiscussion({

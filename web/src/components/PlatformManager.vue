@@ -110,7 +110,14 @@ const gitLabReviewModelFieldKey = 'review.modelId'
 const authenticatedModelCount = computed(() => {
   return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
 })
+const gitLabRuntimeWebhookUrl = computed(() => {
+  const actionWebhookUrl = props.actionResult?.data?.webhookUrl
+  if (typeof actionWebhookUrl === 'string' && actionWebhookUrl.startsWith('http')) return actionWebhookUrl
+  const cardValue = props.selectedPlatform?.runtimeStatus.cards?.find((card) => card.id === 'webhook-url')?.value
+  return typeof cardValue === 'string' && cardValue.startsWith('http') ? cardValue : ''
+})
 const gitLabReviewWebhookUrl = computed(() => {
+  if (gitLabRuntimeWebhookUrl.value) return gitLabRuntimeWebhookUrl.value
   const baseUrl = gitLabWebhookBaseUrl()
   const secret = textValue(gitLabWebhookSecretFieldKey).trim() || '{webhookSecret}'
   return `${baseUrl}/webhooks/gitlab/${encodeURIComponent(secret)}`
@@ -310,6 +317,11 @@ async function copyGitLabWebhookUrl() {
   } catch {
     gitLabWebhookUrlMessage.value = '复制失败，请手动选中 URL 复制。'
   }
+}
+
+function runGitLabAction(actionId: string) {
+  const action = props.selectedPlatform?.actions.find((item) => item.id === actionId)
+  if (action) runAction(action)
 }
 
 function clearSecretField(field: PlatformConfigField) {
@@ -561,6 +573,10 @@ function buildActionInput(action: PlatformActionDescriptor) {
   delete actionJsonErrors[action.id]
   return input
 }
+
+function actionResultDetails(result: PlatformActionResult) {
+  return result.data ? JSON.stringify(result.data, null, 2) : ''
+}
 </script>
 
 <template>
@@ -640,6 +656,26 @@ function buildActionInput(action: PlatformActionDescriptor) {
                 <button type="button" class="btn btn-ghost btn-sm" @click="copyGitLabWebhookUrl">
                   <Copy :size="13" />
                   <span>复制 URL</span>
+                </button>
+              </div>
+              <div class="gitlab-webhook-actions">
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="operationLocked"
+                  @click="runGitLabAction('webhook.sync-current-url')"
+                >
+                  <RefreshCw :size="13" />
+                  <span>{{ actionRunning === 'webhook.sync-current-url' ? '同步中' : '同步到 GitLab' }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  :disabled="operationLocked"
+                  @click="runGitLabAction('webhook.test')"
+                >
+                  <Play :size="13" />
+                  <span>{{ actionRunning === 'webhook.test' ? '测试中' : '测试 Hook' }}</span>
                 </button>
               </div>
               <span v-if="gitLabWebhookUrlMessage" class="gitlab-guide-text">{{ gitLabWebhookUrlMessage }}</span>
@@ -946,6 +982,7 @@ function buildActionInput(action: PlatformActionDescriptor) {
             </div>
             <div v-if="actionResult" class="platform-alert" :class="actionResult.status === 'ok' ? 'success' : 'warning'">
               {{ actionResult.message || actionResult.status }}
+              <pre v-if="actionResultDetails(actionResult)" class="platform-action-result-data">{{ actionResultDetails(actionResult) }}</pre>
             </div>
           </div>
 
@@ -1403,6 +1440,14 @@ function buildActionInput(action: PlatformActionDescriptor) {
 
 .platform-action-form {
   margin-top: var(--space-sm);
+}
+
+.platform-action-result-data {
+  margin-top: var(--space-xs);
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
 }
 
 .platform-form-section.compact {

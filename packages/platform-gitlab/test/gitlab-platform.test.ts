@@ -199,6 +199,98 @@ describe('GitLab platform adapter package', () => {
     }
   })
 
+  test('syncs GitLab project hooks to the current dedicated webhook URL', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; method: string; body?: string }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method || 'GET'
+      const body = init?.body instanceof URLSearchParams ? init.body.toString() : undefined
+      calls.push({ url, method, body })
+      if (url.endsWith('/api/v4/projects/3/hooks') && method === 'GET') {
+        return jsonResponse([{
+          id: 4,
+          url: 'http://old.example.com/webhooks/gitlab/sec_old',
+          note_events: true,
+          merge_requests_events: true,
+        }])
+      }
+      if (url.endsWith('/api/v4/projects/3/hooks/4') && method === 'PUT') {
+        return jsonResponse({
+          id: 4,
+          url: 'http://192.168.53.6:4096/webhooks/gitlab/sec_test',
+          note_events: true,
+          merge_requests_events: true,
+        })
+      }
+      if (url.endsWith('/api/v4/projects/3/hooks/4/test/note_events') && method === 'POST') {
+        return jsonResponse({ message: '201 Created' })
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('webhook.sync-current-url', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+          'review.webhookSecretRef': 'sec_test',
+          'review.allowedProjectIds': ['3'],
+        },
+        features: {},
+        env: {
+          NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+        },
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'ok',
+        data: {
+          webhookUrl: 'http://192.168.53.6:4096/webhooks/gitlab/sec_test',
+        },
+      })
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'GET https://gitlab.example.com/api/v4/projects/3/hooks',
+        'PUT https://gitlab.example.com/api/v4/projects/3/hooks/4',
+        'POST https://gitlab.example.com/api/v4/projects/3/hooks/4/test/note_events',
+      ])
+      expect(calls[1]?.body).toContain('url=http%3A%2F%2F192.168.53.6%3A4096%2Fwebhooks%2Fgitlab%2Fsec_test')
+      expect(calls[1]?.body).toContain('note_events=true')
+      expect(calls[1]?.body).toContain('merge_requests_events=true')
+      expect(calls[1]?.body).toContain('push_events=false')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('requires current local URL before syncing GitLab project hooks', async () => {
+    const result = await gitlabPlatformContribution.handleAction?.('webhook.sync-current-url', undefined, {
+      platformId: 'gitlab',
+      enabled: true,
+      settings: {
+        'review.enabled': true,
+        'review.baseUrl': 'https://gitlab.example.com',
+        'review.tokenSecretRef': 'token-value',
+        'review.webhookSecretRef': 'sec_test',
+        'review.allowedProjectIds': ['3'],
+      },
+      features: {},
+      env: {},
+      secrets: secretAccess(),
+      audit: { write() {} },
+    })
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      message: expect.stringContaining('NINE1BOT_LOCAL_URL'),
+    })
+  })
+
   test('declares concrete GitLab review subagents for runtime task delegation', async () => {
     const files = await readdir(reviewAgentsDir)
     expect(files).toEqual(expect.arrayContaining([
@@ -253,6 +345,13 @@ describe('GitLab platform adapter package', () => {
     expect(blocks[1]?.content).toEqual(expect.stringContaining('Object key: gitlab.com:nine1/nine1bot:merge_request:42'))
   })
 })
+
+function jsonResponse(data: unknown) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
 
 function secretAccess() {
   return {

@@ -158,6 +158,18 @@ export const gitlabPlatformDescriptor = {
       label: 'Test connection',
       kind: 'button',
     },
+    {
+      id: 'webhook.sync-current-url',
+      label: 'Sync GitLab webhook URL',
+      description: 'Create or update project hooks for the allowed project ids so they point at the current dedicated Nine1Bot URL.',
+      kind: 'button',
+    },
+    {
+      id: 'webhook.test',
+      label: 'Test GitLab webhook',
+      description: 'Ask GitLab to send a Note event test request through the configured project hooks.',
+      kind: 'button',
+    },
   ],
 } satisfies PlatformDescriptor
 
@@ -226,6 +238,8 @@ async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<Pla
     { id: 'review', label: 'Code review', value: settings.enabled ? 'enabled' : 'disabled', tone: settings.enabled ? 'success' : 'neutral' },
     { id: 'mode', label: 'Review mode', value: settings.executionMode, tone: settings.dryRun ? 'warning' : 'neutral' },
     { id: 'model', label: 'Review model', value: settings.modelProviderId && settings.modelId ? `${settings.modelProviderId}/${settings.modelId}` : 'default', tone: 'neutral' },
+    { id: 'webhook-url', label: 'Dedicated webhook', value: await dedicatedWebhookUrlDisplay(settings, ctx), tone: 'neutral' },
+    { id: 'webhook-projects', label: 'Allowed projects', value: settings.allowedProjectIds.length ? settings.allowedProjectIds.map(String).join(', ') : 'not configured', tone: settings.allowedProjectIds.length ? 'neutral' : 'warning' },
   ]
 
   if (!settings.enabled) {
@@ -284,15 +298,20 @@ async function handleGitLabPlatformAction(
   _input: unknown,
   ctx: PlatformAdapterContext,
 ): Promise<PlatformActionResult> {
-  if (actionId !== 'connection.test') {
-    return { status: 'failed', message: `Unsupported GitLab action: ${actionId}` }
-  }
-
   const status = await getGitLabPlatformStatus(ctx)
-  if (status.status === 'auth-required' || status.status === 'error') {
-    return { status: 'failed', message: status.message, updatedStatus: status }
+  if (actionId === 'connection.test') {
+    if (status.status === 'auth-required' || status.status === 'error') {
+      return { status: 'failed', message: status.message, updatedStatus: status }
+    }
+    return await testGitLabConnection(ctx, status)
   }
-  return await testGitLabConnection(ctx, status)
+  if (actionId === 'webhook.sync-current-url') {
+    return await syncGitLabProjectHooks(ctx, status)
+  }
+  if (actionId === 'webhook.test') {
+    return await testGitLabProjectHooks(ctx, status)
+  }
+  return { status: 'failed', message: `Unsupported GitLab action: ${actionId}` }
 }
 
 async function testGitLabConnection(
@@ -342,6 +361,201 @@ async function testGitLabConnection(
       updatedStatus: status,
     }
   }
+}
+
+async function syncGitLabProjectHooks(
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const prepared = await prepareGitLabWebhookAction(ctx, status)
+  if ('error' in prepared) return prepared.error
+
+  const results = []
+  for (const projectId of prepared.projectIds) {
+    try {
+      const hooks = await prepared.client.listProjectHooks(projectId)
+      const existing = findNine1BotHook(hooks, prepared.webhookSecret)
+      const hookInput = {
+        projectId,
+        url: prepared.webhookUrl,
+        noteEvents: true,
+        mergeRequestEvents: true,
+        pushEvents: false,
+        enableSslVerification: prepared.webhookUrl.startsWith('https://'),
+      }
+      const hook = existing
+        ? await prepared.client.updateProjectHook({ ...hookInput, hookId: existing.id })
+        : await prepared.client.createProjectHook(hookInput)
+      let testStatus = 'ok'
+      let testMessage = 'Note event test accepted.'
+      try {
+        await prepared.client.testProjectHook(projectId, hook.id, 'note_events')
+      } catch (error) {
+        testStatus = 'failed'
+        testMessage = error instanceof Error ? error.message : String(error)
+      }
+      results.push({
+        projectId: String(projectId),
+        hookId: hook.id,
+        action: existing ? (existing.url === prepared.webhookUrl ? 'refreshed' : 'updated') : 'created',
+        previousUrl: existing?.url,
+        url: prepared.webhookUrl,
+        testStatus,
+        testMessage,
+      })
+    } catch (error) {
+      results.push({
+        projectId: String(projectId),
+        action: 'failed',
+        url: prepared.webhookUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const failed = results.filter((result) => result.action === 'failed' || result.testStatus === 'failed')
+  return {
+    status: failed.length ? 'failed' : 'ok',
+    message: failed.length
+      ? `Webhook URL sync finished with ${failed.length} failed project(s).`
+      : `Webhook URL synced to ${results.length} GitLab project hook(s).`,
+    data: {
+      webhookUrl: prepared.webhookUrl,
+      results,
+    },
+    updatedStatus: await getGitLabPlatformStatus(ctx),
+  }
+}
+
+async function testGitLabProjectHooks(
+  ctx: PlatformAdapterContext,
+  status: PlatformRuntimeStatus,
+): Promise<PlatformActionResult> {
+  const prepared = await prepareGitLabWebhookAction(ctx, status)
+  if ('error' in prepared) return prepared.error
+
+  const results = []
+  for (const projectId of prepared.projectIds) {
+    try {
+      const hooks = await prepared.client.listProjectHooks(projectId)
+      const hook = findNine1BotHook(hooks, prepared.webhookSecret)
+      if (!hook) {
+        results.push({
+          projectId: String(projectId),
+          action: 'missing',
+          error: 'No Nine1Bot project hook found for this project.',
+        })
+        continue
+      }
+      await prepared.client.testProjectHook(projectId, hook.id, 'note_events')
+      results.push({
+        projectId: String(projectId),
+        hookId: hook.id,
+        action: hook.url === prepared.webhookUrl ? 'tested' : 'tested-url-mismatch',
+        url: hook.url,
+        expectedUrl: prepared.webhookUrl,
+      })
+    } catch (error) {
+      results.push({
+        projectId: String(projectId),
+        action: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const failed = results.filter((result) => result.action === 'failed' || result.action === 'missing')
+  const mismatched = results.filter((result) => result.action === 'tested-url-mismatch')
+  return {
+    status: failed.length || mismatched.length ? 'failed' : 'ok',
+    message: failed.length
+      ? `GitLab webhook test failed for ${failed.length} project(s).`
+      : mismatched.length
+        ? `GitLab webhook test reached Nine1Bot, but ${mismatched.length} hook URL(s) differ from the current service URL.`
+        : `GitLab webhook test succeeded for ${results.length} project hook(s).`,
+    data: {
+      webhookUrl: prepared.webhookUrl,
+      results,
+    },
+    updatedStatus: await getGitLabPlatformStatus(ctx),
+  }
+}
+
+async function prepareGitLabWebhookAction(ctx: PlatformAdapterContext, status: PlatformRuntimeStatus): Promise<
+  | {
+      settings: ReturnType<typeof normalizeGitLabReviewSettings>
+      client: GitLabApiClient
+      projectIds: Array<string | number>
+      webhookSecret: string
+      webhookUrl: string
+    }
+  | { error: PlatformActionResult }
+> {
+  const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, ctx.secrets)
+  if (!token) {
+    return { error: { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status } }
+  }
+  const webhookSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  if (!webhookSecret) {
+    return { error: { status: 'failed', message: 'GitLab webhook secret is missing.', updatedStatus: status } }
+  }
+  const webhookUrl = dedicatedWebhookUrl(ctx, webhookSecret)
+  if (!webhookUrl) {
+    return {
+      error: {
+        status: 'failed',
+        message: 'NINE1BOT_LOCAL_URL is not configured, so the current dedicated webhook URL cannot be generated.',
+        updatedStatus: status,
+      },
+    }
+  }
+  if (settings.allowedProjectIds.length === 0) {
+    return {
+      error: {
+        status: 'failed',
+        message: 'Allowed project ids must be configured before Nine1Bot can sync GitLab project hooks.',
+        updatedStatus: status,
+      },
+    }
+  }
+  return {
+    settings,
+    client: new GitLabApiClient({
+      baseUrl: settings.baseUrl || 'https://gitlab.com',
+      token,
+    }),
+    projectIds: settings.allowedProjectIds,
+    webhookSecret,
+    webhookUrl,
+  }
+}
+
+async function dedicatedWebhookUrlDisplay(
+  settings: ReturnType<typeof normalizeGitLabReviewSettings>,
+  ctx: PlatformAdapterContext,
+) {
+  const secret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  const url = dedicatedWebhookUrl(ctx, secret || '{webhookSecret}')
+  return url || 'NINE1BOT_LOCAL_URL not configured'
+}
+
+function dedicatedWebhookUrl(ctx: PlatformAdapterContext, webhookSecret: string) {
+  const base = (ctx.env.NINE1BOT_LOCAL_URL || ctx.env.NINE1BOT_PUBLIC_URL || '').trim()
+  if (!base) return undefined
+  return `${base.replace(/\/+$/, '')}/webhooks/gitlab/${encodeURIComponent(webhookSecret)}`
+}
+
+function findNine1BotHook(hooks: Array<{ id: number; url: string }>, webhookSecret: string) {
+  const secretPath = `/webhooks/gitlab/${encodeURIComponent(webhookSecret)}`
+  return hooks.find((hook) => {
+    try {
+      const url = new URL(hook.url)
+      return url.pathname === secretPath
+    } catch {
+      return hook.url.includes(secretPath)
+    }
+  }) ?? hooks.find((hook) => hook.url.includes('/webhooks/gitlab/'))
 }
 
 async function resolveGitLabReviewSecret(
