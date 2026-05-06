@@ -677,12 +677,24 @@ async function testGitLabGroupHooks(
         })
         continue
       }
+      if (hook.url !== prepared.webhookUrl) {
+        results.push({
+          groupId: String(group.id),
+          groupPath: group.fullPath,
+          hookId: hook.id,
+          action: 'url-mismatch',
+          url: hook.url,
+          expectedUrl: prepared.webhookUrl,
+          error: 'GitLab hook URL differs from the current Nine1Bot webhook URL. Sync hooks before testing.',
+        })
+        continue
+      }
       await prepared.client.testGroupHook(group.id, hook.id, 'note_events')
       results.push({
         groupId: String(group.id),
         groupPath: group.fullPath,
         hookId: hook.id,
-        action: hook.url === prepared.webhookUrl ? 'tested' : 'tested-url-mismatch',
+        action: 'tested',
         url: hook.url,
         expectedUrl: prepared.webhookUrl,
       })
@@ -697,13 +709,13 @@ async function testGitLabGroupHooks(
   }
 
   const failed = results.filter((result) => result.action === 'failed' || result.action === 'missing')
-  const mismatched = results.filter((result) => result.action === 'tested-url-mismatch')
+  const mismatched = results.filter((result) => result.action === 'url-mismatch')
   return {
     status: failed.length || mismatched.length ? 'failed' : 'ok',
     message: failed.length
       ? `GitLab group hook test failed for ${failed.length} group(s).`
       : mismatched.length
-        ? `GitLab group hook test reached Nine1Bot, but ${mismatched.length} hook URL(s) differ from the current service URL.`
+        ? `${mismatched.length} GitLab group hook URL(s) are out of date. Sync hooks before testing.`
         : `GitLab group hook test succeeded for ${results.length} group hook(s).`,
     data: {
       webhookUrl: prepared.webhookUrl,
@@ -733,11 +745,22 @@ async function testGitLabProjectHooks(
         })
         continue
       }
+      if (hook.url !== prepared.webhookUrl) {
+        results.push({
+          projectId: String(projectId),
+          hookId: hook.id,
+          action: 'url-mismatch',
+          url: hook.url,
+          expectedUrl: prepared.webhookUrl,
+          error: 'GitLab hook URL differs from the current Nine1Bot webhook URL. Sync hooks before testing.',
+        })
+        continue
+      }
       await prepared.client.testProjectHook(projectId, hook.id, 'note_events')
       results.push({
         projectId: String(projectId),
         hookId: hook.id,
-        action: hook.url === prepared.webhookUrl ? 'tested' : 'tested-url-mismatch',
+        action: 'tested',
         url: hook.url,
         expectedUrl: prepared.webhookUrl,
       })
@@ -751,13 +774,13 @@ async function testGitLabProjectHooks(
   }
 
   const failed = results.filter((result) => result.action === 'failed' || result.action === 'missing')
-  const mismatched = results.filter((result) => result.action === 'tested-url-mismatch')
+  const mismatched = results.filter((result) => result.action === 'url-mismatch')
   return {
     status: failed.length || mismatched.length ? 'failed' : 'ok',
     message: failed.length
       ? `GitLab webhook test failed for ${failed.length} project(s).`
       : mismatched.length
-        ? `GitLab webhook test reached Nine1Bot, but ${mismatched.length} hook URL(s) differ from the current service URL.`
+        ? `${mismatched.length} GitLab project hook URL(s) are out of date. Sync hooks before testing.`
         : `GitLab webhook test succeeded for ${results.length} project hook(s).`,
     data: {
       webhookUrl: prepared.webhookUrl,

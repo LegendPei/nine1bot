@@ -291,6 +291,66 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('does not test stale GitLab project hook URLs', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; method: string }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method || 'GET'
+      calls.push({ url, method })
+      if (url.endsWith('/api/v4/projects/3/hooks') && method === 'GET') {
+        return jsonResponse([{
+          id: 4,
+          url: 'http://192.168.53.18:4096/webhooks/gitlab/sec_test',
+          note_events: true,
+          merge_requests_events: true,
+        }])
+      }
+      if (url.includes('/test/note_events')) {
+        throw new Error('stale hook should not be tested')
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('webhook.test', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+          'review.webhookSecretRef': 'sec_test',
+          'review.allowedProjectIds': ['3'],
+        },
+        features: {},
+        env: {
+          NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+        },
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      expect(result).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('out of date'),
+        data: {
+          results: [{
+            projectId: '3',
+            action: 'url-mismatch',
+            url: 'http://192.168.53.18:4096/webhooks/gitlab/sec_test',
+            expectedUrl: 'http://192.168.53.6:4096/webhooks/gitlab/sec_test',
+          }],
+        },
+      })
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'GET https://gitlab.example.com/api/v4/projects/3/hooks',
+      ])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('searches GitLab projects for review scope selection', async () => {
     const originalFetch = globalThis.fetch
     const calls: string[] = []
