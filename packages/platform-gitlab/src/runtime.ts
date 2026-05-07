@@ -5,6 +5,7 @@ import {
   normalizeGitLabPagePayload,
   parseGitLabUrl,
 } from './shared'
+import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
 import { gitLabReviewProjectIdsForHookSync, normalizeGitLabReviewSettings } from './review/settings'
@@ -909,9 +910,83 @@ async function dedicatedWebhookUrlDisplay(
 }
 
 function dedicatedWebhookUrl(ctx: PlatformAdapterContext, webhookSecret: string) {
-  const base = (ctx.env.NINE1BOT_LOCAL_URL || ctx.env.NINE1BOT_PUBLIC_URL || '').trim()
+  const base = resolveDedicatedWebhookBaseUrl(ctx)
   if (!base) return undefined
   return `${base.replace(/\/+$/, '')}/webhooks/gitlab/${encodeURIComponent(webhookSecret)}`
+}
+
+function resolveDedicatedWebhookBaseUrl(ctx: PlatformAdapterContext) {
+  const base = (ctx.env.NINE1BOT_LOCAL_URL || ctx.env.NINE1BOT_PUBLIC_URL || '').trim()
+  if (!base) return ''
+  if (ctx.env.NINE1BOT_REFRESH_LOCAL_URL === '0' || ctx.env.NINE1BOT_REFRESH_LOCAL_URL === 'false') {
+    return base.replace(/\/+$/, '')
+  }
+  return refreshLocalWebhookBaseUrl(base, networkInterfaces())
+}
+
+export function refreshLocalWebhookBaseUrl(
+  base: string,
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+) {
+  let url: URL
+  try {
+    url = new URL(base)
+  } catch {
+    return base
+  }
+
+  const host = url.hostname
+  const localAddresses = reachableIPv4Addresses(interfaces)
+  if (!localAddresses.length) return base.replace(/\/+$/, '')
+  if (localAddresses.includes(host)) return base.replace(/\/+$/, '')
+  if (!shouldRefreshWebhookHost(host)) return base.replace(/\/+$/, '')
+
+  const replacement = sameSubnetAddress(host, localAddresses) ?? preferredWebhookAddress(localAddresses)
+  if (!replacement) return base.replace(/\/+$/, '')
+  url.hostname = replacement
+  return url.toString().replace(/\/+$/, '')
+}
+
+function reachableIPv4Addresses(interfaces: NodeJS.Dict<NetworkInterfaceInfo[]>) {
+  const addresses: string[] = []
+  for (const infos of Object.values(interfaces)) {
+    for (const info of infos ?? []) {
+      if (info.family === 'IPv4' && !info.internal && info.address) addresses.push(info.address)
+    }
+  }
+  return addresses
+}
+
+function shouldRefreshWebhookHost(host: string) {
+  const normalized = host.toLowerCase()
+  return normalized === 'localhost'
+    || normalized === '0.0.0.0'
+    || normalized.startsWith('127.')
+    || isPrivateIPv4(normalized)
+}
+
+function sameSubnetAddress(host: string, addresses: string[]) {
+  const prefix = firstThreeOctets(host)
+  if (!prefix) return undefined
+  return addresses.find((address) => firstThreeOctets(address) === prefix)
+}
+
+function preferredWebhookAddress(addresses: string[]) {
+  return addresses.find((address) => address.startsWith('192.168.'))
+    ?? addresses.find((address) => address.startsWith('10.'))
+    ?? addresses.find((address) => /^172\.(1[6-9]|2\d|3[01])\./.test(address))
+    ?? addresses[0]
+}
+
+function isPrivateIPv4(host: string) {
+  return host.startsWith('10.')
+    || host.startsWith('192.168.')
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+}
+
+function firstThreeOctets(host: string) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(host)
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : undefined
 }
 
 function findNine1BotHook(hooks: Array<{ id: number; url: string }>, webhookSecret: string) {

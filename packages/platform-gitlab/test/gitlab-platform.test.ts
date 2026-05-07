@@ -7,6 +7,7 @@ import {
   gitlabPlatformContribution,
   gitLabTemplateIdsForPage,
   parseGitLabUrl,
+  refreshLocalWebhookBaseUrl,
 } from '../src'
 
 const reviewAgentsDir = join(import.meta.dir, '..', 'agents', 'review')
@@ -243,6 +244,7 @@ describe('GitLab platform adapter package', () => {
         features: {},
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+          NINE1BOT_REFRESH_LOCAL_URL: 'false',
         },
         secrets: secretAccess(),
         audit: { write() {} },
@@ -291,6 +293,20 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('refreshes stale local webhook IPs from current network interfaces', () => {
+    expect(refreshLocalWebhookBaseUrl('http://192.168.53.6:4096', {
+      vpn: [{
+        address: '192.168.53.10',
+        family: 'IPv4',
+        internal: false,
+        cidr: '192.168.53.10/24',
+        mac: '00:00:00:00:00:00',
+        netmask: '255.255.255.0',
+        scopeid: 0,
+      }],
+    })).toBe('http://192.168.53.10:4096')
+  })
+
   test('does not test stale GitLab project hook URLs', async () => {
     const originalFetch = globalThis.fetch
     const calls: Array<{ url: string; method: string }> = []
@@ -326,6 +342,7 @@ describe('GitLab platform adapter package', () => {
         features: {},
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+          NINE1BOT_REFRESH_LOCAL_URL: 'false',
         },
         secrets: secretAccess(),
         audit: { write() {} },
@@ -483,6 +500,7 @@ describe('GitLab platform adapter package', () => {
         features: {},
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+          NINE1BOT_REFRESH_LOCAL_URL: 'false',
         },
         secrets: secretAccess(),
         audit: { write() {} },
