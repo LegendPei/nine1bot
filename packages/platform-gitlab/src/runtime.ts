@@ -5,6 +5,7 @@ import {
   normalizeGitLabPagePayload,
   parseGitLabUrl,
 } from './shared'
+import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
@@ -806,7 +807,7 @@ async function prepareGitLabWebhookAction(ctx: PlatformAdapterContext, status: P
   if (!token) {
     return { error: { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status } }
   }
-  const webhookSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  const webhookSecret = await resolveOrCreateGitLabWebhookSecret(settings.webhookSecretRef, ctx.secrets)
   if (!webhookSecret) {
     return { error: { status: 'failed', message: 'GitLab webhook secret is missing.', updatedStatus: status } }
   }
@@ -857,7 +858,7 @@ async function prepareGitLabGroupHookAction(ctx: PlatformAdapterContext, status:
   if (!token) {
     return { error: { status: 'failed', message: 'GitLab API token is missing.', updatedStatus: status } }
   }
-  const webhookSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  const webhookSecret = await resolveOrCreateGitLabWebhookSecret(settings.webhookSecretRef, ctx.secrets)
   if (!webhookSecret) {
     return { error: { status: 'failed', message: 'GitLab webhook secret is missing.', updatedStatus: status } }
   }
@@ -904,7 +905,7 @@ async function dedicatedWebhookUrlDisplay(
   settings: ReturnType<typeof normalizeGitLabReviewSettings>,
   ctx: PlatformAdapterContext,
 ) {
-  const secret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  const secret = await resolveOrCreateGitLabWebhookSecret(settings.webhookSecretRef, ctx.secrets)
   const url = dedicatedWebhookUrl(ctx, secret || '{webhookSecret}')
   return url || 'NINE1BOT_LOCAL_URL not configured'
 }
@@ -1008,6 +1009,20 @@ async function resolveGitLabReviewSecret(
   if (!ref) return undefined
   if (typeof ref === 'string') return ref
   return await secrets.get(ref satisfies PlatformSecretRef)
+}
+
+async function resolveOrCreateGitLabWebhookSecret(
+  ref: GitLabReviewSecretRef | undefined,
+  secrets: PlatformSecretAccess,
+): Promise<string | undefined> {
+  if (!ref) return undefined
+  if (typeof ref === 'string') return ref
+  const existing = await secrets.get(ref satisfies PlatformSecretRef)
+  if (existing) return existing
+  if (ref.provider !== 'nine1bot-local') return undefined
+  const generated = `sec_${randomBytes(16).toString('hex')}`
+  await secrets.set(ref, generated)
+  return generated
 }
 
 function buildGitLabContextBlocks(page: PageContextPayload, observedAt: number): PlatformContextBlock[] | undefined {

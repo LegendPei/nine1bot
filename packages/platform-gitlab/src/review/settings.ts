@@ -40,6 +40,11 @@ export type GitLabReviewSecretRef = string | {
   key: string
 }
 
+export const defaultGitLabWebhookSecretRef: GitLabReviewSecretRef = {
+  provider: 'nine1bot-local',
+  key: 'platform:gitlab:default:review.webhookSecretRef',
+}
+
 export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   enabled: false,
   baseUrl: undefined,
@@ -50,6 +55,7 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   includedProjects: [],
   excludedProjects: [],
   hookGroups: [],
+  webhookSecretRef: defaultGitLabWebhookSecretRef,
   manualMentionTrigger: true,
   webhookAutoReview: false,
   inlineComments: true,
@@ -78,7 +84,7 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
     excludedProjects: projectRefList(setting(record, 'review.excludedProjects', 'excludedProjects')),
     hookGroups: groupRefList(setting(record, 'review.hookGroups', 'hookGroups')),
-    webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')),
+    webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')) ?? defaultGitLabReviewSettings.webhookSecretRef,
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
     manualMentionTrigger: booleanValue(setting(record, 'review.manualMentionTrigger', 'manualMentionTrigger'), defaultGitLabReviewSettings.manualMentionTrigger),
     webhookAutoReview: booleanValue(setting(record, 'review.webhookAutoReview', 'webhookAutoReview'), defaultGitLabReviewSettings.webhookAutoReview),

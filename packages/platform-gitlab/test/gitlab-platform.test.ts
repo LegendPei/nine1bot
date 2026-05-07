@@ -293,6 +293,29 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('auto-generates the dedicated GitLab webhook URL secret', async () => {
+    const secrets = memorySecretAccess()
+    const status = await gitlabPlatformContribution.getStatus?.({
+      platformId: 'gitlab',
+      enabled: true,
+      settings: {},
+      features: {},
+      env: {
+        NINE1BOT_LOCAL_URL: 'http://127.0.0.1:4096',
+        NINE1BOT_REFRESH_LOCAL_URL: 'false',
+      },
+      secrets,
+      audit: { write() {} },
+    })
+
+    const webhookCard = status?.cards?.find((card) => card.id === 'webhook-url')
+    expect(webhookCard?.value).toMatch(/^http:\/\/127\.0\.0\.1:4096\/webhooks\/gitlab\/sec_[a-f0-9]{32}$/)
+    expect(await secrets.get({
+      provider: 'nine1bot-local',
+      key: 'platform:gitlab:default:review.webhookSecretRef',
+    })).toMatch(/^sec_[a-f0-9]{32}$/)
+  })
+
   test('refreshes stale local webhook IPs from current network interfaces', () => {
     expect(refreshLocalWebhookBaseUrl('http://192.168.53.6:4096', {
       vpn: [{
@@ -600,5 +623,15 @@ function secretAccess() {
     async set() {},
     async delete() {},
     async has() { return false },
+  }
+}
+
+function memorySecretAccess() {
+  const store = new Map<string, string>()
+  return {
+    async get(ref: { provider?: string; key: string }) { return store.get(ref.key) },
+    async set(ref: { provider?: string; key: string }, value: string) { store.set(ref.key, value) },
+    async delete(ref: { provider?: string; key: string }) { store.delete(ref.key) },
+    async has(ref: { provider?: string; key: string }) { return store.has(ref.key) },
   }
 }
