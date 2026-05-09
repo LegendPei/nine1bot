@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.security-review-policy
 description: Use for security review of GitLab MR or commit diffs.
 ---

@@ -3,6 +3,7 @@ import type { SubagentTaskSpec } from './types'
 
 export const gitLabReviewSkillIds = [
   'platform.gitlab.gitlab-mr-review-workflow',
+  'platform.gitlab.gitlab-commit-review-workflow',
   'platform.gitlab.spec-gate-review',
   'platform.gitlab.pm-risk-routing',
   'platform.gitlab.review-finding-schema',

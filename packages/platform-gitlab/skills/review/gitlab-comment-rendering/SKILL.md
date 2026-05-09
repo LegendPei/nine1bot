@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.gitlab-comment-rendering
 description: Use to render GitLab review results into concise merge request or commit comments.
 ---

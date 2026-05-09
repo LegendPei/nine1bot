@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.spec-gate-review
 description: Use to decide whether a GitLab review has enough product and technical context to proceed.
 ---

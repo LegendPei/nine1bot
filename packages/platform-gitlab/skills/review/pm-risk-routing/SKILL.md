@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.pm-risk-routing
 description: Use to choose which custom subagents should be created for a GitLab review run.
 ---

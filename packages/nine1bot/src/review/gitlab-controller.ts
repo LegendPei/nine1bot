@@ -328,16 +328,20 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       maxFiles: settings.maxFiles,
     })
     if (context.diff.blocked) {
-      await maybeWriteBlockedComment({
+      const publishWarning = await maybeWriteBlockedComment({
         trigger: parsed.trigger,
         settings,
         secrets: input.secrets,
         fetch: input.fetch,
         reason: context.diff.blockReason ?? 'MR diff is too large or was truncated by GitLab.',
       })
+      const warnings = [
+        context.diff.blockReason ?? 'GitLab diff blocked.',
+        ...(publishWarning ? [publishWarning] : []),
+      ]
       ReviewRunStore.update(run.id, {
         status: 'blocked',
-        warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
+        warnings,
         context,
       })
       return {
@@ -347,7 +351,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         runId: run.id,
         trigger: parsed.trigger,
         context,
-        warnings: [context.diff.blockReason ?? 'GitLab diff blocked.'],
+        warnings,
       }
     }
     ReviewRunStore.update(run.id, { status: settings.dryRun ? 'succeeded' : 'running', context })
@@ -743,18 +747,22 @@ async function maybeWriteBlockedComment(input: {
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
   reason: string
-}) {
+}): Promise<string | undefined> {
   if (input.settings.dryRun || input.trigger.objectType !== 'mr' || !input.trigger.objectIid) return
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return
   const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
   const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
-  await client.createNote({
-    projectId: input.trigger.projectId,
-    resource: 'merge_requests',
-    resourceId: input.trigger.objectIid,
-    body: renderBlockedDiffComment(input.reason),
-  })
+  try {
+    await client.createNote({
+      projectId: input.trigger.projectId,
+      resource: 'merge_requests',
+      resourceId: input.trigger.objectIid,
+      body: renderBlockedDiffComment(input.reason),
+    })
+  } catch (error) {
+    return gitLabApiFailureMessage('blocked_comment', error)
+  }
 }
 
 export async function resolveGitLabReviewSecret(

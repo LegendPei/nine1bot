@@ -404,6 +404,58 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('keeps blocked review accepted when blocked comment publishing fails', async () => {
+    const fetchMock = (async (url: string | URL | Request) => {
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          overflow: true,
+          changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
+        })
+      }
+      return new Response('Forbidden', {
+        status: 403,
+        statusText: 'Forbidden',
+      })
+    }) as typeof fetch
+
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'blocked-comment-fail-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      status: 'blocked',
+      warnings: expect.arrayContaining(['gitlab_api_blocked_comment_failed:403:Forbidden']),
+    })
+    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'blocked',
+      warnings: expect.arrayContaining(['gitlab_api_blocked_comment_failed:403:Forbidden']),
+    })
+  })
+
   test('marks review run failed when live GitLab changes fetch is forbidden', async () => {
     const fetchMock = (async () => new Response('Forbidden', {
       status: 403,

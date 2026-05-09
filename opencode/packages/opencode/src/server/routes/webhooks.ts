@@ -53,6 +53,7 @@ const GITLAB_REVIEW_CLIENT_CAPABILITIES = {
 
 const GITLAB_REVIEW_SKILLS = [
   "platform.gitlab.gitlab-mr-review-workflow",
+  "platform.gitlab.gitlab-commit-review-workflow",
   "platform.gitlab.spec-gate-review",
   "platform.gitlab.pm-risk-routing",
   "platform.gitlab.review-finding-schema",

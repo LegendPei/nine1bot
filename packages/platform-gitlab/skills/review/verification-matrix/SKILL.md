@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.verification-matrix
 description: Use to plan minimal QA checks for GitLab review findings.
 ---

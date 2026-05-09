@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.gitlab-commit-review-workflow
 description: Use for narrow GitLab commit review runs triggered from commit comments.
 ---

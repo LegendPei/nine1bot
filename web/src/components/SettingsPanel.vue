@@ -171,7 +171,7 @@ function handleOverlayClick(e: MouseEvent) {
             :class="{ active: activeTab === 'platforms' }"
             @click="activeTab = 'platforms'"
           >
-            &#22810;&#24179;&#21488;
+            多平台
           </button>
         </div>
       </div>

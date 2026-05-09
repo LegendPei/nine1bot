@@ -25,7 +25,10 @@ export function buildGitLabDiffManifest(
   const truncated = Boolean(response.overflow || changes.some(isOverflowChange))
 
   if ((options.blockOnOverflow ?? true) && truncated) {
-    return blockedManifest(response, changes, 'MR diff is too large or was truncated by GitLab.')
+    return blockedManifest(response, changes, 'MR diff is too large or was truncated by GitLab.', {
+      truncated: true,
+      fallbackReason: 'too-large',
+    })
   }
 
   const files = []
@@ -47,7 +50,10 @@ export function buildGitLabDiffManifest(
       continue
     }
     if (!change.diff?.trim()) {
-      return blockedManifest(response, changes, `MR diff for ${path} is empty or unavailable.`)
+      return blockedManifest(response, changes, `MR diff for ${path} is empty or unavailable.`, {
+        truncated: false,
+        fallbackReason: 'empty-diff',
+      })
     }
     const nextBytes = byteLength(change.diff)
     if (files.length >= maxFiles || includedBytes + nextBytes > maxDiffBytes) {
@@ -85,10 +91,21 @@ export function isBlacklistedReviewPath(path: string) {
   return BLACKLISTED_PATH_PATTERNS.some((pattern) => pattern.test(path))
 }
 
-function blockedManifest(response: GitLabRawChangesResponse, changes: GitLabRawChange[], blockReason: string): GitLabDiffManifest {
+function blockedManifest(
+  response: GitLabRawChangesResponse,
+  changes: GitLabRawChange[],
+  blockReason: string,
+  options: {
+    truncated: boolean
+    fallbackReason: GitLabSkippedFile['reason']
+  },
+): GitLabDiffManifest {
   return {
     files: [],
-    skipped: changes.map((change) => ({ path: displayPath(change), reason: isBlacklistedReviewPath(displayPath(change)) ? 'blacklisted' : 'too-large' })),
+    skipped: changes.map((change) => ({
+      path: displayPath(change),
+      reason: skippedReasonForBlockedChange(change, options.fallbackReason),
+    })),
     blocked: true,
     blockReason,
     diffRefs: normalizeDiffRefs(response),
@@ -97,9 +114,21 @@ function blockedManifest(response: GitLabRawChangesResponse, changes: GitLabRawC
       includedFileCount: 0,
       skippedFileCount: changes.length,
       includedBytes: 0,
-      truncated: true,
+      truncated: options.truncated,
     },
   }
+}
+
+function skippedReasonForBlockedChange(
+  change: GitLabRawChange,
+  fallbackReason: GitLabSkippedFile['reason'],
+): GitLabSkippedFile['reason'] {
+  const path = displayPath(change)
+  if (change.generated_file) return 'generated'
+  if (isBlacklistedReviewPath(path)) return 'blacklisted'
+  if (change.overflow || change.too_large || change.collapsed) return 'too-large'
+  if (!change.diff?.trim()) return 'empty-diff'
+  return fallbackReason
 }
 
 function isOverflowChange(change: GitLabRawChange) {

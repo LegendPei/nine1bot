@@ -1,4 +1,4 @@
-﻿---
+---
 name: platform.gitlab.gitlab-mr-review-workflow
 description: Use for GitLab merge request review runs triggered by @Nine1bot comments or merge request webhooks.
 ---

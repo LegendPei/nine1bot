@@ -48,6 +48,7 @@ describe('GitLab review foundation', () => {
     expect(manifest.blocked).toBe(true)
     expect(manifest.stats.truncated).toBe(true)
     expect(manifest.files).toEqual([])
+    expect(manifest.skipped).toEqual([{ path: 'src/large.ts', reason: 'too-large' }])
   })
 
   test('filters noisy files before review context is built', () => {
@@ -72,8 +73,10 @@ describe('GitLab review foundation', () => {
     })
 
     expect(manifest.blocked).toBe(true)
+    expect(manifest.stats.truncated).toBe(false)
     expect(manifest.blockReason).toContain('src/app.ts')
     expect(manifest.files).toEqual([])
+    expect(manifest.skipped).toEqual([{ path: 'src/app.ts', reason: 'empty-diff' }])
   })
 
   test('validates inline positions against changed and context diff lines', () => {
