@@ -14,6 +14,7 @@ import {
   parseReviewStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
+  renderBlockedDiffComment,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
@@ -77,6 +78,15 @@ describe('GitLab review foundation', () => {
     expect(manifest.blockReason).toContain('src/app.ts')
     expect(manifest.files).toEqual([])
     expect(manifest.skipped).toEqual([{ path: 'src/app.ts', reason: 'empty-diff' }])
+  })
+
+  test('renders blocked diff guidance without assuming truncation', () => {
+    const comment = renderBlockedDiffComment('GitLab returned an empty diff for source file: src/app.ts.')
+
+    expect(comment).toContain('GitLab review blocked')
+    expect(comment).toContain('GitLab returned an empty diff for source file: src/app.ts.')
+    expect(comment).toContain('could not be loaded reliably')
+    expect(comment).not.toContain('was truncated by GitLab')
   })
 
   test('validates inline positions against changed and context diff lines', () => {

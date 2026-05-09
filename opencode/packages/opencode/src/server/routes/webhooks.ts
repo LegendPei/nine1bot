@@ -609,6 +609,14 @@ function gitLabReviewModelChoice(model: ReturnType<typeof resolveGitLabReviewMod
   } satisfies NonNullable<RuntimeControllerProtocol.SessionChoice>
 }
 
+export function gitLabReviewPublishStatus(error: string | undefined) {
+  if (!error) return 400
+  if (error === "review_run_not_found") return 404
+  if (error === "review_run_already_published" || error === "review_run_already_active") return 409
+  if (error.startsWith("gitlab_api_")) return 502
+  return 400
+}
+
 async function retryGitLabReviewRun(c: any) {
   const runId = c.req.valid("param").runId
   const run = ReviewRunStore.get(runId)
@@ -785,7 +793,7 @@ export const WebhookRoutes = lazy(() =>
           platforms: await readPlatformManagerConfig(),
           secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
         })
-        return c.json(result, result.published ? 200 : 400)
+        return c.json(result, result.published ? 200 : gitLabReviewPublishStatus(result.error))
       },
     )
     .post(

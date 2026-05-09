@@ -6,7 +6,7 @@ export function renderBlockedDiffComment(reason: string) {
     '',
     reason,
     '',
-    'MR diff is too large or was truncated by GitLab. Please split the MR or request a manual review.',
+    'The diff evidence could not be loaded reliably enough for automated review. Please check the GitLab diff, split the MR if it is too large, or request a manual review.',
   ].join('\n')
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { publicGitLabReviewRun, webhookLocalOrigin } from "../../src/server/routes/webhooks"
+import { gitLabReviewPublishStatus, publicGitLabReviewRun, webhookLocalOrigin } from "../../src/server/routes/webhooks"
 
 describe("webhook status URL selection", () => {
   test("uses configured local URL when provided", () => {
@@ -48,5 +48,13 @@ describe("webhook status URL selection", () => {
       createdAt: 1,
       updatedAt: 2,
     })
+  })
+
+  test("maps GitLab review publish failures to specific HTTP statuses", () => {
+    expect(gitLabReviewPublishStatus("review_run_not_found")).toBe(404)
+    expect(gitLabReviewPublishStatus("review_run_already_published")).toBe(409)
+    expect(gitLabReviewPublishStatus("review_run_already_active")).toBe(409)
+    expect(gitLabReviewPublishStatus("gitlab_api_publish_failed:403:Forbidden")).toBe(502)
+    expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)
   })
 })
