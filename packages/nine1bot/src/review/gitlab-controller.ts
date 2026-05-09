@@ -47,6 +47,18 @@ export type GitLabReviewWebhookResult =
       runId?: string
     }
 
+export type GitLabDedicatedWebhookSecretValidation =
+  | { ok: true }
+  | {
+      ok: false
+      error: 'gitlab_webhook_secret_not_configured' | 'invalid_gitlab_webhook_secret'
+    }
+
+export type GitLabReviewModelSelection = {
+  providerID: string
+  modelID: string
+}
+
 export type PublishGitLabReviewRunResult =
   | {
       published: true
@@ -205,6 +217,33 @@ export function extractGitLabReviewStageResultFromRuntimeText(text: string): unk
   return undefined
 }
 
+export async function validateGitLabDedicatedWebhookSecret(input: {
+  secret?: string
+  platforms: PlatformManagerConfig
+  secrets: PlatformSecretAccess
+}): Promise<GitLabDedicatedWebhookSecretValidation> {
+  const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
+  const expectedSecret = await resolveGitLabReviewSecret(settings.webhookSecretRef, input.secrets)
+  const validation = validateGitLabWebhookToken({
+    expectedSecret,
+    receivedToken: input.secret,
+  })
+  if (validation.ok) return { ok: true }
+  if (validation.reason === 'missing-webhook-secret') {
+    return { ok: false, error: 'gitlab_webhook_secret_not_configured' }
+  }
+  return { ok: false, error: 'invalid_gitlab_webhook_secret' }
+}
+
+export function resolveGitLabReviewModelSelection(platforms: PlatformManagerConfig): GitLabReviewModelSelection | undefined {
+  const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
+  if (!settings.modelProviderId || !settings.modelId) return undefined
+  return {
+    providerID: settings.modelProviderId,
+    modelID: settings.modelId,
+  }
+}
+
 function fencedJson(input: unknown) {
   const json = JSON.stringify(input, null, 2)
   return [
@@ -217,7 +256,7 @@ function fencedJson(input: unknown) {
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (!settings.enabled) {
-    return reject(403, 'gitlab_review_disabled', undefined, summarizeGitLabWebhookEvent(input.payload, 'gitlab_review_disabled'))
+    return rejectWithoutRun(403, 'gitlab_review_disabled')
   }
 
   if (!input.verifiedWebhookSecret) {
@@ -227,7 +266,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       receivedToken: header(input.headers, 'x-gitlab-token'),
     })
     if (!tokenValidation.ok) {
-      return reject(401, tokenValidation.reason ?? 'invalid_gitlab_webhook_token', undefined, summarizeGitLabWebhookEvent(input.payload, tokenValidation.reason ?? 'invalid_gitlab_webhook_token'))
+      return rejectWithoutRun(401, tokenValidation.reason ?? 'invalid_gitlab_webhook_token')
     }
   }
 
@@ -793,6 +832,15 @@ function reject(
     error,
     httpStatus,
     runId: run.id,
+  }
+}
+
+function rejectWithoutRun(httpStatus: number, error: string): GitLabReviewWebhookResult {
+  return {
+    accepted: false,
+    status: 'rejected',
+    error,
+    httpStatus,
   }
 }
 

@@ -8,6 +8,7 @@ import {
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
+  validateGitLabDedicatedWebhookSecret,
 } from './gitlab-controller'
 import { ReviewRunStore } from './run-store'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
@@ -193,6 +194,7 @@ describe('GitLab review controller', () => {
       httpStatus: 403,
       error: 'gitlab_review_disabled',
     })
+    expect(ReviewRunStore.list()).toEqual([])
   })
 
   test('rejects invalid GitLab webhook token', async () => {
@@ -205,6 +207,40 @@ describe('GitLab review controller', () => {
       accepted: false,
       httpStatus: 401,
       error: 'invalid-x-gitlab-token',
+    })
+    expect(ReviewRunStore.list()).toEqual([])
+  })
+
+  test('validates dedicated GitLab webhook path secrets through controller policy', async () => {
+    await expect(validateGitLabDedicatedWebhookSecret({
+      secret: 'secret',
+      platforms,
+      secrets: memorySecrets,
+    })).resolves.toEqual({ ok: true })
+
+    await expect(validateGitLabDedicatedWebhookSecret({
+      secret: 'wrong',
+      platforms,
+      secrets: memorySecrets,
+    })).resolves.toEqual({
+      ok: false,
+      error: 'invalid_gitlab_webhook_secret',
+    })
+
+    await expect(validateGitLabDedicatedWebhookSecret({
+      secret: 'secret',
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            'review.enabled': true,
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })).resolves.toEqual({
+      ok: false,
+      error: 'gitlab_webhook_secret_not_configured',
     })
   })
 

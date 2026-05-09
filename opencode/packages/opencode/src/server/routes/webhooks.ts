@@ -14,14 +14,14 @@ import {
   handleGitLabReviewWebhook,
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
-  resolveGitLabReviewSecret,
+  resolveGitLabReviewModelSelection,
+  validateGitLabDedicatedWebhookSecret as validateGitLabDedicatedWebhookPathSecret,
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 import { registerBuiltinPlatformAdapters } from "../../../../../../packages/nine1bot/src/platform/builtin"
-import { normalizeGitLabReviewSettings } from "../../../../../../packages/platform-gitlab/src/review/settings"
 
 const WEBHOOK_CLIENT_CAPABILITIES = {
   interactions: false,
@@ -403,6 +403,11 @@ async function triggerWebhook(c: any) {
   })
 }
 
+export function publicGitLabReviewRun(run: ReviewRunRecord) {
+  const { context: _context, ...publicRun } = run
+  return publicRun
+}
+
 async function triggerGitLabReviewWebhook(c: any) {
   const contentType = c.req.header("content-type") || ""
   if (!contentType.toLowerCase().includes("application/json")) {
@@ -446,13 +451,12 @@ async function validateGitLabDedicatedWebhookSecret(c: any, platforms: Awaited<R
   const secret = c.req.param?.("secret")
   if (!secret) return {}
 
-  const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
-  const expectedSecret = await resolveGitLabReviewSecret(
-    settings.webhookSecretRef,
-    new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
-  )
-  if (!expectedSecret) return { response: c.json({ accepted: false, error: "gitlab_webhook_secret_not_configured" }, 401) }
-  if (secret !== expectedSecret) return { response: c.json({ accepted: false, error: "invalid_gitlab_webhook_secret" }, 401) }
+  const validation = await validateGitLabDedicatedWebhookPathSecret({
+    secret,
+    platforms,
+    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+  })
+  if (!validation.ok) return { response: c.json({ accepted: false, error: validation.error }, 401) }
   return { verified: true }
 }
 
@@ -491,7 +495,6 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
     config: platforms,
     secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
   })
-  const settings = normalizeGitLabReviewSettings(platforms.gitlab?.settings)
   let publishAttempted = false
   const entry = {
     source: "webhook",
@@ -506,7 +509,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
     title: `GitLab review: ${result.trigger.projectPath ?? result.trigger.projectId}`,
     sessionChoice: {
       agent: "platform.gitlab.pm-coordinator",
-      ...gitLabReviewModelChoice(settings),
+      ...gitLabReviewModelChoice(resolveGitLabReviewModelSelection(platforms)),
       resources: {
         skills: {
           skills: GITLAB_REVIEW_SKILLS,
@@ -596,12 +599,12 @@ async function reportStoredGitLabReviewFailure(runId: string, phase: string, err
   })
 }
 
-function gitLabReviewModelChoice(settings: ReturnType<typeof normalizeGitLabReviewSettings>) {
-  if (!settings.modelProviderId || !settings.modelId) return {}
+function gitLabReviewModelChoice(model: ReturnType<typeof resolveGitLabReviewModelSelection>) {
+  if (!model) return {}
   return {
     model: {
-      providerID: settings.modelProviderId,
-      modelID: settings.modelId,
+      providerID: model.providerID,
+      modelID: model.modelID,
     },
   } satisfies NonNullable<RuntimeControllerProtocol.SessionChoice>
 }
@@ -758,7 +761,7 @@ export const WebhookRoutes = lazy(() =>
       ),
       async (c) => {
         return c.json({
-          runs: ReviewRunStore.list({ limit: c.req.valid("query").limit }),
+          runs: ReviewRunStore.list({ limit: c.req.valid("query").limit }).map(publicGitLabReviewRun),
         })
       },
     )

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { webhookLocalOrigin } from "../../src/server/routes/webhooks"
+import { publicGitLabReviewRun, webhookLocalOrigin } from "../../src/server/routes/webhooks"
 
 describe("webhook status URL selection", () => {
   test("uses configured local URL when provided", () => {
@@ -27,5 +27,26 @@ describe("webhook status URL selection", () => {
         Ethernet: [{ address: "10.0.0.12", family: "IPv4", internal: false } as any],
       },
     })).toBe("http://192.168.53.6:4096")
+  })
+
+  test("omits heavy GitLab review context from list records", () => {
+    expect(publicGitLabReviewRun({
+      id: "run_1",
+      platform: "gitlab",
+      status: "succeeded",
+      createdAt: 1,
+      updatedAt: 2,
+      context: {
+        diff: {
+          files: [{ diff: "large diff" }],
+        },
+      },
+    } as any)).toEqual({
+      id: "run_1",
+      platform: "gitlab",
+      status: "succeeded",
+      createdAt: 1,
+      updatedAt: 2,
+    })
   })
 })

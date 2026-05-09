@@ -432,6 +432,43 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('parses bot mentions case-insensitively while preserving instruction text', () => {
+    const result = parseGitLabWebhookEvent({
+      object_kind: 'note',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        id: 783,
+        note: '@nine1bot review RBAC security only',
+      },
+      merge_request: {
+        iid: 10,
+        last_commit: { id: 'abc123' },
+      },
+    }, {
+      ...defaultGitLabReviewSettings,
+      enabled: true,
+      allowedHosts: ['gitlab.example.com'],
+      allowedProjectIds: [123],
+      botMention: '@Nine1bot',
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      trigger: {
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'abc123',
+        noteId: 783,
+        userInstruction: 'RBAC security only',
+        focusTags: ['security', 'auth'],
+      },
+    })
+  })
+
   test('parses commit mention note webhooks into review triggers', () => {
     const result = parseGitLabWebhookEvent({
       object_kind: 'note',

@@ -130,7 +130,7 @@ function instructionFields(intent: Extract<MentionIntent, { kind: 'review' }>, n
 }
 
 export function extractMentionInstruction(noteText: string, botMention: string) {
-  const mentionIndex = noteText.indexOf(botMention)
+  const mentionIndex = noteText.toLowerCase().indexOf(botMention.toLowerCase())
   if (mentionIndex < 0) return undefined
   const afterMention = noteText.slice(mentionIndex + botMention.length)
   const instruction = normalizeReviewInstruction(afterMention)
