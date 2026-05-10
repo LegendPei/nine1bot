@@ -308,6 +308,35 @@ describe('GitLab review controller', () => {
     expect(result.accepted && result.context?.diff.stats.includedFileCount).toBe(1)
   })
 
+  test('returns dry-run when dry-run payload has no embedded changes', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'no-changes-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      status: 'dry-run',
+      warnings: ['Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'],
+    })
+    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'succeeded',
+    })
+  })
+
   test('deduplicates accepted review triggers by idempotency key', async () => {
     const payload = {
       object_kind: 'merge_request',
@@ -993,6 +1022,80 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
       status: 'blocked',
       publishedAt: expect.any(Number),
+    })
+  })
+
+  test('returns structured failure for invalid runtime stage result payloads', async () => {
+    const fetchMock = (async (url: string | URL | Request) => {
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          changes: [{
+            old_path: 'src/app.ts',
+            new_path: 'src/app.ts',
+            diff: '@@ -1 +1 @@\n-old\n+new\n',
+          }],
+        })
+      }
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'invalid-stage-result-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'verification',
+        status: 'not-a-valid-status',
+        summary: 'Invalid payload.',
+        findings: [],
+      },
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'invalid_stage_result',
+    })
+
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'failed',
+      error: 'invalid_stage_result',
     })
   })
 

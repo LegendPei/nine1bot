@@ -413,7 +413,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   })
   return {
     accepted: true,
-    status: 'accepted',
+    status: settings.dryRun ? 'dry-run' : 'accepted',
     idempotencyKey,
     runId: run.id,
     trigger: parsed.trigger,
@@ -460,7 +460,13 @@ export async function publishGitLabReviewRunResult(input: {
     return { published: false, runId: input.runId, error: 'gitlab_token_missing' }
   }
 
-  const parsed = parseReviewStageResult(input.stageResult)
+  let parsed: ReturnType<typeof parseReviewStageResult>
+  try {
+    parsed = parseReviewStageResult(input.stageResult)
+  } catch {
+    ReviewRunStore.update(input.runId, { status: 'failed', error: 'invalid_stage_result' })
+    return { published: false, runId: input.runId, error: 'invalid_stage_result' }
+  }
   const objectId = trigger.objectType === 'mr' ? trigger.objectIid : trigger.commitSha
   if (!objectId) {
     ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_review_object_missing' })

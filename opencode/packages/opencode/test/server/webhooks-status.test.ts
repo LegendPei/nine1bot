@@ -15,6 +15,14 @@ describe("webhook status URL selection", () => {
     })).toBe("http://bot.example.test:4096")
   })
 
+  test("strips repeated trailing slashes from configured local URL", () => {
+    expect(webhookLocalOrigin({
+      requestOrigin: "http://127.0.0.1:4096",
+      envLocalUrl: "http://bot.example.test:4096///",
+      interfaces: {},
+    })).toBe("http://bot.example.test:4096")
+  })
+
   test("replaces loopback browser origin with a reachable LAN IPv4", () => {
     expect(webhookLocalOrigin({
       requestOrigin: "http://127.0.0.1:4096",

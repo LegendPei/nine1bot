@@ -89,7 +89,7 @@ export function webhookLocalOrigin(input: {
   envLocalUrl?: string
   interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>
 }) {
-  if (input.envLocalUrl?.trim()) return input.envLocalUrl.trim().replace(/\/$/, "")
+  if (input.envLocalUrl?.trim()) return input.envLocalUrl.trim().replace(/\/+$/, "")
   const request = new URL(input.requestOrigin)
   if (!isLoopbackHost(request.hostname)) return request.origin
   const address = firstReachableIPv4(input.interfaces ?? networkInterfaces())
