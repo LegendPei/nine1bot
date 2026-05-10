@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { getDataDir } from '../config/loader'
 
@@ -48,7 +48,7 @@ function storePath() {
 function maxRecords() {
   if (maxRecordsOverride !== undefined) return maxRecordsOverride
   const configured = Number(process.env.NINE1BOT_REVIEW_RUN_STORE_LIMIT)
-  return Number.isFinite(configured) && configured > 0 ? configured : 500
+  return Number.isFinite(configured) && configured > 0 ? configured : 100
 }
 
 export namespace ReviewRunStore {
@@ -158,7 +158,14 @@ function save() {
     sequence,
     runs: [...runs.values()],
   }
-  writeFileSync(filepath, JSON.stringify(data, null, 2), 'utf-8')
+  const tempPath = `${filepath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8')
+    renameSync(tempPath, filepath)
+  } catch (error) {
+    rmSync(tempPath, { force: true })
+    throw error
+  }
 }
 
 function prune() {

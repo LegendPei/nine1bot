@@ -12,6 +12,7 @@ import { runAutomatedControllerSession, type AutomatedControllerResponse } from 
 import {
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
+  gitLabReviewRuntimeSkillIds,
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
   resolveGitLabReviewModelSelection,
@@ -50,17 +51,6 @@ const GITLAB_REVIEW_CLIENT_CAPABILITIES = {
   continueInWeb: true,
   contextAudit: true,
 } satisfies RuntimeControllerProtocol.ClientCapabilities
-
-const GITLAB_REVIEW_SKILLS = [
-  "platform.gitlab.gitlab-mr-review-workflow",
-  "platform.gitlab.gitlab-commit-review-workflow",
-  "platform.gitlab.spec-gate-review",
-  "platform.gitlab.pm-risk-routing",
-  "platform.gitlab.review-finding-schema",
-  "platform.gitlab.verification-matrix",
-  "platform.gitlab.security-review-policy",
-  "platform.gitlab.gitlab-comment-rendering",
-]
 
 const GitLabReviewPublishBody = z.object({
   stageResult: z.unknown(),
@@ -512,7 +502,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       ...gitLabReviewModelChoice(resolveGitLabReviewModelSelection(platforms)),
       resources: {
         skills: {
-          skills: GITLAB_REVIEW_SKILLS,
+          skills: [...gitLabReviewRuntimeSkillIds],
         },
       },
     },

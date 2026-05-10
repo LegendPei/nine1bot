@@ -6,6 +6,7 @@ import {
   parseReviewStageResult,
   publishGitLabReviewResult,
   renderBlockedDiffComment,
+  gitLabReviewSkillIds,
   isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
@@ -18,6 +19,8 @@ import {
 import { ReviewRunStore } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
+
+export const gitLabReviewRuntimeSkillIds = gitLabReviewSkillIds
 
 export type GitLabReviewWebhookInput = {
   payload: unknown

@@ -42,7 +42,12 @@ function findingKey(finding: ReviewFinding) {
     finding.oldLine ?? '',
     finding.newLine ?? '',
     finding.category ?? '',
+    normalizeKeyText(finding.title),
   ].join(':')
+}
+
+function normalizeKeyText(text: string) {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
 function mergeBody(left: string, right: string) {

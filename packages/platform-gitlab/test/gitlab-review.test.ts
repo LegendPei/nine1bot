@@ -156,6 +156,19 @@ describe('GitLab review foundation', () => {
     ])
   })
 
+  test('does not merge distinct findings that share a changed line', () => {
+    const findings: ReviewFinding[] = [
+      { title: 'Missing auth check', body: 'Auth evidence', severity: 'critical', category: 'auth', file: 'src/auth.ts', newLine: 20, source: 'security' },
+      { title: 'Missing audit log', body: 'Audit evidence', severity: 'major', category: 'auth', file: 'src/auth.ts', newLine: 20, source: 'qa' },
+    ]
+
+    const aggregated = aggregateReviewFindings(findings)
+
+    expect(aggregated).toHaveLength(2)
+    expect(aggregated.map((finding) => finding.title)).toEqual(['Missing auth check', 'Missing audit log'])
+    expect(aggregated.every((finding) => finding.duplicates.length === 0)).toBe(true)
+  })
+
   test('extracts subagent review JSON from task output and aggregates findings deterministically', () => {
     const specs = buildInitialGitLabReviewSubagentTasks()
     const compiled = compileSubagentStageResults({
