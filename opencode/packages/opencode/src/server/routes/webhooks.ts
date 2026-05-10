@@ -617,6 +617,23 @@ export function gitLabReviewPublishStatus(error: string | undefined) {
   return 400
 }
 
+export function gitLabReviewRetryPatch(run: ReviewRunRecord) {
+  return {
+    status: "accepted",
+    error: undefined,
+    sessionId: undefined,
+    turnSnapshotId: undefined,
+    failureNotifiedAt: undefined,
+    retryCount: (run.retryCount ?? 0) + 1,
+    lastRetryAt: Date.now(),
+    warnings: uniqueStrings([
+      ...((run.warnings as string[] | undefined) ?? []),
+      "Review run manually retried from stored GitLab context.",
+    ]),
+    publishedAt: undefined,
+  } satisfies Parameters<typeof ReviewRunStore.update>[1]
+}
+
 async function retryGitLabReviewRun(c: any) {
   const runId = c.req.valid("param").runId
   const run = ReviewRunStore.get(runId)
@@ -629,17 +646,7 @@ async function retryGitLabReviewRun(c: any) {
   const input = gitLabReviewRuntimeInputFromRecord(run)
   if ("error" in input) return c.json({ accepted: false, runId, error: input.error }, 400)
 
-  ReviewRunStore.update(runId, {
-    status: "accepted",
-    error: undefined,
-    retryCount: (run.retryCount ?? 0) + 1,
-    lastRetryAt: Date.now(),
-    warnings: uniqueStrings([
-      ...((run.warnings as string[] | undefined) ?? []),
-      "Review run manually retried from stored GitLab context.",
-    ]),
-    publishedAt: undefined,
-  })
+  ReviewRunStore.update(runId, gitLabReviewRetryPatch(run))
 
   startGitLabReviewRuntimeRun(input).catch((error) => {
     const message = error instanceof Error ? error.message : String(error)

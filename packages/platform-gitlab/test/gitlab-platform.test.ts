@@ -293,7 +293,7 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
-  test('auto-generates the dedicated GitLab webhook URL secret', async () => {
+  test('renders a placeholder dedicated GitLab webhook URL without creating a secret', async () => {
     const secrets = memorySecretAccess()
     const status = await gitlabPlatformContribution.getStatus?.({
       platformId: 'gitlab',
@@ -309,11 +309,11 @@ describe('GitLab platform adapter package', () => {
     })
 
     const webhookCard = status?.cards?.find((card) => card.id === 'webhook-url')
-    expect(webhookCard?.value).toMatch(/^http:\/\/127\.0\.0\.1:4096\/webhooks\/gitlab\/sec_[a-f0-9]{32}$/)
+    expect(webhookCard?.value).toBe('http://127.0.0.1:4096/webhooks/gitlab/%7BwebhookSecret%7D')
     expect(await secrets.get({
       provider: 'nine1bot-local',
       key: 'platform:gitlab:default:review.webhookSecretRef',
-    })).toMatch(/^sec_[a-f0-9]{32}$/)
+    })).toBeUndefined()
   })
 
   test('refreshes stale local webhook IPs from current network interfaces', () => {
@@ -553,6 +553,38 @@ describe('GitLab platform adapter package', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  test('renders GitLab status when webhook secret store read fails', async () => {
+    const status = await gitlabPlatformContribution.getStatus?.({
+      platformId: 'gitlab',
+      enabled: true,
+      settings: {
+        'review.enabled': true,
+        'review.baseUrl': 'https://gitlab.example.com',
+        'review.tokenSecretRef': 'token-value',
+        'review.webhookSecretRef': {
+          provider: 'nine1bot-local',
+          key: 'gitlab-webhook',
+        },
+      },
+      features: {},
+      env: {
+        NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+        NINE1BOT_REFRESH_LOCAL_URL: 'false',
+      },
+      secrets: {
+        async get() { throw new Error('readonly secret store') },
+        async set() { throw new Error('should not write while rendering status') },
+        async delete() {},
+        async has() { return true },
+      },
+      audit: { write() {} },
+    })
+
+    expect(status?.cards?.find((card) => card.id === 'webhook-url')).toMatchObject({
+      value: 'http://192.168.53.6:4096/webhooks/gitlab/%7BwebhookSecret%7D',
+    })
   })
 
   test('declares concrete GitLab review subagents for runtime task delegation', async () => {

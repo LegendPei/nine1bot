@@ -905,7 +905,12 @@ async function dedicatedWebhookUrlDisplay(
   settings: ReturnType<typeof normalizeGitLabReviewSettings>,
   ctx: PlatformAdapterContext,
 ) {
-  const secret = await resolveOrCreateGitLabWebhookSecret(settings.webhookSecretRef, ctx.secrets)
+  let secret: string | undefined
+  try {
+    secret = await resolveGitLabReviewSecret(settings.webhookSecretRef, ctx.secrets)
+  } catch {
+    secret = undefined
+  }
   const url = dedicatedWebhookUrl(ctx, secret || '{webhookSecret}')
   return url || 'NINE1BOT_LOCAL_URL not configured'
 }
