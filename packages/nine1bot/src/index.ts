@@ -26,8 +26,8 @@ import { UI } from './cli/ui'
 import { StartCommand, startHandler } from './cli/cmd/start'
 import { SetupCommand } from './cli/cmd/setup'
 import { ConfigCommand } from './cli/cmd/config'
-
-const VERSION = '1.0.0'
+import { AboutCommand } from './cli/cmd/about'
+import { NINE1BOT_PROVENANCE } from './provenance'
 
 async function main() {
   const cli = yargs(hideBin(process.argv))
@@ -36,13 +36,14 @@ async function main() {
     .wrap(100)
     .help('help')
     .alias('help', '?')
-    .version('version', 'Show version number', VERSION)
+    .version('version', 'Show version number', NINE1BOT_PROVENANCE.version)
     .alias('version', 'v')
 
     // Commands
     .command(StartCommand)
     .command(SetupCommand)
     .command(ConfigCommand)
+    .command(AboutCommand)
 
     // Default command (run start)
     .command(

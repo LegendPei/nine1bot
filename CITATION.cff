@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use Nine1Bot or code derived from it, please cite the original project."
+title: "Nine1Bot"
+type: software
+authors:
+  - name: "contrueCT"
+repository-code: "https://github.com/contrueCT/nine1bot"
+url: "https://github.com/contrueCT/nine1bot"
+license: MIT
+version: "1.0.1"
+abstract: "Nine1Bot is an AI coding assistant with a web interface, local runtime integration, browser automation, tunnel support, and multi-platform adapters."

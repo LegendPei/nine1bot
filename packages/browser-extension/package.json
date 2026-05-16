@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "Nine1Bot Browser Control Extension - connects to the built-in /browser relay",
   "type": "module",
+  "license": "MIT",
+  "author": "contrueCT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git",
+    "directory": "packages/browser-extension"
+  },
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",

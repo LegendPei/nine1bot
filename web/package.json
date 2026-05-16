@@ -2,6 +2,13 @@
   "name": "web",
   "private": true,
   "version": "1.0.0",
+  "license": "MIT",
+  "author": "contrueCT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git",
+    "directory": "web"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

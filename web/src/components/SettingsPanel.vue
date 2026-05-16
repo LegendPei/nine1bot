@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Sun, Moon, Upload, X, User } from 'lucide-vue-next'
+import { Sun, Moon, Upload, X, User, Info, ExternalLink } from 'lucide-vue-next'
 import { useSettings } from '../composables/useSettings'
 import { useTheme } from '../composables/useTheme'
 import { useUserProfile } from '../composables/useUserProfile'
+import { NINE1BOT_WEB_PROVENANCE } from '../provenance'
 import McpManager from './McpManager.vue'
 import SkillsList from './SkillsList.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -62,6 +63,7 @@ const editingName = ref(profile.value.name || '')
 const avatarInputRef = ref<HTMLInputElement>()
 const logoInputRef = ref<HTMLInputElement>()
 const botAvatarInputRef = ref<HTMLInputElement>()
+const provenance = NINE1BOT_WEB_PROVENANCE
 
 function saveName() {
   setName(editingName.value.trim())
@@ -173,6 +175,13 @@ function handleOverlayClick(e: MouseEvent) {
           >
             多平台
           </button>
+          <button
+            class="tab"
+            :class="{ active: activeTab === 'about' }"
+            @click="activeTab = 'about'"
+          >
+            关于
+          </button>
         </div>
       </div>
 
@@ -243,6 +252,58 @@ function handleOverlayClick(e: MouseEvent) {
           @refresh="refreshPlatformStatus"
           @action="executePlatformAction"
         />
+
+        <!-- About Tab -->
+        <div v-if="activeTab === 'about'" class="about-tab">
+          <div class="about-identity">
+            <div class="about-mark" aria-hidden="true">
+              <Info :size="24" />
+            </div>
+            <div class="about-title">
+              <h3>{{ provenance.productName }}</h3>
+              <p>{{ provenance.copyright }}</p>
+            </div>
+          </div>
+
+          <div class="about-grid">
+            <div class="about-row">
+              <span>版本</span>
+              <code>{{ provenance.version }}</code>
+            </div>
+            <div class="about-row">
+              <span>原始仓库</span>
+              <code>{{ provenance.sourceRepository }}</code>
+            </div>
+            <div class="about-row">
+              <span>许可证</span>
+              <code>{{ provenance.license }} / {{ provenance.spdxLicenseIdentifier }}</code>
+            </div>
+            <div class="about-row">
+              <span>Provenance ID</span>
+              <code>{{ provenance.provenanceId }}</code>
+            </div>
+            <div class="about-row">
+              <span>构建提交</span>
+              <code>{{ provenance.build.commit || 'development' }}</code>
+            </div>
+            <div class="about-row">
+              <span>构建时间</span>
+              <code>{{ provenance.build.date || 'development' }}</code>
+            </div>
+          </div>
+
+          <div class="about-actions">
+            <a
+              class="btn btn-secondary btn-sm"
+              :href="provenance.sourceRepository"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink :size="14" />
+              <span>打开原始仓库</span>
+            </a>
+          </div>
+        </div>
 
         <!-- Profile Tab -->
         <div v-if="activeTab === 'profile'" class="profile-tab">
@@ -372,6 +433,7 @@ function handleOverlayClick(e: MouseEvent) {
   gap: 4px;
   border-radius: var(--radius-md);
   border-bottom: none;
+  flex-wrap: wrap;
 }
 
 .settings-tabs .tab {
@@ -544,5 +606,90 @@ function handleOverlayClick(e: MouseEvent) {
   font-size: 24px;
   font-weight: 600;
   color: var(--text-muted);
+}
+
+.about-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.about-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.about-mark {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-radius: var(--radius-md);
+}
+
+.about-title {
+  min-width: 0;
+}
+
+.about-title h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.about-title p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.about-grid {
+  display: grid;
+  gap: 0;
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: var(--space-md);
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 0.5px solid var(--border-subtle);
+}
+
+.about-row span {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.about-row code {
+  min-width: 0;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.about-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+@media (max-width: 640px) {
+  .about-row {
+    grid-template-columns: 1fr;
+    gap: var(--space-xs);
+  }
 }
 </style>

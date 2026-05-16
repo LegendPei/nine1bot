@@ -8,6 +8,7 @@
 import path from "path"
 import fs from "fs"
 import { $ } from "bun"
+import { execFileSync } from "child_process"
 
 const projectRoot = path.resolve(import.meta.dir, "..")
 process.chdir(projectRoot)
@@ -17,6 +18,20 @@ const pkg = JSON.parse(fs.readFileSync(
   path.join(projectRoot, "packages/nine1bot/package.json"), "utf-8"
 ))
 const version = process.env.NINE1BOT_VERSION || pkg.version
+const commit = process.env.NINE1BOT_COMMIT || readGitValue(["rev-parse", "--short=12", "HEAD"])
+const buildDate = process.env.NINE1BOT_BUILD_DATE || new Date().toISOString()
+
+function readGitValue(args: string[]): string | undefined {
+  try {
+    return execFileSync("git", args, {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || undefined
+  } catch {
+    return undefined
+  }
+}
 
 // 解析命令行参数
 const args = process.argv.slice(2)
@@ -76,6 +91,7 @@ if (targets.length === 0) {
 }
 
 console.log(`Building Nine1Bot v${version}`)
+if (commit) console.log(`Commit: ${commit}`)
 console.log(`Targets: ${targets.map(t => `${t.os}-${t.arch}${t.avx2 === false ? "-baseline" : ""}`).join(", ")}`)
 console.log("")
 
@@ -107,6 +123,8 @@ for (const target of targets) {
       sourcemap: "external",
       define: {
         NINE1BOT_VERSION: JSON.stringify(version),
+        NINE1BOT_COMMIT: JSON.stringify(commit ?? ""),
+        NINE1BOT_BUILD_DATE: JSON.stringify(buildDate),
         NINE1BOT_COMPILED: "true",
       },
       compile: {

@@ -499,6 +499,14 @@ Welcome to contribute to Nine1Bot!
 
 Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, issue guidelines, and PR expectations.
 
+## Attribution
+
+Nine1Bot is released under the MIT License. If you copy, modify, redistribute, or build a derived project from this repository, keep the original copyright notice, license text, and source repository reference:
+
+- Original repository: <https://github.com/contrueCT/nine1bot>
+- Notice file: [NOTICE](./NOTICE)
+- Citation metadata: [CITATION.cff](./CITATION.cff)
+
 ## Acknowledgments
 
 Thanks to the [OpenCode](https://github.com/opencode-ai/opencode) community. Nine1Bot is built on OpenCode.

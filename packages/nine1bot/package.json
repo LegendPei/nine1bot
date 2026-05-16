@@ -48,6 +48,15 @@
     "tunnel",
     "ngrok"
   ],
-  "author": "",
-  "license": "MIT"
+  "author": "contrueCT",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git",
+    "directory": "packages/nine1bot"
+  },
+  "homepage": "https://github.com/contrueCT/nine1bot#readme",
+  "bugs": {
+    "url": "https://github.com/contrueCT/nine1bot/issues"
+  }
 }

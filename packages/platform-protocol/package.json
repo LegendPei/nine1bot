@@ -2,6 +2,13 @@
   "name": "@nine1bot/platform-protocol",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "author": "contrueCT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git",
+    "directory": "packages/platform-protocol"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

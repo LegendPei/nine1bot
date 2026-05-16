@@ -499,6 +499,14 @@ bun run build:web
 
 开始之前，建议先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解开发环境、Issue 提交流程和 PR 规范。
 
+## 来源声明
+
+Nine1Bot 使用 MIT License 开源。如果复制、修改、重新分发本仓库代码，或基于本仓库构建派生项目，请保留原始版权声明、许可证文本和源仓库引用：
+
+- 原始仓库：<https://github.com/contrueCT/nine1bot>
+- Notice 文件：[NOTICE](./NOTICE)
+- 引用元数据：[CITATION.cff](./CITATION.cff)
+
 ## 致谢
 
 感谢 [OpenCode](https://github.com/opencode-ai/opencode) 社区的开源贡献，Nine1Bot 基于 OpenCode 构建。

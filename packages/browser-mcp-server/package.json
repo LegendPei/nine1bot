@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Browser bridge runtime for Nine1Bot automation via Chrome extension relay and CDP",
   "type": "module",
+  "author": "contrueCT",
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
@@ -33,5 +34,14 @@
     "cdp",
     "extension"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git",
+    "directory": "packages/browser-mcp-server"
+  },
+  "homepage": "https://github.com/contrueCT/nine1bot#readme",
+  "bugs": {
+    "url": "https://github.com/contrueCT/nine1bot/issues"
+  }
 }

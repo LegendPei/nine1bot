@@ -2,6 +2,16 @@
   "name": "nine1bot-workspace",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
+  "author": "contrueCT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contrueCT/nine1bot.git"
+  },
+  "homepage": "https://github.com/contrueCT/nine1bot#readme",
+  "bugs": {
+    "url": "https://github.com/contrueCT/nine1bot/issues"
+  },
   "type": "module",
   "workspaces": [
     "packages/*",

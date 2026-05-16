@@ -4,7 +4,7 @@ import type { Provider, McpServer, Skill, Config, McpConfig, CustomProvider, Aut
 import { authenticateMcpWithPopup } from '../utils/mcp-auth'
 
 const showSettings = ref(false)
-const activeTab = ref<'models' | 'mcp' | 'skills' | 'auth' | 'preferences' | 'platforms' | 'profile'>('models')
+const activeTab = ref<'models' | 'mcp' | 'skills' | 'auth' | 'preferences' | 'platforms' | 'profile' | 'about'>('models')
 
 // Providers and models
 const providers = ref<Provider[]>([])
