@@ -137,8 +137,11 @@ if [ "$PLATFORM" = "windows" ]; then
         7z a -tzip "$ARCHIVE_NAME" "$BUILD_NAME"
     elif [ -f "/c/Program Files/7-Zip/7z.exe" ]; then
         "/c/Program Files/7-Zip/7z.exe" a -tzip "$ARCHIVE_NAME" "$BUILD_NAME"
+    elif command -v powershell.exe &> /dev/null; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            "Compress-Archive -LiteralPath '$BUILD_NAME' -DestinationPath '$ARCHIVE_NAME' -Force"
     else
-        echo "ERROR: No zip tool found (zip, 7z). Cannot create archive."
+        echo "ERROR: No zip tool found (zip, 7z, powershell.exe). Cannot create archive."
         exit 1
     fi
 else
