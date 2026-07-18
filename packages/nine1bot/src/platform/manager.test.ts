@@ -397,16 +397,16 @@ describe('PlatformAdapterManager', () => {
     })
   })
 
-  it('normalizes Windows runtime source paths before registering and reporting details', async () => {
+  it('normalizes runtime source URLs into native paths before registering and reporting details', async () => {
     await withRuntimeSourceDirectories(async ({ agents, skills }) => {
-      const windowsAgentUrlPath = `/${agents.replaceAll('\\', '/')}`
+      const agentURLPath = `/${agents.replaceAll('\\', '/')}`
       const manager = new PlatformAdapterManager({
         contributions: [contribution('feishu', {
           defaultEnabled: true,
           sources: {
             agents: [{
               id: 'feishu-agents',
-              directory: windowsAgentUrlPath,
+              directory: agentURLPath,
               namespace: 'feishu.agent',
               visibility: 'recommendable',
               lifecycle: 'platform-enabled',
@@ -424,8 +424,8 @@ describe('PlatformAdapterManager', () => {
 
       manager.registerRuntimeAdapters()
 
-      const expectedAgentDirectory = win32Path.normalize(agents)
-      const expectedSkillDirectory = win32Path.normalize(skills)
+      const expectedAgentDirectory = normalize(agents)
+      const expectedSkillDirectory = normalize(skills)
 
       expect(RuntimeSourceRegistry.listOwner('feishu')).toMatchObject({
         agents: [{
@@ -451,6 +451,43 @@ describe('PlatformAdapterManager', () => {
           }],
         },
       })
+    })
+  })
+
+  it('normalizes Windows drive URL paths independently of the host platform', () => {
+    const manager = new PlatformAdapterManager({
+      contributions: [contribution('feishu', {
+        defaultEnabled: true,
+        sources: {
+          agents: [{
+            id: 'feishu-agents',
+            directory: '/C:/nine1bot/platform-resources/platform-feishu/agents',
+            namespace: 'feishu.agent',
+            visibility: 'recommendable',
+            lifecycle: 'platform-enabled',
+          }],
+          skills: [{
+            id: 'feishu-skills',
+            directory: 'file:///C:/nine1bot/platform-resources/platform-feishu/skills',
+            namespace: 'feishu.skill',
+            visibility: 'declared-only',
+            lifecycle: 'platform-enabled',
+          }],
+        },
+      })],
+    })
+
+    manager.registerRuntimeAdapters()
+
+    expect(RuntimeSourceRegistry.listOwner('feishu')).toMatchObject({
+      agents: [{
+        id: 'feishu-agents',
+        directory: win32Path.normalize('C:\\nine1bot\\platform-resources\\platform-feishu\\agents'),
+      }],
+      skills: [{
+        id: 'feishu-skills',
+        directory: win32Path.normalize('C:\\nine1bot\\platform-resources\\platform-feishu\\skills'),
+      }],
     })
   })
 

@@ -6,10 +6,18 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   typecheck:
     runs-on: ubuntu-latest
     name: Typecheck
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -18,30 +26,28 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
-      - name: Install dependencies
+      - name: Install workspace dependencies
         run: |
-          cd opencode && bun install --frozen-lockfile || bun install
-          cd ../packages/nine1bot && bun install --frozen-lockfile || bun install
-          cd ../../web && bun install --frozen-lockfile || bun install
-          cd ../packages/browser-extension && bun install --frozen-lockfile || bun install
+          bun install --frozen-lockfile
+          bun install --cwd opencode --frozen-lockfile
+          bun install --cwd packages/nine1bot --frozen-lockfile
+          bun install --cwd web --frozen-lockfile
+          bun install --cwd packages/browser-extension --frozen-lockfile
 
-      - name: Typecheck opencode
+      - name: Typecheck upstream opencode (advisory)
         # TODO: Fix TypeScript errors inherited from upstream opencode
         # Many type errors exist in acp/, agent/, cli/cmd/ directories
         # Temporarily allowing failure until these are resolved
-        run: cd opencode && bun run typecheck || echo "Typecheck failed but continuing..."
+        run: bun run --cwd opencode typecheck
         continue-on-error: true
 
-      - name: Typecheck nine1bot
-        # Note: May show errors from opencode dependencies due to path alias resolution
-        # The actual nine1bot code errors are what matter
-        run: cd packages/nine1bot && bun run typecheck || echo "Typecheck completed with warnings"
-        continue-on-error: true
+      - name: Typecheck maintained workspace
+        run: bun run ci:typecheck
 
-      - name: Test nine1bot
-        run: cd packages/nine1bot && bun test
+      - name: Test maintained workspace
+        run: bun run ci:test
 
   build:
     strategy:
