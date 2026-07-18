@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { checkPlatformRuntimeResources } from './probe-platform-runtime-resources'
+import {
+  checkPlatformRuntimeResources,
+  platformsListURL,
+} from './probe-platform-runtime-resources'
 
 const root = join(import.meta.dir, '..')
 const temporaryRoots: string[] = []
@@ -32,8 +35,12 @@ describe('release packaging contract', () => {
 
   test('checks static and running-binary platform resources', async () => {
     const script = await readFile(join(root, 'scripts', 'test-startup.sh'), 'utf8')
+    const probe = await readFile(join(root, 'scripts', 'probe-platform-runtime-resources.ts'), 'utf8')
     expect(script).toContain('verify-platform-resources.ts')
     expect(script).toContain('probe-platform-runtime-resources.ts')
+    expect(probe).toContain('AbortSignal.timeout')
+    expect(platformsListURL('http://127.0.0.1:4097').href)
+      .toBe('http://127.0.0.1:4097/nine1bot/platforms')
   })
 
   test('installs the full tree under Homebrew libexec with an install-root wrapper', async () => {

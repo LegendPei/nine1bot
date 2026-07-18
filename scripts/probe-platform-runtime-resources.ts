@@ -97,11 +97,22 @@ export async function checkPlatformRuntimeResources(options: {
 }
 
 async function fetchJson(url: URL): Promise<unknown> {
-  const response = await fetch(url)
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(10_000),
+  })
   if (!response.ok) {
     throw new Error(`Request failed (${response.status} ${response.statusText}): ${url}`)
   }
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!contentType.toLowerCase().includes('application/json')) {
+    throw new Error(`Expected JSON response from ${url}, received ${contentType || 'unknown content type'}`)
+  }
   return await response.json()
+}
+
+export function platformsListURL(baseURL: string): URL {
+  const rootURL = new URL(baseURL.endsWith('/') ? baseURL : `${baseURL}/`)
+  return new URL('nine1bot/platforms', rootURL)
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
@@ -115,8 +126,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   })
   const baseURL = requiredValue(values['base-url'], 'base-url')
   const buildDir = requiredValue(values['build-dir'], 'build-dir')
-  const rootURL = new URL(baseURL.endsWith('/') ? baseURL : `${baseURL}/`)
-  const platformsURL = new URL('nine1bot/platforms/', rootURL)
+  const platformsURL = platformsListURL(baseURL)
   const listResponse = await fetchJson(platformsURL)
   if (!isRecord(listResponse) || !Array.isArray(listResponse.platforms)) {
     throw new Error(`Invalid platform list response from ${platformsURL}`)
@@ -130,7 +140,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }).filter((id): id is string => id !== undefined)
 
   const platformDetails = await Promise.all(enabledPlatformIDs.map((id) => (
-    fetchJson(new URL(encodeURIComponent(id), platformsURL))
+    fetchJson(new URL(`${platformsURL.href}/${encodeURIComponent(id)}`))
   )))
   const result = await checkPlatformRuntimeResources({ buildDir, platformDetails })
   console.log(
