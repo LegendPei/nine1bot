@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { win32 as win32Path } from 'node:path'
+import { join, normalize, win32 as win32Path } from 'node:path'
 import type {
   PlatformAdapterContext,
   PlatformAdapterContribution,
@@ -236,6 +236,7 @@ describe('PlatformAdapterManager', () => {
 
   it('passes configured settings, features, and secrets into adapter context', async () => {
     let capturedContext: PlatformAdapterContext | undefined
+    const packageResourcesRoot = join(process.cwd(), 'release', 'platform-resources')
     const secrets: PlatformSecretAccess = {
       async get() {
         return 'secret-value'
@@ -270,6 +271,7 @@ describe('PlatformAdapterManager', () => {
         },
       },
       secrets,
+      packageResourcesRoot,
     })
 
     manager.registerRuntimeAdapters()
@@ -284,6 +286,12 @@ describe('PlatformAdapterManager', () => {
       provider: 'nine1bot-local',
       key: 'demo',
     })).toBe('secret-value')
+    expect(capturedContext?.packageResources.root).toBe(
+      normalize(join(packageResourcesRoot, 'platform-demo')),
+    )
+    expect(capturedContext?.packageResources.resolve('skills')).toBe(
+      normalize(join(packageResourcesRoot, 'platform-demo', 'skills')),
+    )
   })
 
   it('registers runtime sources for enabled platforms', async () => {

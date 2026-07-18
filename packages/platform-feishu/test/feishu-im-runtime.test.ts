@@ -5,6 +5,7 @@ import type {
   PlatformRecentEvent,
   PlatformSecretRef,
 } from '@nine1bot/platform-protocol'
+import { join } from 'node:path'
 import {
   clearFeishuIMReplyRuntimeSummaryForTesting,
   createFeishuIMBackgroundServices,
@@ -223,12 +224,17 @@ async function startService(settings: Record<string, unknown>): Promise<Platform
 }
 
 function platformContext(settings: Record<string, unknown>): PlatformAdapterContext {
+  const resourceRoot = join(import.meta.dir, '..')
   return {
     platformId: 'feishu',
     enabled: true,
     settings,
     features: {},
     env: {},
+    packageResources: {
+      root: resourceRoot,
+      resolve: (...segments: string[]) => join(resourceRoot, ...segments),
+    },
     secrets: {
       async get() {
         return 'secret'

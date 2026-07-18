@@ -41,6 +41,13 @@ import {
   resolveOfficialSkillsDirectory,
 } from '../src/skills'
 
+function packageResources(root = join(import.meta.dir, '..')) {
+  return {
+    root,
+    resolve: (...segments: string[]) => join(root, ...segments),
+  }
+}
+
 describe('Feishu platform adapter package', () => {
   test('parses Phase 1 Feishu URL routes', () => {
     expect(parseFeishuUrl('https://gdut-topview.feishu.cn/docx/GeVqd0rdho2WbPxLCyWcXI8nnpg')).toMatchObject({
@@ -232,6 +239,7 @@ describe('Feishu platform adapter package', () => {
       settings: {},
       features: {},
       env: { PATH: '' },
+      packageResources: packageResources(),
       secrets: {
         async get() { return undefined },
         async set() {},
@@ -336,6 +344,7 @@ describe('Feishu platform adapter package', () => {
       },
       features: {},
       env: { PATH: '' },
+      packageResources: packageResources(),
       secrets: {
         async get() { return 'secret' },
         async set() {},
@@ -391,6 +400,7 @@ describe('Feishu platform adapter package', () => {
         settings: {},
         features: {},
         env: { PATH: '' },
+        packageResources: packageResources(),
         secrets: {
           async get() { return undefined },
           async set() {},

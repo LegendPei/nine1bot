@@ -12,6 +12,13 @@ import {
 
 const reviewAgentsDir = join(import.meta.dir, '..', 'agents', 'review')
 
+function packageResources(root = join(import.meta.dir, '..')) {
+  return {
+    root,
+    resolve: (...segments: string[]) => join(root, ...segments),
+  }
+}
+
 describe('GitLab platform adapter package', () => {
   test('parses GitLab repository, file, tree, merge request, and issue URLs', () => {
     expect(parseGitLabUrl('https://gitlab.com/nine1/nine1bot')).toMatchObject({
@@ -150,6 +157,7 @@ describe('GitLab platform adapter package', () => {
           'review.tokenSecretRef': 'token-value',
         },
         features: {},
+        packageResources: packageResources(),
         env: {},
         secrets: secretAccess(),
         audit: { write() {} },
@@ -186,6 +194,7 @@ describe('GitLab platform adapter package', () => {
           'review.tokenSecretRef': 'token-value',
         },
         features: {},
+        packageResources: packageResources(),
         env: {},
         secrets: secretAccess(),
         audit: { write() {} },
@@ -242,6 +251,7 @@ describe('GitLab platform adapter package', () => {
           'review.allowedProjectIds': ['3'],
         },
         features: {},
+        packageResources: packageResources(),
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
           NINE1BOT_REFRESH_LOCAL_URL: 'false',
@@ -282,6 +292,7 @@ describe('GitLab platform adapter package', () => {
         'review.allowedProjectIds': ['3'],
       },
       features: {},
+      packageResources: packageResources(),
       env: {},
       secrets: secretAccess(),
       audit: { write() {} },
@@ -300,6 +311,7 @@ describe('GitLab platform adapter package', () => {
       enabled: true,
       settings: {},
       features: {},
+      packageResources: packageResources(),
       env: {
         NINE1BOT_LOCAL_URL: 'http://127.0.0.1:4096',
         NINE1BOT_REFRESH_LOCAL_URL: 'false',
@@ -363,6 +375,7 @@ describe('GitLab platform adapter package', () => {
           'review.allowedProjectIds': ['3'],
         },
         features: {},
+        packageResources: packageResources(),
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
           NINE1BOT_REFRESH_LOCAL_URL: 'false',
@@ -414,6 +427,7 @@ describe('GitLab platform adapter package', () => {
           'review.tokenSecretRef': 'token-value',
         },
         features: {},
+        packageResources: packageResources(),
         env: {},
         secrets: secretAccess(),
         audit: { write() {} },
@@ -458,6 +472,7 @@ describe('GitLab platform adapter package', () => {
           'review.tokenSecretRef': 'token-value',
         },
         features: {},
+        packageResources: packageResources(),
         env: {},
         secrets: secretAccess(),
         audit: { write() {} },
@@ -521,6 +536,7 @@ describe('GitLab platform adapter package', () => {
           'review.hookGroups': [{ id: 9, fullPath: 'root' }],
         },
         features: {},
+        packageResources: packageResources(),
         env: {
           NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
           NINE1BOT_REFRESH_LOCAL_URL: 'false',
@@ -569,6 +585,7 @@ describe('GitLab platform adapter package', () => {
         },
       },
       features: {},
+      packageResources: packageResources(),
       env: {
         NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
         NINE1BOT_REFRESH_LOCAL_URL: 'false',

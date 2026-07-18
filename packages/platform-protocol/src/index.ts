@@ -124,6 +124,11 @@ export type PlatformAuditWriter = {
   write(entry: PlatformAuditEntry): void | Promise<void>
 }
 
+export type PlatformPackageResources = {
+  root: string
+  resolve(...segments: string[]): string
+}
+
 export type PlatformAdapterContext = {
   platformId: string
   projectId?: string
@@ -132,6 +137,7 @@ export type PlatformAdapterContext = {
   settings: unknown
   features: Record<string, boolean>
   env: Record<string, string | undefined>
+  packageResources: PlatformPackageResources
   secrets: PlatformSecretAccess
   audit: PlatformAuditWriter
 }

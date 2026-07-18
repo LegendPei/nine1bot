@@ -21,6 +21,7 @@ import { normalize as normalizePath, posix as posixPath, win32 as win32Path } fr
 import { fileURLToPath } from 'node:url'
 import { RuntimePlatformAdapterRegistry } from '../../../../opencode/packages/opencode/src/runtime/platform/adapter'
 import { RuntimeSourceRegistry } from '../../../../opencode/packages/opencode/src/runtime/source/registry'
+import { createPlatformPackageResources } from './package-resources'
 
 export type PlatformLifecycleStatus =
   | 'discovered'
@@ -123,6 +124,7 @@ export type PlatformAdapterManagerOptions = {
   secrets?: PlatformSecretAccess
   audit?: PlatformAuditWriter
   env?: Record<string, string | undefined>
+  packageResourcesRoot?: string
 }
 
 export type PlatformBackgroundServicesStartOptions = {
@@ -199,6 +201,7 @@ export class PlatformAdapterManager {
   private readonly secrets: PlatformSecretAccess
   private readonly audit: PlatformAuditWriter
   private readonly env: Record<string, string | undefined>
+  private readonly packageResourcesRoot: string
   private backgroundStopPromise: Promise<void> | undefined
   private lastBackgroundServicesStartOptions: PlatformBackgroundServicesStartOptions | undefined
   private config: PlatformManagerConfig
@@ -208,6 +211,7 @@ export class PlatformAdapterManager {
     this.secrets = options.secrets ?? noopSecrets
     this.audit = options.audit ?? noopAudit
     this.env = options.env ?? { ...process.env }
+    this.packageResourcesRoot = normalizePath(options.packageResourcesRoot ?? process.cwd())
 
     for (const contribution of options.contributions) {
       this.contributions.set(contribution.descriptor.id, contribution)
@@ -686,6 +690,10 @@ export class PlatformAdapterManager {
       settings: record.settings,
       features: record.features,
       env: this.env,
+      packageResources: createPlatformPackageResources(
+        this.packageResourcesRoot,
+        record.descriptor.packageName,
+      ),
       secrets: this.secrets,
       audit: this.audit,
     }

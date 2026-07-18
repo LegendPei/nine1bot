@@ -334,12 +334,17 @@ describe('Feishu IM skeleton', () => {
 })
 
 function platformContext(settings: Record<string, unknown>): PlatformAdapterContext {
+  const resourceRoot = join(import.meta.dir, '..')
   return {
     platformId: 'feishu',
     enabled: true,
     settings,
     features: {},
     env: {},
+    packageResources: {
+      root: resourceRoot,
+      resolve: (...segments: string[]) => join(resourceRoot, ...segments),
+    },
     secrets: {
       async get() { return undefined },
       async set() {},
