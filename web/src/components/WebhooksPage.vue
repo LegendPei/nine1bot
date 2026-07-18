@@ -386,14 +386,9 @@ async function saveSource() {
 
 async function sendTest() {
   const source = selectedSource.value
-  const secret = currentSecretFor(source)
   if (!source) return
   error.value = ''
   notice.value = ''
-  if (!secret) {
-    error.value = 'Send test requires the full URL shown after creating or refreshing the secret.'
-    return
-  }
   let payload: unknown
   try {
     payload = JSON.parse(form.value.samplePayloadText || '{}')
@@ -403,7 +398,7 @@ async function sendTest() {
   }
   isSendingTest.value = true
   try {
-    const result = await webhookApi.sendTest(endpointUrl(source, secret), payload)
+    const result = await webhookApi.sendTest(source.id, payload)
     notice.value = `Test sent. HTTP ${result.status}.`
     await refreshRuns()
     if (result.body && typeof result.body === 'object' && 'runId' in result.body) {
@@ -698,7 +693,7 @@ onUnmounted(() => {
               <Copy :size="16" />
               Copy
             </button>
-            <button class="btn" @click="sendTest" :disabled="isSaving || isSendingTest || !currentSecretFor(selectedSource)">
+            <button class="btn" @click="sendTest" :disabled="isSaving || isSendingTest">
               <Send :size="16" />
               Send test
             </button>
@@ -753,9 +748,6 @@ onUnmounted(() => {
               </label>
               <p v-if="revealedSecretSourceId === selectedSource?.id && revealedSecret" class="hint success">
                 Full URL is shown once. Copy it before leaving this source.
-              </p>
-              <p v-if="selectedSource && !currentSecretFor(selectedSource)" class="hint">
-                Send test requires the one-time full URL from create or refresh secret.
               </p>
             </div>
           </section>

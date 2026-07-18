@@ -179,8 +179,13 @@ async function createRejectedRun(c: any, input: {
   )
 }
 
-async function triggerWebhook(c: any) {
-  const { sourceID, secret } = c.req.param()
+async function handleWebhookTrigger(c: any, input: {
+  sourceID: string
+  authentication:
+    | { type: "public-secret"; secret: string }
+    | { type: "management-test" }
+}) {
+  const { sourceID } = input
   let source: Webhook.Source
   try {
     source = await Webhook.getSource(sourceID)
@@ -214,7 +219,7 @@ async function triggerWebhook(c: any) {
     })
   }
 
-  if (!Webhook.verifySecret(source, secret)) {
+  if (input.authentication.type === "public-secret" && !Webhook.verifySecret(source, input.authentication.secret)) {
     return createRejectedRun(c, {
       sourceID,
       projectID: source.projectID,
@@ -390,6 +395,22 @@ async function triggerWebhook(c: any) {
       })
       return c.json(responseBody, 500)
     }
+  })
+}
+
+async function triggerWebhook(c: any) {
+  const { sourceID, secret } = c.req.param()
+  return handleWebhookTrigger(c, {
+    sourceID,
+    authentication: { type: "public-secret", secret },
+  })
+}
+
+async function testWebhook(c: any) {
+  const { sourceID } = c.req.param()
+  return handleWebhookTrigger(c, {
+    sourceID,
+    authentication: { type: "management-test" },
   })
 }
 
@@ -739,6 +760,11 @@ export const WebhookRoutes = lazy(() =>
       "/sources/:sourceID/secret/refresh",
       validator("param", z.object({ sourceID: z.string() })),
       async (c) => c.json(await Webhook.refreshSourceSecret(c.req.valid("param").sourceID)),
+    )
+    .post(
+      "/sources/:sourceID/test",
+      validator("param", z.object({ sourceID: z.string() })),
+      testWebhook,
     )
     .delete(
       "/sources/:sourceID",

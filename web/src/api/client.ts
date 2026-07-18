@@ -1755,13 +1755,16 @@ export const webhookApi = {
     return res.json()
   },
 
-  async sendTest(url: string, payload: unknown): Promise<{ status: number; body: unknown }> {
-    const res = await fetchWithTimeout(url, {
+  async sendTest(sourceID: string, payload: unknown): Promise<{ status: number; body: unknown }> {
+    const res = await fetchWithTimeout(`${BASE_URL}/webhooks/sources/${encodeURIComponent(sourceID)}/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
     const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body.guardReason || body.error || `Webhook test failed: ${res.status}`)
+    }
     return {
       status: res.status,
       body,

@@ -12,6 +12,7 @@ import {
   providerApi,
   setApiDirectory,
   skillApi,
+  webhookApi,
   type CustomProvider,
 } from '../src/api/client'
 
@@ -63,6 +64,34 @@ afterEach(() => {
 })
 
 describe('web config APIs', () => {
+  it('sends webhook tests through the same-origin management endpoint', async () => {
+    installFetchMock((url) => {
+      if (url === '/webhooks/sources/src%2Ftest/test') {
+        return jsonResponse({ accepted: true, runId: 'run_1' }, 202)
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    await expect(webhookApi.sendTest('src/test', { monitor: { status: 'down' } })).resolves.toEqual({
+      status: 202,
+      body: { accepted: true, runId: 'run_1' },
+    })
+    expect(callSummary()).toEqual([
+      ['POST', '/webhooks/sources/src%2Ftest/test'],
+    ])
+    expect(calls[0].body).toEqual({ monitor: { status: 'down' } })
+  })
+
+  it('surfaces rejected webhook tests as errors', async () => {
+    installFetchMock(() => jsonResponse({
+      accepted: false,
+      error: 'webhook_cooldown_active',
+      guardReason: 'Wait before triggering this source again.',
+    }, 429))
+
+    await expect(webhookApi.sendTest('src_test', {})).rejects.toThrow('Wait before triggering this source again.')
+  })
+
   it('loads GitLab review runs from the dedicated webhook endpoint', async () => {
     installFetchMock((url) => {
       if (url === '/webhooks/gitlab/runs?limit=25') {
