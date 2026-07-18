@@ -14,30 +14,23 @@ function envelope(type: string, data: Record<string, any>): RuntimeEventEnvelope
 }
 
 describe('normalizeRuntimeEventEnvelope', () => {
-  it('maps message deltas to legacy message part events', () => {
+  it('maps compact message deltas without a full part payload', () => {
     const [event] = normalizeRuntimeEventEnvelope(
-      envelope('runtime.message.part.updated', {
-        part: {
-          id: 'part_1',
-          sessionID: 'ses_123',
-          messageID: 'msg_1',
-          type: 'text',
-          text: 'hello',
-        },
+      envelope('runtime.message.part.delta', {
+        messageId: 'msg_1',
+        partId: 'part_1',
+        field: 'text',
         delta: 'hello',
       }),
     )
 
     expect(event).toEqual({
-      type: 'message.part.updated',
+      type: 'message.part.delta',
       properties: {
-        part: {
-          id: 'part_1',
-          sessionID: 'ses_123',
-          messageID: 'msg_1',
-          type: 'text',
-          text: 'hello',
-        },
+        sessionID: 'ses_123',
+        messageID: 'msg_1',
+        partID: 'part_1',
+        field: 'text',
         delta: 'hello',
       },
     })

@@ -28,6 +28,7 @@ export const RUNTIME_EVENT_TYPES = [
   'runtime.message.updated',
   'runtime.message.removed',
   'runtime.message.part.updated',
+  'runtime.message.part.delta',
   'runtime.message.part.removed',
   'runtime.interaction.requested',
   'runtime.interaction.answered',
@@ -109,6 +110,20 @@ export function normalizeRuntimeEventEnvelope(envelope: RuntimeEventEnvelope): N
           type: 'message.part.updated',
           properties: {
             part: data.part,
+            delta: data.delta,
+          },
+        },
+      ]
+
+    case 'runtime.message.part.delta':
+      return [
+        {
+          type: 'message.part.delta',
+          properties: {
+            sessionID,
+            messageID: data.messageId ?? data.messageID,
+            partID: data.partId ?? data.partID,
+            field: data.field,
             delta: data.delta,
           },
         },

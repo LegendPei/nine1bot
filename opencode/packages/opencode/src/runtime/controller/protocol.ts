@@ -204,6 +204,7 @@ export namespace RuntimeControllerProtocol {
     "runtime.message.updated",
     "runtime.message.removed",
     "runtime.message.part.updated",
+    "runtime.message.part.delta",
     "runtime.message.part.removed",
     "runtime.interaction.requested",
     "runtime.interaction.answered",

@@ -61,12 +61,25 @@ const textOutputs = computed<OutputItem[]>(() => {
   return outputs
 })
 
+const markdownCache = new Map<string, string>()
+const MARKDOWN_CACHE_LIMIT = 200
+
 function formatText(text: string): string {
+  const cached = markdownCache.get(text)
+  if (cached !== undefined) return cached
+
+  let rendered: string
   try {
-    return DOMPurify.sanitize(marked.parse(text) as string)
+    rendered = DOMPurify.sanitize(marked.parse(text) as string)
   } catch {
-    return DOMPurify.sanitize(text)
+    rendered = DOMPurify.sanitize(text)
   }
+  markdownCache.set(text, rendered)
+  if (markdownCache.size > MARKDOWN_CACHE_LIMIT) {
+    const oldest = markdownCache.keys().next().value
+    if (oldest !== undefined) markdownCache.delete(oldest)
+  }
+  return rendered
 }
 
 function isImageFile(part: MessagePart): boolean {

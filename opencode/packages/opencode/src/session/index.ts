@@ -539,6 +539,20 @@ export namespace Session {
     return part
   })
 
+  export const publishPartDelta = fn(
+    z.object({
+      sessionID: z.string(),
+      messageID: z.string(),
+      partID: z.string(),
+      field: z.literal("text"),
+      delta: z.string(),
+    }),
+    async (input) => {
+      await Bus.publish(MessageV2.Event.PartDelta, input)
+      return input
+    },
+  )
+
   export const getUsage = fn(
     z.object({
       model: z.custom<Provider.Model>(),

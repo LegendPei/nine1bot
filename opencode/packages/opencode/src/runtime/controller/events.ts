@@ -276,6 +276,20 @@ export namespace RuntimeControllerEvents {
           ...artifactEventsFromPart(base, properties.part),
         ]
         break
+      case "message.part.delta":
+        projected = [
+          envelope({
+            ...base,
+            type: "runtime.message.part.delta",
+            data: {
+              messageId: properties.messageID,
+              partId: properties.partID,
+              field: properties.field,
+              delta: properties.delta,
+            },
+          }),
+        ]
+        break
       case "message.part.removed":
         projected = [
           envelope({

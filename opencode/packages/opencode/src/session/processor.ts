@@ -19,6 +19,7 @@ import type { RuntimeTiming } from "./timing"
 import { RuntimeControllerEvents } from "@/runtime/controller/events"
 import { RuntimeMetricsEvents } from "@/runtime/metrics/events"
 import { ProgressWatchdog } from "./progress-watchdog"
+import { PartUpdateBuffer } from "./part-update-buffer"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -144,6 +145,13 @@ export namespace SessionProcessor {
         timing?.mark("processor.process.started")
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        const partUpdates = PartUpdateBuffer.create({
+          emitDelta: Session.publishPartDelta,
+          persist: Session.updatePart,
+          onError(error) {
+            log.error("part update buffer", { error })
+          },
+        })
         while (true) {
           let providerTimedOut = false
           const attemptController = new AbortController()
@@ -186,6 +194,7 @@ export namespace SessionProcessor {
                     },
                     metadata: value.providerMetadata,
                   }
+                  await Session.updatePart(reasoningMap[value.id])
                   break
 
                 case "reasoning-delta":
@@ -194,7 +203,7 @@ export namespace SessionProcessor {
                     const part = reasoningMap[value.id]
                     part.text += value.text
                     if (value.providerMetadata) part.metadata = value.providerMetadata
-                    if (part.text) await Session.updatePart({ part, delta: value.text })
+                    if (part.text) partUpdates.push(part, "text", value.text)
                   }
                   break
 
@@ -208,12 +217,13 @@ export namespace SessionProcessor {
                       end: Date.now(),
                     }
                     if (value.providerMetadata) part.metadata = value.providerMetadata
-                    await Session.updatePart(part)
+                    await partUpdates.checkpoint(part)
                     delete reasoningMap[value.id]
                   }
                   break
 
                 case "tool-input-start":
+                  await partUpdates.flushAll()
                   const part = await Session.updatePart({
                     id: toolcalls[value.id]?.id ?? Identifier.ascending("part"),
                     messageID: input.assistantMessage.id,
@@ -238,6 +248,7 @@ export namespace SessionProcessor {
 
                 case "tool-call": {
                   markFirstResponse()
+                  await partUpdates.flushAll()
                   const match = toolcalls[value.toolCallId]
                   if (match) {
                     const part = await Session.updatePart({
@@ -413,6 +424,7 @@ Possible questions to ask:
                   break
 
                 case "finish-step":
+                  await partUpdates.flushAll()
                   const usage = Session.getUsage({
                     model: input.model,
                     usage: value.usage,
@@ -467,6 +479,7 @@ Possible questions to ask:
                     },
                     metadata: value.providerMetadata,
                   }
+                  await Session.updatePart(currentText)
                   break
 
                 case "text-delta":
@@ -474,11 +487,7 @@ Possible questions to ask:
                   if (currentText) {
                     currentText.text += value.text
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    if (currentText.text)
-                      await Session.updatePart({
-                        part: currentText,
-                        delta: value.text,
-                      })
+                    if (currentText.text) partUpdates.push(currentText, "text", value.text)
                   }
                   break
 
@@ -496,11 +505,11 @@ Possible questions to ask:
                     )
                     currentText.text = textOutput.text
                     currentText.time = {
-                      start: Date.now(),
+                      start: currentText.time?.start ?? Date.now(),
                       end: Date.now(),
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePart(currentText)
+                    await partUpdates.checkpoint(currentText)
                   }
                   currentText = undefined
                   break
@@ -517,6 +526,7 @@ Possible questions to ask:
               if (needsCompaction) break
             }
           } catch (e: any) {
+            await partUpdates.flushAll()
             log.error("process", {
               error: e,
               stack: JSON.stringify(e.stack),
@@ -555,6 +565,7 @@ Possible questions to ask:
             })
           } finally {
             watchdog.stop()
+            await partUpdates.flushAll()
           }
           if (snapshot) {
             const patch = await Snapshot.patch(snapshot)

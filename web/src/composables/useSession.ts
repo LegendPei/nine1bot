@@ -22,6 +22,7 @@ import {
   createSessionEventReconciler,
   loadSessionRecoverySnapshot,
 } from './sessionEventReconciler'
+import { createFrameDeltaBuffer } from './streaming-render-buffer'
 
 export function useSession() {
   const sessions = ref<Session[]>([])
@@ -78,6 +79,22 @@ export function useSession() {
   let sessionEventSubscriptionVersion = 0
   let selectionVersion = 0
   const sessionEventReconciler = createSessionEventReconciler<SSEEvent>(dispatchSessionEvent)
+  const frameDeltaBuffer = createFrameDeltaBuffer({
+    apply({ messageID, partID, field, delta }) {
+      const messageIndex = messages.value.findIndex(message => message.info.id === messageID)
+      if (messageIndex === -1) return
+      const message = messages.value[messageIndex]
+      const partIndex = message.parts.findIndex(part => part.id === partID)
+      if (partIndex === -1) return
+      const part = message.parts[partIndex]
+      if (field !== 'text') return
+      message.parts[partIndex] = {
+        ...part,
+        text: (part.text ?? '') + delta,
+      }
+      messages.value[messageIndex] = { ...message }
+    },
+  })
 
   function reconnectEventsForDirectory() {
     if (eventSource) {
@@ -251,6 +268,7 @@ export function useSession() {
       }
 
       return sessionEventReconciler.applySnapshot(generation, () => {
+        frameDeltaBuffer.clear()
         messages.value = snapshot.messages
         pendingQuestions.value = snapshot.questions
         pendingPermissions.value = snapshot.permissions
@@ -591,6 +609,7 @@ export function useSession() {
           }
           const messageID = part.messageID
           if (messageID) {
+            frameDeltaBuffer.flush(part.id)
             let messageIndex = messages.value.findIndex(m => m.info.id === messageID)
 
             // 如果消息不存在，创建一个新的 assistant 消息
@@ -618,6 +637,29 @@ export function useSession() {
             // 触发响应式更新
             messages.value[messageIndex] = { ...message }
           }
+        }
+        break
+
+      case 'message.part.delta':
+        if (
+          properties.sessionID &&
+          currentSession.value &&
+          properties.sessionID !== currentSession.value.id
+        ) {
+          break
+        }
+        if (
+          properties.messageID &&
+          properties.partID &&
+          properties.field === 'text' &&
+          typeof properties.delta === 'string'
+        ) {
+          frameDeltaBuffer.push({
+            messageID: properties.messageID,
+            partID: properties.partID,
+            field: properties.field,
+            delta: properties.delta,
+          })
         }
         break
 
@@ -793,6 +835,7 @@ export function useSession() {
       || event.type === 'message.completed'
       || event.type === 'message.removed'
       || event.type === 'message.part.updated'
+      || event.type === 'message.part.delta'
       || event.type === 'message.part.removed'
   }
 
@@ -914,6 +957,7 @@ export function useSession() {
 
   function unsubscribeSessionRuntimeEvents() {
     sessionEventSubscriptionVersion++
+    frameDeltaBuffer.clear()
     if (sessionEventSource) {
       sessionEventSource.close()
       sessionEventSource = null

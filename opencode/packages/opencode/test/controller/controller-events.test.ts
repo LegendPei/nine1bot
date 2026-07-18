@@ -2,6 +2,27 @@ import { describe, expect, test } from "bun:test"
 import { RuntimeControllerEvents } from "../../src/runtime/controller/events"
 
 describe("RuntimeControllerEvents", () => {
+  test("projects compact part deltas without a full part payload", () => {
+    const [event] = RuntimeControllerEvents.project({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "session_test",
+        messageID: "message_test",
+        partID: "part_test",
+        field: "text",
+        delta: "hello",
+      },
+    })
+
+    expect(event?.type).toBe("runtime.message.part.delta")
+    expect(event?.data).toEqual({
+      messageId: "message_test",
+      partId: "part_test",
+      field: "text",
+      delta: "hello",
+    })
+  })
+
   test("projects question and permission requests into interaction envelopes", () => {
     const question = RuntimeControllerEvents.project({
       type: "question.asked",

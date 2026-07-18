@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed } from 'vue'
+import { ref, watch, nextTick, computed, onUnmounted } from 'vue'
 import { FolderOpen } from 'lucide-vue-next'
 import type { Message, QuestionRequest, PermissionRequest } from '../api/client'
 import MessageItem from './MessageItem.vue'
@@ -99,16 +99,26 @@ function getDirectoryName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
-watch(() => props.messages, async () => {
-  await nextTick()
-  scrollToBottom()
-}, { deep: true })
+let scrollFrame: number | undefined
 
-watch(() => props.isStreaming, async (streaming) => {
+function scheduleScrollToBottom() {
+  if (scrollFrame !== undefined) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = undefined
+    void nextTick().then(scrollToBottom)
+  })
+}
+
+watch(() => props.messages, scheduleScrollToBottom, { deep: true })
+
+watch(() => props.isStreaming, (streaming) => {
   if (streaming) {
-    await nextTick()
-    scrollToBottom()
+    scheduleScrollToBottom()
   }
+})
+
+onUnmounted(() => {
+  if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
 })
 
 function scrollToBottom() {
@@ -118,9 +128,9 @@ function scrollToBottom() {
 
     if (isNearBottom || validMessages.value.length <= 1) {
        // Always scroll on simple cases
-       scrollContainer.value.scrollTo({
+      scrollContainer.value.scrollTo({
         top: scrollContainer.value.scrollHeight,
-        behavior: 'smooth'
+        behavior: props.isStreaming ? 'auto' : 'smooth'
       })
     }
   }

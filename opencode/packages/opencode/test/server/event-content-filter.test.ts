@@ -9,6 +9,7 @@ describe("shouldSendEvent", () => {
 
   test("drops streamed message content when content is disabled", () => {
     expect(shouldSendEvent({ type: "message.part.updated" }, false)).toBe(false)
+    expect(shouldSendEvent({ type: "message.part.delta" }, false)).toBe(false)
     expect(
       shouldSendEvent(
         {
