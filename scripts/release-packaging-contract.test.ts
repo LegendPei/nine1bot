@@ -38,6 +38,8 @@ describe('release packaging contract', () => {
     const probe = await readFile(join(root, 'scripts', 'probe-platform-runtime-resources.ts'), 'utf8')
     expect(script).toContain('verify-platform-resources.ts')
     expect(script).toContain('probe-platform-runtime-resources.ts')
+    expect(script).toContain('Start-Process -FilePath')
+    expect(script).toContain('Set-Content -LiteralPath')
     expect(script).toContain('Stop-Process -Id')
     expect(script).not.toContain('taskkill')
     expect(probe).toContain('AbortSignal.timeout')

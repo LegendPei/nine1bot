@@ -73,6 +73,18 @@ SUCCESS_PATTERN="Local:.*http"
 
 # 启动服务器并捕获输出
 LOG_FILE=$(mktemp)
+ERROR_LOG_FILE=$(mktemp)
+PID_FILE=$(mktemp)
+WINDOWS_PROC_PID=""
+
+print_server_output() {
+    echo "=== Server Output ==="
+    cat "$LOG_FILE"
+    if [ -s "$ERROR_LOG_FILE" ]; then
+        cat "$ERROR_LOG_FILE"
+    fi
+    echo "===================="
+}
 
 echo "Starting Nine1Bot with test configuration..."
 echo "Waiting for startup (timeout: ${TIMEOUT_SECONDS}s)..."
@@ -80,9 +92,37 @@ echo "Waiting for startup (timeout: ${TIMEOUT_SECONDS}s)..."
 # 启动二进制
 cd "$BUILD_DIR"
 if [ "$PLATFORM" = "windows" ]; then
-    # Windows: 直接运行 exe
-    ./nine1bot.exe > "$LOG_FILE" 2>&1 &
+    # Windows: 由 PowerShell 启动并写出原生 PID，避免 Git Bash PID 与 Windows PID 不一致。
+    BINARY_WINDOWS=$(cygpath -w "$BINARY")
+    BUILD_DIR_WINDOWS=$(cygpath -w "$BUILD_DIR")
+    LOG_FILE_WINDOWS=$(cygpath -w "$LOG_FILE")
+    ERROR_LOG_FILE_WINDOWS=$(cygpath -w "$ERROR_LOG_FILE")
+    PID_FILE_WINDOWS=$(cygpath -w "$PID_FILE")
+    NINE1BOT_SMOKE_BINARY="$BINARY_WINDOWS" \
+    NINE1BOT_SMOKE_BUILD_DIR="$BUILD_DIR_WINDOWS" \
+    NINE1BOT_SMOKE_STDOUT="$LOG_FILE_WINDOWS" \
+    NINE1BOT_SMOKE_STDERR="$ERROR_LOG_FILE_WINDOWS" \
+    NINE1BOT_SMOKE_PID_FILE="$PID_FILE_WINDOWS" \
+    powershell.exe -NoProfile -NonInteractive -Command \
+        '$process = Start-Process -FilePath $env:NINE1BOT_SMOKE_BINARY -WorkingDirectory $env:NINE1BOT_SMOKE_BUILD_DIR -RedirectStandardOutput $env:NINE1BOT_SMOKE_STDOUT -RedirectStandardError $env:NINE1BOT_SMOKE_STDERR -PassThru; Set-Content -LiteralPath $env:NINE1BOT_SMOKE_PID_FILE -Value $process.Id -Encoding ascii; $process.WaitForExit(); exit $process.ExitCode' &
     PROC_PID=$!
+    for _ in $(seq 1 100); do
+        if [ -s "$PID_FILE" ]; then
+            break
+        fi
+        if ! kill -0 "$PROC_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [ ! -s "$PID_FILE" ]; then
+        echo "ERROR: Windows process launcher did not report a native PID"
+        print_server_output
+        wait "$PROC_PID" 2>/dev/null || true
+        rm -f "$LOG_FILE" "$ERROR_LOG_FILE" "$PID_FILE" "$TEST_CONFIG"
+        exit 1
+    fi
+    WINDOWS_PROC_PID=$(tr -d '\r\n ' < "$PID_FILE")
 else
     # Unix: 直接执行
     ./nine1bot > "$LOG_FILE" 2>&1 &
@@ -102,9 +142,7 @@ while true; do
     # 检查进程是否还在运行
     if ! kill -0 "$PROC_PID" 2>/dev/null; then
         echo "Process exited unexpectedly"
-        echo "=== Server Output ==="
-        cat "$LOG_FILE"
-        echo "===================="
+        print_server_output
         SUCCESS=0
         break
     fi
@@ -112,9 +150,7 @@ while true; do
     # 检查成功模式
     if grep -qE "$SUCCESS_PATTERN" "$LOG_FILE" 2>/dev/null; then
         echo "SUCCESS: Server started successfully!"
-        echo "=== Server Output ==="
-        cat "$LOG_FILE"
-        echo "===================="
+        print_server_output
         SUCCESS=1
         break
     fi
@@ -122,9 +158,7 @@ while true; do
     # 检查超时
     if [ "$ELAPSED" -ge "$TIMEOUT_SECONDS" ]; then
         echo "TIMEOUT: Server did not start within ${TIMEOUT_SECONDS} seconds"
-        echo "=== Server Output ==="
-        cat "$LOG_FILE"
-        echo "===================="
+        print_server_output
         SUCCESS=0
         break
     fi
@@ -147,8 +181,12 @@ fi
 # 清理: 终止服务器进程
 echo "Stopping server..."
 if [ "$PLATFORM" = "windows" ]; then
-    powershell.exe -NoProfile -NonInteractive -Command \
-        "Stop-Process -Id $PROC_PID -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+    if ! NINE1BOT_SMOKE_PROCESS_ID="$WINDOWS_PROC_PID" powershell.exe -NoProfile -NonInteractive -Command \
+        '$id = [int]$env:NINE1BOT_SMOKE_PROCESS_ID; Stop-Process -Id $id -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 100; if (Get-Process -Id $id -ErrorAction SilentlyContinue) { exit 1 }' 2>/dev/null; then
+        echo "ERROR: Failed to stop Windows smoke process $WINDOWS_PROC_PID"
+        SUCCESS=0
+    fi
+    wait "$PROC_PID" 2>/dev/null || true
 else
     kill "$PROC_PID" 2>/dev/null || true
     sleep 1
@@ -156,7 +194,7 @@ else
 fi
 
 # 清理临时文件
-rm -f "$LOG_FILE" "$TEST_CONFIG"
+rm -f "$LOG_FILE" "$ERROR_LOG_FILE" "$PID_FILE" "$TEST_CONFIG"
 
 # 返回结果
 if [ "$SUCCESS" -eq 1 ]; then
