@@ -8,4 +8,15 @@ describe('webhook send test controls', () => {
     expect(button?.[1]).toBe('isSaving || isSendingTest')
     expect(source).not.toContain('Send test requires the one-time full URL')
   })
+
+  it('renders a ten-item server-backed pager for run records', async () => {
+    const source = await Bun.file(new URL('../src/components/WebhooksPage.vue', import.meta.url)).text()
+
+    expect(source).toContain('const RUN_PAGE_SIZE = 10')
+    expect(source).toContain('v-for="run in runPageItems"')
+    expect(source).toContain('@click="previousRunPage"')
+    expect(source).toContain('@click="nextRunPage"')
+    expect(source).toContain('Page {{ runPage }}')
+    expect(source).not.toContain('v-for="run in selectedRuns"')
+  })
 })

@@ -1743,10 +1743,11 @@ export const webhookApi = {
     return res.json()
   },
 
-  async runs(opts: { sourceID?: string; limit?: number } = {}): Promise<WebhookRun[]> {
+  async runs(opts: { sourceID?: string; limit?: number; offset?: number } = {}): Promise<WebhookRun[]> {
     const params = new URLSearchParams()
     if (opts.sourceID) params.set('sourceID', opts.sourceID)
     if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset))
     const suffix = params.toString() ? `?${params}` : ''
     const res = await fetchWithTimeout(`${BASE_URL}/webhooks/runs${suffix}`)
     if (!res.ok) {

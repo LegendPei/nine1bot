@@ -64,6 +64,19 @@ afterEach(() => {
 })
 
 describe('web config APIs', () => {
+  it('passes source, limit, and offset when paging webhook runs', async () => {
+    installFetchMock((url) => {
+      if (url === '/webhooks/runs?sourceID=src%2Ftest&limit=11&offset=20') {
+        return jsonResponse([{ id: 'run_21' }])
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    await expect(webhookApi.runs({ sourceID: 'src/test', limit: 11, offset: 20 })).resolves.toEqual([
+      { id: 'run_21' },
+    ])
+  })
+
   it('sends webhook tests through the same-origin management endpoint', async () => {
     installFetchMock((url) => {
       if (url === '/webhooks/sources/src%2Ftest/test') {

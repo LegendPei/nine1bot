@@ -57,4 +57,42 @@ describe("webhook management test route", () => {
       }
     }
   })
+
+  test("applies source-scoped offset pagination to run records", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const sourceID = `src_page_${Math.random().toString(36).slice(2)}`
+    const runIDs: string[] = []
+    let projectID: string | undefined
+
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          projectID = Instance.project.id
+          const oldest = await Webhook.createRun({ sourceID, projectID, status: "succeeded" })
+          const middle = await Webhook.createRun({ sourceID, projectID, status: "failed" })
+          const newest = await Webhook.createRun({ sourceID, projectID, status: "running" })
+          runIDs.push(oldest.id, middle.id, newest.id)
+          await Webhook.updateRun(oldest.id, { time: { received: 1_000 } })
+          await Webhook.updateRun(middle.id, { time: { received: 2_000 } })
+          await Webhook.updateRun(newest.id, { time: { received: 3_000 } })
+
+          const response = await WebhookRoutes().request(
+            `http://localhost/runs?sourceID=${encodeURIComponent(sourceID)}&limit=1&offset=1`,
+          )
+
+          expect(response.status).toBe(200)
+          await expect(response.json()).resolves.toEqual([
+            expect.objectContaining({ id: middle.id }),
+          ])
+        },
+      })
+    } finally {
+      for (const runID of runIDs) await Storage.remove(["webhook_run", runID])
+      if (projectID) {
+        await Storage.remove(["project", projectID])
+        await Storage.remove(["project_meta", projectID])
+      }
+    }
+  })
 })

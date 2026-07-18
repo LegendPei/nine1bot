@@ -391,7 +391,7 @@ export namespace Webhook {
     })
   }
 
-  export async function listRuns(input: { sourceID?: string; limit?: number } = {}) {
+  export async function listRuns(input: { sourceID?: string; limit?: number; offset?: number } = {}) {
     const runs: Run[] = []
     for (const key of await Storage.list(["webhook_run"])) {
       const run = await Storage.read<Run>(key).catch(() => undefined)
@@ -401,7 +401,8 @@ export namespace Webhook {
       runs.push(parsed)
     }
     runs.sort((a, b) => b.time.received - a.time.received)
-    return runs.slice(0, input.limit ?? 100)
+    const offset = Math.max(0, input.offset ?? 0)
+    return runs.slice(offset, offset + (input.limit ?? 100))
   }
 
   export async function withSourceLock<T>(sourceID: string, fn: () => Promise<T>) {

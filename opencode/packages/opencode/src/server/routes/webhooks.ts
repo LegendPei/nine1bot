@@ -778,6 +778,7 @@ export const WebhookRoutes = lazy(() =>
         z.object({
           sourceID: z.string().optional(),
           limit: z.coerce.number().min(1).max(500).optional(),
+          offset: z.coerce.number().int().min(0).optional(),
         }),
       ),
       async (c) => c.json(await Webhook.listRuns(c.req.valid("query"))),

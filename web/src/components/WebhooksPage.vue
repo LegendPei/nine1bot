@@ -51,6 +51,7 @@ const emit = defineEmits<{
 }>()
 
 const DEFAULT_PRESET = webhookPresetById('generic')
+const RUN_PAGE_SIZE = 10
 const helpText = {
   guards: 'Guards reject noisy, duplicate, or stale webhook requests before they create an agent session.',
   rateLimit: 'Limits how many requests this source accepts within one time window.',
@@ -85,17 +86,18 @@ const fullPermissionConfirmed = ref(false)
 const defaultModelLabel = ref('Default model from user config')
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const selectedRunId = ref('')
+const runPage = ref(1)
+const runPageItems = ref<WebhookRun[]>([])
+const runPageHasNext = ref(false)
+const isRunPageLoading = ref(false)
 const endpointPanel = ref<HTMLElement | null>(null)
+let runPageLoadGeneration = 0
 
 const form = ref(defaultForm())
 
 const isEmbedded = computed(() => props.embedded)
 const selectedSource = computed(() => sources.value.find((source) => source.id === selectedSourceId.value) || null)
-const selectedRuns = computed(() => {
-  if (!selectedSourceId.value) return runs.value
-  return runs.value.filter((run) => run.sourceID === selectedSourceId.value)
-})
-const selectedRun = computed(() => selectedRuns.value.find((run) => run.id === selectedRunId.value) || null)
+const selectedRun = computed(() => runPageItems.value.find((run) => run.id === selectedRunId.value) || null)
 
 const sortedProjects = computed(() => props.projects.slice().sort((a, b) => b.time.updated - a.time.updated))
 const selectedProvider = computed(() => providers.value.find((provider) => provider.id === form.value.modelProviderID))
@@ -250,9 +252,11 @@ async function loadAll() {
     }
     if (!selectedSourceId.value) {
       resetCreateForm()
+      resetRunPagination()
       showCreateForm.value = true
     } else {
       loadFormFromSource(selectedSource.value)
+      await refreshRunPage()
     }
   } catch (err) {
     error.value = friendlyError(err)
@@ -347,6 +351,7 @@ async function createSource() {
     showCreateForm.value = false
     revealedSecretSourceId.value = created.source.id
     revealedSecret.value = created.secret
+    resetRunPagination()
     notice.value = 'Webhook source created. Copy the full URL now; the secret is shown only once.'
     await refreshRuns()
     await nextTick()
@@ -400,6 +405,7 @@ async function sendTest() {
   try {
     const result = await webhookApi.sendTest(source.id, payload)
     notice.value = `Test sent. HTTP ${result.status}.`
+    resetRunPagination()
     await refreshRuns()
     if (result.body && typeof result.body === 'object' && 'runId' in result.body) {
       selectedRunId.value = String((result.body as { runId?: unknown }).runId || '')
@@ -448,6 +454,7 @@ async function deleteSource() {
     await webhookApi.deleteSource(source.id)
     sources.value = await webhookApi.sources()
     selectedSourceId.value = sources.value[0]?.id || ''
+    resetRunPagination()
     if (!selectedSourceId.value) {
       showCreateForm.value = true
       resetCreateForm()
@@ -462,7 +469,71 @@ async function deleteSource() {
 }
 
 async function refreshRuns() {
-  runs.value = await webhookApi.runs({ limit: 100 })
+  const [nextRuns] = await Promise.all([
+    webhookApi.runs({ limit: 100 }),
+    refreshRunPage(),
+  ])
+  runs.value = nextRuns
+}
+
+function resetRunPagination() {
+  runPage.value = 1
+  runPageItems.value = []
+  runPageHasNext.value = false
+  selectedRunId.value = ''
+}
+
+async function refreshRunPage() {
+  const sourceID = selectedSourceId.value
+  const page = runPage.value
+  const generation = ++runPageLoadGeneration
+  if (!sourceID) {
+    runPageItems.value = []
+    runPageHasNext.value = false
+    isRunPageLoading.value = false
+    return
+  }
+
+  isRunPageLoading.value = true
+  try {
+    const pageRuns = await webhookApi.runs({
+      sourceID,
+      limit: RUN_PAGE_SIZE + 1,
+      offset: (page - 1) * RUN_PAGE_SIZE,
+    })
+    if (generation !== runPageLoadGeneration || sourceID !== selectedSourceId.value || page !== runPage.value) return
+    runPageItems.value = pageRuns.slice(0, RUN_PAGE_SIZE)
+    runPageHasNext.value = pageRuns.length > RUN_PAGE_SIZE
+    if (selectedRunId.value && !runPageItems.value.some((run) => run.id === selectedRunId.value)) {
+      selectedRunId.value = ''
+    }
+  } finally {
+    if (generation === runPageLoadGeneration) {
+      isRunPageLoading.value = false
+    }
+  }
+}
+
+async function previousRunPage() {
+  if (runPage.value <= 1 || isRunPageLoading.value) return
+  runPage.value -= 1
+  selectedRunId.value = ''
+  try {
+    await refreshRunPage()
+  } catch (err) {
+    error.value = friendlyError(err)
+  }
+}
+
+async function nextRunPage() {
+  if (!runPageHasNext.value || isRunPageLoading.value) return
+  runPage.value += 1
+  selectedRunId.value = ''
+  try {
+    await refreshRunPage()
+  } catch (err) {
+    error.value = friendlyError(err)
+  }
 }
 
 async function copyText(text: string) {
@@ -499,7 +570,7 @@ async function openRunSession(run: WebhookRun) {
 function beginCreate() {
   showCreateForm.value = true
   selectedSourceId.value = ''
-  selectedRunId.value = ''
+  resetRunPagination()
   revealedSecret.value = ''
   revealedSecretSourceId.value = ''
   resetCreateForm()
@@ -508,8 +579,11 @@ function beginCreate() {
 function selectSource(source: WebhookSource) {
   showCreateForm.value = false
   selectedSourceId.value = source.id
-  selectedRunId.value = ''
+  resetRunPagination()
   showMcpPicker.value = false
+  void refreshRunPage().catch((err) => {
+    error.value = friendlyError(err)
+  })
 }
 
 function selectRun(run: WebhookRun) {
@@ -1073,7 +1147,7 @@ onUnmounted(() => {
             <h3>Recent Runs</h3>
             <div class="run-list">
               <div
-                v-for="run in selectedRuns"
+                v-for="run in runPageItems"
                 :key="run.id"
                 class="run-row"
                 :class="{ active: selectedRunId === run.id }"
@@ -1086,9 +1160,21 @@ onUnmounted(() => {
                 <button v-if="run.sessionID" class="link-btn" @click.stop="openRunSession(run)">Open session</button>
                 <span v-else class="muted-text">{{ run.guardType || 'No session' }}</span>
               </div>
-              <div v-if="selectedRuns.length === 0" class="empty-note">
+              <div v-if="isRunPageLoading && runPageItems.length === 0" class="empty-note">
+                Loading runs...
+              </div>
+              <div v-else-if="runPageItems.length === 0" class="empty-note">
                 No runs for this source yet.
               </div>
+            </div>
+            <div v-if="runPageItems.length > 0 || runPage > 1" class="run-pagination">
+              <button class="btn" @click="previousRunPage" :disabled="runPage <= 1 || isRunPageLoading">
+                Previous
+              </button>
+              <span>Page {{ runPage }}</span>
+              <button class="btn" @click="nextRunPage" :disabled="!runPageHasNext || isRunPageLoading">
+                Next
+              </button>
             </div>
             <div v-if="selectedRun" class="run-detail">
               <div class="run-detail-head">
@@ -1852,6 +1938,21 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-muted);
+}
+
+.run-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.run-pagination .btn {
+  height: 32px;
+  padding: 0 var(--space-sm);
 }
 
 .link-btn {
