@@ -25,6 +25,7 @@ describe('release packaging contract', () => {
     const script = await readFile(join(root, 'scripts', 'package.sh'), 'utf8')
     expect(script).toContain('package-platform-resources.ts')
     expect(script).toContain('Compress-Archive')
+    expect(script).toContain('unzip -o -j')
     expect(script).not.toContain('packages/platform-feishu/skills')
     expect(script).not.toContain('packages/platform-gitlab/skills')
   })

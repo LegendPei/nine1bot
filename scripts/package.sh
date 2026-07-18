@@ -110,7 +110,7 @@ case "${PLATFORM}-${ARCH}" in
         ;;
     windows-x64)
         curl -sL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-x86_64-pc-windows-msvc.zip" -o "$BUILD_DIR/bin/rg.zip"
-        unzip -j "$BUILD_DIR/bin/rg.zip" "*/rg.exe" -d "$BUILD_DIR/bin"
+        unzip -o -j "$BUILD_DIR/bin/rg.zip" "*/rg.exe" -d "$BUILD_DIR/bin"
         rm "$BUILD_DIR/bin/rg.zip"
         ;;
     *)
