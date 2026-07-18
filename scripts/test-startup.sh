@@ -10,6 +10,7 @@ set -e
 PLATFORM=$1
 ARCH=$2
 BUILD_DIR=$3
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ -z "$PLATFORM" ] || [ -z "$ARCH" ] || [ -z "$BUILD_DIR" ]; then
     echo "Usage: $0 <platform> <arch> <build_dir>"
@@ -24,6 +25,11 @@ if [ ! -d "$BUILD_DIR" ]; then
     echo "ERROR: Build directory does not exist: $BUILD_DIR"
     exit 1
 fi
+
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
+
+echo "Verifying packaged platform resources..."
+bun run "$SCRIPT_DIR/verify-platform-resources.ts" --build-dir "$BUILD_DIR"
 
 # 根据平台确定二进制文件
 if [ "$PLATFORM" = "windows" ]; then
@@ -125,6 +131,18 @@ while true; do
 
     sleep 1
 done
+
+if [ "$SUCCESS" -eq 1 ]; then
+    echo "Probing running platform resource paths..."
+    if bun run "$SCRIPT_DIR/probe-platform-runtime-resources.ts" \
+        --base-url "http://127.0.0.1:4097" \
+        --build-dir "$BUILD_DIR"; then
+        echo "SUCCESS: Platform runtime resources are available"
+    else
+        echo "ERROR: Platform runtime resource probe failed"
+        SUCCESS=0
+    fi
+fi
 
 # 清理: 终止服务器进程
 echo "Stopping server..."

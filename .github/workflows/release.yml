@@ -251,9 +251,9 @@ jobs:
               build_dir = Dir["nine1bot-*"].first
               raise "Expected unpacked nine1bot release directory" unless build_dir
 
-              bin.install "#{build_dir}/nine1bot"
-              libexec.install "#{build_dir}/bin", "#{build_dir}/skills", "#{build_dir}/web", "#{build_dir}/browser-extension", "#{build_dir}/scripts"
-              libexec.install "#{build_dir}/VERSION" if File.exist?("#{build_dir}/VERSION")
+              libexec.install Dir["#{build_dir}/*"]
+              (bin/"nine1bot").write_env_script libexec/"nine1bot",
+                NINE1BOT_INSTALL_DIR: libexec
             end
 
             def caveats

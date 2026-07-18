@@ -46,6 +46,12 @@ echo "Copying skills..."
 mkdir -p "$BUILD_DIR/skills"
 cp -r "$PROJECT_ROOT/packages/nine1bot/skills/"* "$BUILD_DIR/skills/"
 
+# 2.5 打包平台注册的外部静态资源
+echo "Copying platform resources..."
+bun run "$SCRIPT_DIR/package-platform-resources.ts" \
+    --project-root "$PROJECT_ROOT" \
+    --build-dir "$BUILD_DIR"
+
 # 3. 复制 web/dist
 echo "Copying web assets..."
 mkdir -p "$BUILD_DIR/web"
