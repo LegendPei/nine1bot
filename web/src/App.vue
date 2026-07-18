@@ -1005,9 +1005,9 @@ function handlePromptSelect(prompt: string) {
           @open-session="handleOpenMetricsSession"
         />
 
-        <!-- Empty State: Centered greeting + input + prompts -->
-        <template v-else-if="isEmptyState">
-          <div class="empty-center-wrapper">
+        <!-- Keep one composer instance while empty/loading state changes. -->
+        <template v-else>
+          <div class="conversation-content" :class="{ 'empty-center-wrapper': isEmptyState }">
             <ChatPanel
               :messages="messages"
               :isLoading="isLoading"
@@ -1030,7 +1030,7 @@ function handlePromptSelect(prompt: string) {
             <InputBox
               :disabled="isLoading"
               :isStreaming="isStreaming"
-              :centered="true"
+              :centered="isEmptyState"
               :ensureSession="ensureCurrentSessionId"
               :providers="providers"
               :currentProvider="currentProvider"
@@ -1048,52 +1048,10 @@ function handlePromptSelect(prompt: string) {
               @toggle-plan="togglePlanPanel"
             />
             <PromptCategories
+              v-if="isEmptyState"
               @select="handlePromptSelect"
             />
           </div>
-        </template>
-
-        <!-- Normal Chat View with messages -->
-        <template v-else>
-          <ChatPanel
-            :messages="messages"
-            :isLoading="isLoading"
-            :isStreaming="isStreaming"
-            :pendingQuestions="pendingQuestions"
-            :pendingPermissions="pendingPermissions"
-            :sessionError="sessionError"
-            :currentDirectory="currentDirectory"
-            :canChangeDirectory="canChangeDirectory()"
-            :mode="appMode"
-            @question-answered="(id, answers) => answerQuestion(id, answers)"
-            @question-rejected="rejectQuestion"
-            @permission-responded="respondPermission"
-            @clear-error="clearSessionError"
-            @open-settings="openSettings"
-            @delete-part="handleDeletePart"
-            @update-part="handleUpdatePart"
-            @change-directory="changeDirectory"
-          />
-          <InputBox
-            :disabled="isLoading"
-            :isStreaming="isStreaming"
-            :centered="false"
-            :ensureSession="ensureCurrentSessionId"
-            :providers="providers"
-            :currentProvider="currentProvider"
-            :currentModel="currentModel"
-            :mode="appMode"
-            :messages="messages"
-            @send="handleSend"
-            @abort="abortCurrentSession"
-            @select-model="handleSelectModel"
-            @open-mcp="handleOpenMcp"
-            @toggle-mcp-panel="toggleMcpPanel"
-            @open-skills="handleOpenSkills"
-            @compress-session="handleSummarize"
-            @toggle-todo="toggleTodoList"
-            @toggle-plan="togglePlanPanel"
-          />
         </template>
 
         <!-- Plan Panel (click outside to close) -->
@@ -1447,6 +1405,10 @@ function handlePromptSelect(prompt: string) {
 
 .chat-panel {
   position: relative;
+}
+
+.conversation-content:not(.empty-center-wrapper) {
+  display: contents;
 }
 
 /* Empty layout: PromptCategories centering */

@@ -819,6 +819,28 @@ export interface FileSearchResult {
   type: 'file' | 'directory'
 }
 
+function sessionUploadErrorMessage(status: number, payload: any) {
+  const serverMessage = payload?.error || payload?.message || payload?.data?.error
+  if (serverMessage) return serverMessage
+
+  switch (status) {
+    case 401:
+      return '文件上传未通过身份验证（HTTP 401），请重新登录后重试。'
+    case 403:
+      return '当前服务拒绝文件上传（HTTP 403），请检查访问权限。'
+    case 404:
+      return '当前服务不支持会话文件上传（HTTP 404），请确认前后端版本一致。'
+    case 408:
+    case 504:
+      return `文件上传等待服务响应超时（HTTP ${status}），请重试。`
+    case 413:
+      return '文件超过当前服务允许的上传大小（HTTP 413）。'
+    default:
+      if (status >= 500) return `服务器保存文件失败（HTTP ${status}），请检查会话目录是否可写。`
+      return `文件上传失败（HTTP ${status}）。`
+  }
+}
+
 export const api = {
   // 健康检查
   async health(): Promise<{ healthy: boolean; version: string }> {
@@ -1000,16 +1022,39 @@ export const api = {
     options: {
       onProgress?: (progress: number) => void
       signal?: AbortSignal
+      stallTimeoutMs?: number
     } = {}
   ): Promise<SessionUploadResponse> {
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
       const url = applyDirectoryToUrl(`${BASE_URL}/session/${sessionId}/upload`)
       const headers = new Headers(applyDirectoryHeaders({}).headers || {})
+      const stallTimeoutMs = options.stallTimeoutMs ?? 60_000
       let settled = false
+      let stallTimer: ReturnType<typeof setTimeout> | undefined
+      let abortReason: Error | undefined
 
       const cleanup = () => {
         options.signal?.removeEventListener('abort', handleAbort)
+        if (stallTimer !== undefined) clearTimeout(stallTimer)
+        stallTimer = undefined
+      }
+
+      const rejectOnce = (error: Error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+
+      const resetStallTimer = () => {
+        if (stallTimer !== undefined) clearTimeout(stallTimer)
+        if (stallTimeoutMs <= 0 || settled) return
+        stallTimer = setTimeout(() => {
+          abortReason = new Error('上传长时间没有进度，请检查网络连接后重试。')
+          xhr.abort()
+          rejectOnce(abortReason)
+        }, stallTimeoutMs)
       }
 
       const handleAbort = () => {
@@ -1018,6 +1063,10 @@ export const api = {
         }
       }
 
+      if (options.signal?.aborted) {
+        rejectOnce(new DOMException('Upload aborted', 'AbortError'))
+        return
+      }
       options.signal?.addEventListener('abort', handleAbort, { once: true })
 
       xhr.open('POST', url)
@@ -1026,24 +1075,22 @@ export const api = {
       })
 
       xhr.upload.onprogress = (event) => {
+        resetStallTimer()
         if (!event.lengthComputable || !options.onProgress) return
         const progress = Math.min(100, Math.round((event.loaded / event.total) * 100))
         options.onProgress(progress)
       }
 
       xhr.onerror = () => {
-        settled = true
-        cleanup()
-        reject(new Error('上传失败，网络连接中断'))
+        rejectOnce(new Error('上传失败，网络连接中断。'))
       }
 
       xhr.onabort = () => {
-        settled = true
-        cleanup()
-        reject(new DOMException('Upload aborted', 'AbortError'))
+        rejectOnce(abortReason ?? new DOMException('Upload aborted', 'AbortError'))
       }
 
       xhr.onload = () => {
+        if (settled) return
         settled = true
         cleanup()
 
@@ -1060,16 +1107,13 @@ export const api = {
           return
         }
 
-        const message =
-          payload?.error ||
-          payload?.message ||
-          payload?.data?.error ||
-          `HTTP error! status: ${xhr.status}`
+        const message = sessionUploadErrorMessage(xhr.status, payload)
         reject(new Error(message))
       }
 
       const formData = new FormData()
       formData.append('file', file, file.name)
+      resetStallTimer()
       xhr.send(formData)
     })
   },
