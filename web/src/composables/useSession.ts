@@ -1,7 +1,27 @@
 import { ref, computed } from 'vue'
-import { api, type EventStreamSubscription, type Session, type Message, type SSEEvent, type MessagePart, type QuestionRequest, type PermissionRequest, type TodoItem, type ContextEnrichmentSummary, questionApi, permissionApi, SessionBusyError, setApiDirectory } from '../api/client'
+import {
+  api,
+  type ContextEnrichmentSummary,
+  type EventStreamSubscription,
+  type Message,
+  type MessagePart,
+  type PermissionRequest,
+  type QuestionRequest,
+  type Session,
+  type SessionStatus,
+  type SSEEvent,
+  type TodoItem,
+  permissionApi,
+  questionApi,
+  SessionBusyError,
+  setApiDirectory,
+} from '../api/client'
 import { collectActivePageContext } from '../api/page-context'
 import { useParallelSessions, MAX_PARALLEL_AGENTS } from './useParallelSessions'
+import {
+  createSessionEventReconciler,
+  loadSessionRecoverySnapshot,
+} from './sessionEventReconciler'
 
 export function useSession() {
   const sessions = ref<Session[]>([])
@@ -54,13 +74,14 @@ export function useSession() {
   let eventSource: EventStreamSubscription | null = null
   let sessionEventSource: EventStreamSubscription | null = null
   let subscribedRuntimeSessionId: string | null = null
+  let sessionEventGeneration = 0
+  let sessionEventSubscriptionVersion = 0
+  let selectionVersion = 0
+  const sessionEventReconciler = createSessionEventReconciler<SSEEvent>(dispatchSessionEvent)
 
   function reconnectEventsForDirectory() {
     if (eventSource) {
       subscribeToEvents()
-    }
-    if (currentSession.value) {
-      subscribeToSessionRuntimeEvents(currentSession.value.id)
     }
   }
 
@@ -176,6 +197,8 @@ export function useSession() {
         currentDirectory.value = updated.directory
         setApiDirectory(currentDirectory.value)
         reconnectEventsForDirectory()
+        unsubscribeSessionRuntimeEvents()
+        await openSessionEventStreamAndReconcile(updated.id)
 
         // 更新本地会话列表
         const index = sessions.value.findIndex(s => s.id === updated.id)
@@ -198,6 +221,84 @@ export function useSession() {
     return isDraftSession.value || (currentSession.value !== null && messages.value.length === 0)
   }
 
+  function applyRecoveryStatus(sessionID: string, status: SessionStatus) {
+    const running = status.type === 'busy' || status.type === 'retry'
+    setSessionRunning(sessionID, running)
+    if (currentSession.value?.id !== sessionID) return
+    retryInfo.value = status.type === 'retry'
+      ? {
+          attempt: status.attempt,
+          message: status.message,
+          next: status.next,
+        }
+      : null
+  }
+
+  async function reconcileSession(sessionID: string, generation: number) {
+    try {
+      const snapshot = await loadSessionRecoverySnapshot(sessionID, {
+        getMessages: api.getMessages,
+        getStatuses: api.getSessionStatus,
+        getQuestions: questionApi.list,
+        getPermissions: permissionApi.list,
+      })
+
+      if (
+        !sessionEventReconciler.isCurrent(generation) ||
+        currentSession.value?.id !== sessionID
+      ) {
+        return false
+      }
+
+      return sessionEventReconciler.applySnapshot(generation, () => {
+        messages.value = snapshot.messages
+        pendingQuestions.value = snapshot.questions
+        pendingPermissions.value = snapshot.permissions
+        seenUserMessageIds.clear()
+        for (const message of snapshot.messages) {
+          if (message.info.role === 'user') seenUserMessageIds.add(message.info.id)
+        }
+        applyRecoveryStatus(sessionID, snapshot.status)
+      })
+    } catch (error) {
+      if (
+        sessionEventReconciler.isCurrent(generation) &&
+        currentSession.value?.id === sessionID
+      ) {
+        console.error('Failed to reconcile session state:', error)
+      }
+      return false
+    } finally {
+      sessionEventReconciler.finish(generation)
+    }
+  }
+
+  async function openSessionEventStreamAndReconcile(sessionID: string) {
+    const generation = sessionEventReconciler.begin(sessionID)
+    sessionEventGeneration = generation
+    const subscription = subscribeToSessionRuntimeEvents(sessionID, generation)
+    try {
+      await subscription.ready
+    } catch (error) {
+      sessionEventReconciler.finish(generation)
+      if (sessionEventSource === subscription) {
+        unsubscribeSessionRuntimeEvents()
+      } else {
+        subscription.close()
+      }
+      throw error
+    }
+    await reconcileSession(sessionID, generation)
+    return subscription
+  }
+
+  async function reconcileCurrentSessionState(sessionID: string) {
+    if (currentSession.value?.id !== sessionID) return false
+    const generation = sessionEventReconciler.begin(sessionID)
+    sessionEventGeneration = generation
+    return reconcileSession(sessionID, generation)
+  }
+
   /**
    * 实际创建会话（内部方法，发送消息时调用）
    */
@@ -211,12 +312,13 @@ export function useSession() {
       reconnectEventsForDirectory()
       const session = await api.createSession(directory, pageContext)
       currentSession.value = session
+      isDraftSession.value = false
       // 使用服务器返回的实际目录，而不是传入的参数
       currentDirectory.value = session.directory
       setApiDirectory(currentDirectory.value)
       reconnectEventsForDirectory()
-      subscribeToSessionRuntimeEvents(session.id)
-      isDraftSession.value = false
+      unsubscribeSessionRuntimeEvents()
+      await openSessionEventStreamAndReconcile(session.id)
       // 重新加载所有会话，不过滤目录
       await loadSessions()
       return session
@@ -229,6 +331,7 @@ export function useSession() {
   }
 
   async function selectSession(session: Session) {
+    const requestVersion = ++selectionVersion
     try {
       isLoading.value = true
       // 切换到已存在的会话，退出草稿模式
@@ -245,13 +348,26 @@ export function useSession() {
       currentDirectory.value = session.directory
       setApiDirectory(currentDirectory.value)
       reconnectEventsForDirectory()
-      subscribeToSessionRuntimeEvents(session.id)
+      unsubscribeSessionRuntimeEvents()
       messages.value = []  // Clear immediately to avoid flash of old content
-      messages.value = await api.getMessages(session.id)
+      const initialGeneration = sessionEventReconciler.begin(session.id)
+      sessionEventGeneration = initialGeneration
+      await reconcileSession(session.id, initialGeneration)
+      if (
+        requestVersion !== selectionVersion ||
+        currentSession.value?.id !== session.id
+      ) {
+        return
+      }
+      await openSessionEventStreamAndReconcile(session.id)
     } catch (error) {
-      console.error('Failed to load messages:', error)
+      if (requestVersion === selectionVersion) {
+        console.error('Failed to load session:', error)
+      }
     } finally {
-      isLoading.value = false
+      if (requestVersion === selectionVersion) {
+        isLoading.value = false
+      }
     }
   }
 
@@ -329,6 +445,13 @@ export function useSession() {
     const sessionId = currentSession.value.id
 
     try {
+      const subscription =
+        sessionEventSource && subscribedRuntimeSessionId === sessionId
+          ? sessionEventSource
+          : await openSessionEventStreamAndReconcile(sessionId)
+      await subscription.ready
+      setSessionRunning(sessionId, true)
+
       if (model && !isSameModel(currentSession.value.runtime?.currentModel, model)) {
         const modelResult = await api.changeSessionModel(sessionId, model)
         applyCurrentSessionRuntime({
@@ -337,7 +460,6 @@ export function useSession() {
         })
       }
 
-      subscribeToSessionRuntimeEvents(sessionId)
       const pageContext =
         draftPageContext ??
         (await collectActivePageContext().catch((error) => {
@@ -351,6 +473,7 @@ export function useSession() {
       const errorMessage = error.message?.toLowerCase() || ''
       if (errorMessage.includes('aborted') || errorMessage.includes('abort') || error.name === 'AbortError') {
         console.log('Request aborted')
+        await reconcileCurrentSessionState(sessionId)
         return
       }
       // Handle session busy error
@@ -360,8 +483,7 @@ export function useSession() {
           message: '该会话正在被其他客户端使用中，请稍后重试或创建新会话',
           dismissable: true
         }
-        // Mark session as stopped since we couldn't start
-        setSessionRunning(sessionId, false)
+        await reconcileCurrentSessionState(sessionId)
         return
       }
       console.error('Failed to send message:', error)
@@ -369,8 +491,7 @@ export function useSession() {
         message: `发送失败: ${error.message || '未知错误'}`,
         dismissable: true
       }
-      // Mark session as stopped on error
-      setSessionRunning(sessionId, false)
+      await reconcileCurrentSessionState(sessionId)
     } finally {
       streamingMessage.value = null
       // Note: Don't set running to false here - SSE events will handle that via session.idle
@@ -634,9 +755,20 @@ export function useSession() {
   async function abortSession(sessionId: string) {
     try {
       await api.abortSession(sessionId)
-      setSessionRunning(sessionId, false)
     } catch (error) {
       console.error('Failed to abort session:', error)
+    }
+
+    if (currentSession.value?.id === sessionId) {
+      await reconcileCurrentSessionState(sessionId)
+      return
+    }
+
+    try {
+      const statuses = await api.getSessionStatus()
+      applyRecoveryStatus(sessionId, statuses[sessionId] ?? { type: 'idle' })
+    } catch (error) {
+      console.error('Failed to reconcile aborted session status:', error)
     }
   }
 
@@ -644,6 +776,40 @@ export function useSession() {
     if (currentSession.value && isStreaming.value) {
       await abortSession(currentSession.value.id)
     }
+  }
+
+  function extractSessionID(event: SSEEvent) {
+    return event.properties?.sessionID
+      || event.properties?.message?.info?.sessionID
+      || event.properties?.part?.sessionID
+      || event.properties?.info?.sessionID
+      || event.properties?.status?.sessionID
+      || event.properties?.error?.sessionID
+  }
+
+  function isSessionContentEvent(event: SSEEvent) {
+    return event.type === 'message.created'
+      || event.type === 'message.updated'
+      || event.type === 'message.completed'
+      || event.type === 'message.removed'
+      || event.type === 'message.part.updated'
+      || event.type === 'message.part.removed'
+  }
+
+  function dispatchExternalEvent(event: SSEEvent) {
+    for (const handler of externalEventHandlers) {
+      try {
+        handler(event)
+      } catch (error) {
+        console.error('External event handler error:', error)
+      }
+    }
+  }
+
+  function dispatchSessionEvent(event: SSEEvent) {
+    handleGlobalSSEEvent(event)
+    dispatchExternalEvent(event)
+    handleSSEEvent(event)
   }
 
   // 订阅全局事件流
@@ -657,22 +823,20 @@ export function useSession() {
       // ALWAYS process for parallel session tracking (status events for ALL sessions)
       handleGlobalSSEEvent(event)
 
-      // 调用外部事件处理器（如 agent terminal）
-      for (const handler of externalEventHandlers) {
-        try {
-          handler(event)
-        } catch (e) {
-          console.error('External event handler error:', e)
-        }
+      // Extract sessionID from all possible locations
+      const sessionID = extractSessionID(event)
+
+      // Dedicated per-session SSE is authoritative for current message content.
+      if (
+        currentSession.value &&
+        sessionID === currentSession.value.id &&
+        isSessionContentEvent(event)
+      ) {
+        return
       }
 
-      // Extract sessionID from all possible locations
-      const sessionID = event.properties?.sessionID
-        || event.properties?.message?.info?.sessionID
-        || event.properties?.part?.sessionID
-        || event.properties?.info?.sessionID
-        || event.properties?.status?.sessionID
-        || event.properties?.error?.sessionID
+      // 调用外部事件处理器（如 agent terminal）
+      dispatchExternalEvent(event)
 
       // 草稿模式下没有当前会话，跳过所有会话级事件，防止其他会话的消息泄漏
       if (!currentSession.value) {
@@ -716,29 +880,40 @@ export function useSession() {
     })
   }
 
-  function subscribeToSessionRuntimeEvents(sessionId: string) {
+  function subscribeToSessionRuntimeEvents(sessionId: string, generation: number) {
     if (sessionEventSource && subscribedRuntimeSessionId === sessionId) {
-      return
+      return sessionEventSource
     }
 
     unsubscribeSessionRuntimeEvents()
+    const subscriptionVersion = ++sessionEventSubscriptionVersion
     subscribedRuntimeSessionId = sessionId
-    sessionEventSource = api.subscribeSessionRuntimeEvents(sessionId, (event: SSEEvent) => {
-      handleGlobalSSEEvent(event)
-
-      for (const handler of externalEventHandlers) {
-        try {
-          handler(event)
-        } catch (e) {
-          console.error('External event handler error:', e)
-        }
-      }
-
-      handleSSEEvent(event)
-    })
+    sessionEventGeneration = generation
+    sessionEventSource = api.subscribeSessionRuntimeEvents(
+      sessionId,
+      (event: SSEEvent) => {
+        if (subscriptionVersion !== sessionEventSubscriptionVersion) return
+        sessionEventReconciler.buffer(sessionEventGeneration, event)
+      },
+      {
+        onReconnect() {
+          if (
+            subscriptionVersion !== sessionEventSubscriptionVersion ||
+            currentSession.value?.id !== sessionId
+          ) {
+            return
+          }
+          const reconnectGeneration = sessionEventReconciler.begin(sessionId)
+          sessionEventGeneration = reconnectGeneration
+          void reconcileSession(sessionId, reconnectGeneration)
+        },
+      },
+    )
+    return sessionEventSource
   }
 
   function unsubscribeSessionRuntimeEvents() {
+    sessionEventSubscriptionVersion++
     if (sessionEventSource) {
       sessionEventSource.close()
       sessionEventSource = null

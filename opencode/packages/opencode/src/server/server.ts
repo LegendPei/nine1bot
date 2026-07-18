@@ -53,6 +53,7 @@ import { ScheduleRoutes } from "./routes/schedules"
 import { WebhookPublicRoutes, WebhookRoutes } from "./routes/webhooks"
 import { MDNS } from "./mdns"
 import { Schedule } from "@/schedule/schedule"
+import { shouldSendEvent } from "./event-filter"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -704,6 +705,7 @@ export namespace Server {
             }),
             async (c) => {
               log.info("event connected")
+              const includeContent = c.req.query("content") !== "false"
               c.header("Cache-Control", "no-cache, no-transform")
               c.header("X-Accel-Buffering", "no")
               c.header("Connection", "keep-alive")
@@ -740,6 +742,7 @@ export namespace Server {
                   properties: {},
                 })
                 const unsub = Bus.subscribeAll((event) => {
+                  if (!shouldSendEvent(event, includeContent)) return
                   void writeQueued(event)
                   if (event.type === Bus.InstanceDisposed.type) {
                     void writeChain.finally(() => stream.close())

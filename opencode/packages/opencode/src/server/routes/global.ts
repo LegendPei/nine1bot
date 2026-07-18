@@ -8,6 +8,7 @@ import { Instance } from "../../project/instance"
 import { Installation } from "@/installation"
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
+import { shouldSendEvent } from "../event-filter"
 
 const log = Log.create({ service: "server" })
 
@@ -64,6 +65,7 @@ export const GlobalRoutes = lazy(() =>
         }),
         async (c) => {
           log.info("global event connected")
+          const includeContent = c.req.query("content") !== "false"
           c.header("Cache-Control", "no-cache, no-transform")
           c.header("X-Accel-Buffering", "no")
           c.header("Connection", "keep-alive")
@@ -102,6 +104,7 @@ export const GlobalRoutes = lazy(() =>
               },
             })
             function handler(event: any) {
+              if (!shouldSendEvent(event, includeContent)) return
               void writeQueued(event)
             }
             GlobalBus.on("event", handler)

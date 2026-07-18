@@ -66,6 +66,47 @@ function fetchWithDirectory(url: string, options: RequestInit = {}) {
   return fetch(applyDirectoryToUrl(url), applyDirectoryHeaders(options))
 }
 
+function createEventStreamConnection(options: EventStreamOptions = {}) {
+  let generation = 0
+  let readySettled = false
+  let resolveReady!: () => void
+  let rejectReady!: (error: Error) => void
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  void ready.catch(() => {})
+
+  const readyTimer = setTimeout(() => {
+    if (readySettled) return
+    readySettled = true
+    rejectReady(new Error('Event stream did not open within 5 seconds'))
+  }, 5000)
+
+  return {
+    ready,
+    opened() {
+      generation += 1
+      if (!readySettled) {
+        readySettled = true
+        clearTimeout(readyTimer)
+        resolveReady()
+        return
+      }
+      if (generation > 1) options.onReconnect?.(generation)
+    },
+    close() {
+      clearTimeout(readyTimer)
+      if (readySettled) return
+      readySettled = true
+      rejectReady(new Error('Event stream closed before opening'))
+    },
+    connectionGeneration() {
+      return generation
+    },
+  }
+}
+
 function normalizeSession(session: Session): Session {
   return {
     ...session,
@@ -189,6 +230,11 @@ export interface SessionRuntimeSummary {
     source?: string
   }
 }
+
+export type SessionStatus =
+  | { type: 'idle' }
+  | { type: 'busy' }
+  | { type: 'retry'; attempt: number; message: string; next: number }
 
 export interface ContextEnrichmentSummary {
   platform: string
@@ -1030,13 +1076,16 @@ export const api = {
 
   // 中止会话
   async abortSession(sessionId: string): Promise<void> {
-    await fetchWithDirectory(`${BASE_URL}/session/${sessionId}/abort`, {
+    const res = await fetchWithDirectory(`${BASE_URL}/session/${sessionId}/abort`, {
       method: 'POST'
     })
+    if (!res.ok) {
+      throw new Error(`Failed to abort session: ${res.status}`)
+    }
   },
 
   // 获取所有会话状态
-  async getSessionStatus(): Promise<Record<string, { type: string }>> {
+  async getSessionStatus(): Promise<Record<string, SessionStatus>> {
     const res = await fetchWithDirectory(`${BASE_URL}/session/status`)
     const data = await res.json()
     return data
@@ -1187,22 +1236,24 @@ export const api = {
   },
 
   // 订阅事件流（带自动重连）
-  subscribeEvents(onEvent: (event: SSEEvent) => void): EventStreamSubscription {
+  subscribeEvents(onEvent: (event: SSEEvent) => void, options: EventStreamOptions = {}): EventStreamSubscription {
     let eventSource: EventSource | null = null
     let reconnectAttempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let closed = false
     const maxReconnectAttempts = 5
     const baseReconnectDelay = 1000 // 1秒
+    const connection = createEventStreamConnection(options)
 
     function connect(): void {
       if (closed) return
       eventSource?.close()
-      eventSource = new EventSource(applyDirectoryToUrl(`${BASE_URL}/event`))
+      eventSource = new EventSource(applyDirectoryToUrl(`${BASE_URL}/event?content=false`))
 
       eventSource.onopen = () => {
         // 连接成功，重置重连计数
         reconnectAttempts = 0
+        connection.opened()
       }
 
       eventSource.onmessage = (e) => {
@@ -1244,8 +1295,11 @@ export const api = {
 
     connect()
     return {
+      ready: connection.ready,
+      connectionGeneration: connection.connectionGeneration,
       close() {
         closed = true
+        connection.close()
         if (reconnectTimer) {
           clearTimeout(reconnectTimer)
           reconnectTimer = null
@@ -1256,13 +1310,18 @@ export const api = {
     }
   },
 
-  subscribeSessionRuntimeEvents(sessionId: string, onEvent: (event: SSEEvent) => void): EventStreamSubscription {
+  subscribeSessionRuntimeEvents(
+    sessionId: string,
+    onEvent: (event: SSEEvent) => void,
+    options: EventStreamOptions = {},
+  ): EventStreamSubscription {
     let eventSource: EventSource | null = null
     let reconnectAttempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let closed = false
     const maxReconnectAttempts = 5
     const baseReconnectDelay = 1000
+    const connection = createEventStreamConnection(options)
 
     function dispatchEnvelope(raw: string) {
       try {
@@ -1284,6 +1343,7 @@ export const api = {
 
       eventSource.onopen = () => {
         reconnectAttempts = 0
+        connection.opened()
       }
 
       eventSource.onmessage = (e) => {
@@ -1320,8 +1380,11 @@ export const api = {
 
     connect()
     return {
+      ready: connection.ready,
+      connectionGeneration: connection.connectionGeneration,
       close() {
         closed = true
+        connection.close()
         if (reconnectTimer) {
           clearTimeout(reconnectTimer)
           reconnectTimer = null
@@ -1333,21 +1396,26 @@ export const api = {
   },
 
   // Subscribe global events (cross-directory / cross-instance updates)
-  subscribeGlobalEvents(onEvent: (event: GlobalSSEEventEnvelope) => void): EventStreamSubscription {
+  subscribeGlobalEvents(
+    onEvent: (event: GlobalSSEEventEnvelope) => void,
+    options: EventStreamOptions = {},
+  ): EventStreamSubscription {
     let eventSource: EventSource | null = null
     let reconnectAttempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let closed = false
     const maxReconnectAttempts = 5
     const baseReconnectDelay = 1000
+    const connection = createEventStreamConnection(options)
 
     function connect(): void {
       if (closed) return
       eventSource?.close()
-      eventSource = new EventSource(`${BASE_URL}/global/event`)
+      eventSource = new EventSource(`${BASE_URL}/global/event?content=false`)
 
       eventSource.onopen = () => {
         reconnectAttempts = 0
+        connection.opened()
       }
 
       eventSource.onmessage = (e) => {
@@ -1379,8 +1447,11 @@ export const api = {
 
     connect()
     return {
+      ready: connection.ready,
+      connectionGeneration: connection.connectionGeneration,
       close() {
         closed = true
+        connection.close()
         if (reconnectTimer) {
           clearTimeout(reconnectTimer)
           reconnectTimer = null
@@ -1398,7 +1469,13 @@ export interface SSEEvent {
 }
 
 export interface EventStreamSubscription {
+  ready: Promise<void>
+  connectionGeneration(): number
   close(): void
+}
+
+export interface EventStreamOptions {
+  onReconnect?(generation: number): void
 }
 
 export interface GlobalSSEEventEnvelope {
