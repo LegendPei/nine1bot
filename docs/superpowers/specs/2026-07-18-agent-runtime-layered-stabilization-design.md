@@ -15,7 +15,7 @@
 1. 同一个 session 在任意时刻最多只有一个 Agent loop，旧任务不能释放或覆盖新任务的运行状态。
 2. `runtime.turn.completed` 只表示整个 turn 已结束，模型 step 和工具调用之间不会产生假终态。
 3. Web 在发送消息前确认会话事件流已经建立；首次加载和 SSE 重连后会通过 REST 恢复消息、运行状态和待处理交互。
-4. provider、MCP、Question 和 Web 控制请求都有明确的时间上限，超时最终会变成用户可见错误。
+4. 默认不限制整个 Agent turn 的总时长；无响应的 provider 连接、MCP 和 Web 控制请求使用各自的边界超时，provider 重试次数和单次等待时间都有上限。
 5. 流式 delta 不再每个 token 都重写并传输持续增长的完整 part；正常结束时仍然完整持久化最终消息。
 6. 快速切换 session 时，旧请求和旧事件不能覆盖当前 session。
 
@@ -34,7 +34,7 @@
 flowchart TB
     Lease["运行所有权层<br/>RunLease + 唯一终态"]
     Event["事件恢复层<br/>SSE ready + REST reconcile"]
-    Bound["有界等待层<br/>deadline + timeout + retry limit"]
+    Bound["有界等待层<br/>边界 timeout + retry limit"]
     Stream["流式性能层<br/>delta 合并 + 持久化检查点"]
 
     Lease --> Event
@@ -90,20 +90,23 @@ reconcile 开始后，当前 connection generation 收到的新事件先进入�
 
 ### 2.3 有界等待层
 
-Controller 编译出的 `runtime.timeoutMs` 要继续传入 `SessionPrompt.PromptInput`。Agent loop 在开始时创建统一 deadline，并把由 deadline 派生的 AbortSignal 传给资源解析、LLM、工具和 interaction。没有显式 override 时，整轮默认上限为 15 分钟。
+Controller 编译出的 `runtime.timeoutMs` 要继续传入 `SessionPrompt.PromptInput`，但它是调用方主动选择的整轮上限，不是系统默认限制。Web 交互式对话不设置该字段时，Agent turn 可以持续运行到自然完成、用户取消或不可恢复错误。Schedule、Webhook 等无人值守入口可以显式设置 `runtime.timeoutMs`；只有这时 Agent loop 才创建整轮 deadline，并把 deadline 派生的 AbortSignal 传给资源解析、LLM、工具和 interaction。
+
+没有整轮 deadline 不等于允许外部依赖无限挂起。系统只约束可以明确判断为连接或重试异常的局部边界；正常持续产生进展的长任务不因累计运行时间被终止。
 
 各边界采用以下默认值：
 
 | 边界 | 默认限制 | 结束行为 |
 |---|---:|---|
-| 整个 Agent turn | 15 分钟 | abort 当前 lease，发布 `runtime.turn.failed` 和用户可见 timeout error |
+| 整个 Agent turn | 默认不限制；仅在调用方显式传入 `runtime.timeoutMs` 时限制 | 显式 deadline 到期后 abort 当前 lease，发布 `runtime.turn.failed` 和用户可见 timeout error |
 | EventSource 首次 ready | 5 秒 | 本次发送失败，Web 清除 running 并提示事件通道连接失败 |
 | Web 消息、模型切换和 abort 请求 | 30 秒 | fetch 终止并显示请求超时；abort 失败时不伪造 idle |
 | MCP `listTools()` | 每个 server 10 秒 | 标记该 MCP 本轮不可用，发布 resource failure，其他资源继续解析 |
-| provider 调用 | 最多 5 次总尝试，包括第一次请求 | 第 5 次仍失败时结束 turn；最多发生 4 次 retry sleep，且 sleep 不能越过整轮 deadline |
-| Question | 5 分钟或整轮剩余时间，取更短者 | 清理 pending request，并以明确的 timeout error 结束对应工具调用；整轮仍有预算时允许模型处理该工具错误 |
+| provider 首个事件或流中断档 | 连续 5 分钟没有任何流事件；每次收到事件后重新计时 | abort 本次 provider 调用并进入有限重试；持续输出的长响应不会触发 |
+| provider 调用 | 最多 5 次总尝试，包括第一次请求；单次 retry sleep 最多 30 秒 | 第 5 次仍失败时结束 turn；最多发生 4 次 retry sleep |
+| Question | 默认不限制等待时长 | SSE 重连后恢复 pending Question；用户取消或显式 turn deadline 到期时清理 pending request 并 reject Promise |
 
-调用方已有更短的显式 timeout 时继续优先使用。Permission 维持现有 5 分钟语义，但要同时响应整轮 abort。
+显式 `runtime.timeoutMs` 可以根据入口和任务类型设置，所有局部等待都不能越过显式 deadline。Permission 维持现有 5 分钟语义，但也要响应用户取消和显式 deadline abort。
 
 MCP 工具枚举复用现有 server timeout 和 tools cache。连接或配置版本未变化时优先使用缓存；需要刷新时各 server 可以并行执行，但单个 server 的失败不能阻塞其他 server。
 
@@ -122,13 +125,14 @@ MCP 工具枚举复用现有 server timeout 和 tools cache。连接或配置版
 
 | 组件 | 主要职责 | 设计调整 |
 |---|---|---|
-| `session/prompt.ts` | reserve、cancel、Agent loop、终态 | 引入带 ID 的 `RunLease`，compare-and-release，统一 turn deadline 和最终事件 |
+| `session/prompt.ts` | reserve、cancel、Agent loop、终态 | 引入带 ID 的 `RunLease`，compare-and-release，只在显式配置时创建 turn deadline，并统一最终事件 |
 | `session/processor.ts` | 单个模型 step 和流式 part | 移除 turn completed 发布；返回 step outcome；合并 delta 并触发检查点 |
+| `session/llm.ts` | provider 流式调用 | 增加连续无事件 watchdog；收到任意流事件时重置，正常持续输出不累计计时 |
 | `session/index.ts` | part 存储和 Bus 事件 | 区分紧凑 delta 与完整 checkpoint，提供显式 flush |
 | `runtime/controller/events.ts` | Bus 到 Runtime Event 投影 | 增加紧凑 part delta envelope；completed 仅接受外层 loop 终态 |
 | `runtime/bridge/prompt-compiler.ts` | Turn snapshot 到 PromptInput | 继续传递 `timeoutMs` |
 | `mcp/index.ts` | MCP 工具枚举 | 使用有界并行刷新和现有 cache，单 server 失败可降级 |
-| `question/index.ts` | 用户问题等待 | 接收 AbortSignal/deadline，超时或 abort 后清理 pending Promise |
+| `question/index.ts` | 用户问题等待 | 接收 AbortSignal 和可选 deadline，用户取消或显式 deadline 到期后清理 pending Promise |
 | `web/src/api/client.ts` | REST 和 EventSource | 所有控制请求使用 timeout；session subscription 暴露 ready/reconnect |
 | `web/src/composables/useSession.ts` | 会话选择、发送和事件应用 | 使用 selection generation、reconcile 和单一当前会话事件源 |
 | Web 消息组件 | delta 展示、Markdown、滚动 | 按帧合并更新，缓存 Markdown，限制滚动频率 |
@@ -151,9 +155,9 @@ idle -> busy -> aborting -> cancelled -> idle
 
 1. **可恢复连接错误**：SSE 断线时保留当前 UI，重连后 reconcile。只有 ready 超时或 REST 恢复失败才显示连接错误。
 2. **资源降级错误**：单个 MCP 枚举超时会发布 `runtime.resource.failed`，但不会阻止其他资源和模型继续运行。
-3. **turn 终止错误**：整轮 timeout、重试耗尽和后台未处理异常会发布 `runtime.turn.failed`，然后由 lease owner 释放为 idle。Question 自身超时先作为工具错误返回；只有它同时耗尽整轮 deadline 时才终止 turn。
+3. **turn 终止错误**：显式整轮 timeout、provider 重试耗尽和后台未处理异常会发布 `runtime.turn.failed`，然后由 lease owner 释放为 idle。Question 默认可以持续等待；用户取消时进入 cancelled，显式 deadline 到期时才进入 failed。
 
-Web 的 abort 请求只有在 HTTP 成功且后端状态最终变为 idle/failed 后才清除 running。请求返回 5xx 或 timeout 时，Web 保持后端状态未知，并立即执行一次 reconcile，不能直接伪造停止成功。
+Web 的 abort 请求只有在 HTTP 成功且后端状态最终变为 cancelled、idle 或 failed 后才清除 running。请求返回 5xx 或 timeout 时，Web 保持后端状态未知，并立即执行一次 reconcile，不能直接伪造停止成功。
 
 ## 5. 测试设计
 
@@ -179,10 +183,12 @@ Web 的 abort 请求只有在 HTTP 成功且后端状态最终变为 idle/failed
 ### 5.3 超时与资源
 
 - Prompt compiler 保留 `timeoutMs`。
-- deadline abort 会结束 Agent loop 并发布一次 failed。
-- retry 在第 5 次失败后停止，sleep 不超过剩余 deadline。
+- 未设置 `timeoutMs` 时不会创建整轮 timer，长时间但持续有进展的 turn 不会因累计时长退出。
+- 显式 deadline abort 会结束 Agent loop 并发布一次 failed。
+- provider 连续 5 分钟没有流事件时触发本次调用 timeout，收到任意事件都会重置计时。
+- provider 在第 5 次总尝试失败后停止，单次 retry sleep 不超过 30 秒，也不能越过显式 deadline。
 - MCP A 超时不阻塞 MCP B 的工具返回，并产生 resource failure。
-- Question timeout/abort 会移除 pending request 并 reject Promise。
+- Question 没有默认计时器；用户取消或显式 deadline abort 会移除 pending request 并 reject Promise。
 - Web POST 超时会终止 fetch 并显示明确错误。
 
 ### 5.4 流式性能
@@ -224,7 +230,7 @@ bun run typecheck
 3. `fix: recover web sessions across event gaps`
    - SSE ready/reconnect、REST reconcile、selection generation、去重和 Web 回归测试。
 4. `fix: bound agent runtime waits`
-   - deadline、有限 retry、MCP、Question、Web fetch timeout 及对应测试。
+   - 可选 turn deadline、provider 无事件 timeout、有限 retry、MCP、Question cancel、Web fetch timeout 及对应测试。
 5. `perf: coalesce agent streaming updates`
    - 紧凑 delta、完整 checkpoint、Web 按帧更新和性能回归测试。
 
@@ -238,7 +244,7 @@ bun run typecheck
 - [ ] stop 后不会出现同一 session 的并发 Agent loop。
 - [ ] 工具调用期间 Web 始终保持 running，整个 turn 只产生一个终态。
 - [ ] SSE 首次建连和重连空窗不会造成永久 running 或丢失 interaction。
-- [ ] 所有外部等待最终都会成功、降级或产生用户可见错误，不会无限 pending。
+- [ ] 无响应的网络和 MCP 等外部依赖最终会成功、降级或产生用户可见错误；正常执行和用户交互默认不受整轮总时长限制，并且始终可以取消和恢复。
 - [ ] 长回复不会按每个 token 重写完整 part，Web 不再重复应用当前 session 事件。
 - [ ] 最终消息持久化格式和 Controller HTTP API 保持兼容。
 - [ ] 调查记录和用户已有工作区修改没有被暂存或提交。
