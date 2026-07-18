@@ -1,13 +1,10 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, normalize, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { asRecord } from './shared'
 import type { PlatformAdapterContext, PlatformRuntimeSourcesDescriptor } from '@nine1bot/platform-protocol'
 
 export const FEISHU_CURRENT_PAGE_SKILL = 'feishu-current-page'
-
-const companionSkillsDirectory = fileURLToPath(new URL('../skills', import.meta.url))
 
 export type FeishuSkillDirectoryInspection = {
   directory: string
@@ -24,7 +21,7 @@ export type FeishuSkillSources = {
 }
 
 export function feishuRuntimeSources(ctx: PlatformAdapterContext): PlatformRuntimeSourcesDescriptor {
-  const sources = feishuSkillSources(ctx.settings)
+  const sources = feishuSkillSources(ctx)
   return {
     skills: [
       {
@@ -44,15 +41,15 @@ export function feishuRuntimeSources(ctx: PlatformAdapterContext): PlatformRunti
   }
 }
 
-export function feishuSkillSources(settings: unknown): FeishuSkillSources {
+export function feishuSkillSources(ctx: PlatformAdapterContext): FeishuSkillSources {
   return {
-    companionDirectory: companionSkillsDirectory,
-    officialDirectory: resolveOfficialSkillsDirectory(settings),
+    companionDirectory: ctx.packageResources.resolve('skills'),
+    officialDirectory: resolveOfficialSkillsDirectory(ctx.settings),
   }
 }
 
-export function inspectFeishuSkillSources(settings: unknown) {
-  const sources = feishuSkillSources(settings)
+export function inspectFeishuSkillSources(ctx: PlatformAdapterContext) {
+  const sources = feishuSkillSources(ctx)
   return {
     companion: inspectSkillDirectory(sources.companionDirectory, {
       names: [FEISHU_CURRENT_PAGE_SKILL],

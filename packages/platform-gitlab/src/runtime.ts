@@ -7,7 +7,6 @@ import {
 } from './shared'
 import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
-import { fileURLToPath } from 'node:url'
 import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
 import { gitLabReviewProjectIdsForHookSync, normalizeGitLabReviewSettings } from './review/settings'
 import type {
@@ -254,11 +253,11 @@ export const gitlabPlatformContribution = {
   descriptor: gitlabPlatformDescriptor,
   runtime: {
     createAdapter: createGitLabPlatformAdapter,
-    sources: {
+    sources: (ctx) => ({
       agents: [
         {
           id: 'gitlab-review-agents',
-          directory: fileURLToPath(new URL('../agents', import.meta.url)),
+          directory: ctx.packageResources.resolve('agents'),
           namespace: 'platform.gitlab',
           visibility: 'recommendable',
           lifecycle: 'platform-enabled',
@@ -267,13 +266,13 @@ export const gitlabPlatformContribution = {
       skills: [
         {
           id: 'gitlab-review-skills',
-          directory: fileURLToPath(new URL('../skills', import.meta.url)),
+          directory: ctx.packageResources.resolve('skills'),
           namespace: 'platform.gitlab',
           visibility: 'declared-only',
           lifecycle: 'platform-enabled',
         },
       ],
-    },
+    }),
   },
   getStatus: getGitLabPlatformStatus,
   validateConfig: validateGitLabPlatformConfig,

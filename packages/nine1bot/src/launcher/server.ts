@@ -1,8 +1,8 @@
-import { resolve, dirname, basename } from 'path'
+import { resolve, dirname } from 'path'
 import { writeFile, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
 import type { ServerConfig, AuthConfig, Nine1BotConfig } from '../config/schema'
-import { getInstallDir, getGlobalSkillsDir, getAuthPath, getGlobalConfigDir, getMcpAuthPath, getPlatformSecretsPath, getProjectEnvDir } from '../config/loader'
+import { getInstallDir, getGlobalSkillsDir, getAuthPath, getGlobalConfigDir, getMcpAuthPath, getPlatformPackageResourcesRoot, getPlatformSecretsPath, getProjectEnvDir } from '../config/loader'
 import { getGlobalPreferencesPath } from '../preferences'
 import { registerBuiltinPlatformAdapters } from '../platform/builtin'
 import { FilePlatformSecretStore } from '../platform/secrets'
@@ -12,14 +12,7 @@ import { Server as OpencodeServer } from '../../../../opencode/packages/opencode
 import { BridgeServer } from '../../../browser-mcp-server/src/bridge/server'
 import type { BridgeServer as OpencodeBridgeServer } from '../../../../opencode/packages/opencode/src/browser/bridge'
 import { clearBridgeServer, setBridgeServer } from '../../../../opencode/packages/opencode/src/browser/bridge'
-
-/**
- * 判断是否是发行版模式
- */
-function isReleaseMode(): boolean {
-  const dirName = basename(dirname(process.execPath))
-  return dirName.startsWith('nine1bot-')
-}
+import { NINE1BOT_PROVENANCE } from '../provenance'
 
 /**
  * 获取内置 skills 目录路径
@@ -28,7 +21,10 @@ function isReleaseMode(): boolean {
  */
 function getBuiltinSkillsDir(): string {
   const installDir = getInstallDir()
-  return resolve(installDir, isReleaseMode() ? 'skills' : 'packages/nine1bot/skills')
+  return resolve(
+    installDir,
+    NINE1BOT_PROVENANCE.build.compiled ? 'skills' : 'packages/nine1bot/skills',
+  )
 }
 
 /**
@@ -182,6 +178,7 @@ export async function startServer(options: StartServerOptions): Promise<ServerIn
   registerBuiltinPlatformAdapters({
     config: fullConfig.platforms,
     secrets: new FilePlatformSecretStore(platformSecretsPath),
+    packageResourcesRoot: getPlatformPackageResourcesRoot(),
   })
 
   // 设置捆绑的 ripgrep 路径（发行版中 bin/rg）

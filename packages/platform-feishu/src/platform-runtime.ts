@@ -333,7 +333,7 @@ async function getFeishuStatus(ctx: PlatformAdapterContext): Promise<PlatformRun
   const cliPathSetting = stringValue(settings?.cliPath)
   const cliPath = resolveFeishuCliPath(cliPathSetting, ctx.env)
   const enrichmentSettings = readFeishuContextEnrichmentSettings(ctx.settings)
-  const skillStatus = inspectFeishuSkillSources(ctx.settings)
+  const skillStatus = inspectFeishuSkillSources(ctx)
   const checkedAt = new Date().toISOString()
 
   if (!cliPath) {
@@ -421,7 +421,7 @@ async function handleFeishuAction(
 ): Promise<PlatformActionResult> {
   if (actionId === 'skills.refreshOfficialDirectory') {
     const status = await getFeishuStatus(ctx)
-    const skills = inspectFeishuSkillSources(ctx.settings)
+    const skills = inspectFeishuSkillSources(ctx)
     return {
       status: 'ok',
       message: skills.official.skillCount > 0

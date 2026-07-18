@@ -1,10 +1,11 @@
 import { readFile, writeFile, mkdir, access, appendFile } from 'fs/promises'
-import { dirname, resolve, join, basename } from 'path'
-import { fileURLToPath } from 'url'
+import { dirname, resolve, join } from 'path'
 import { homedir } from 'os'
 import { Nine1BotConfigSchema, type Nine1BotConfig } from './schema'
 import { execSync } from 'child_process'
 import { stripJsonComments } from './jsonc'
+import { NINE1BOT_PROVENANCE } from '../provenance'
+import { resolveInstallDir, resolvePackageResourcesRoot } from '../release/install-layout'
 
 // 支持的配置文件名（按优先级排序）
 const CONFIG_FILENAMES = ['nine1bot.config.jsonc', 'nine1bot.config.json']
@@ -19,20 +20,19 @@ const GLOBAL_CONFIG_FILENAME = 'config.jsonc'
  * - 发行版模式：包含 nine1bot 二进制, skills/, web/ 等
  */
 export function getInstallDir(): string {
-  const execDir = dirname(process.execPath)
+  return resolveInstallDir({
+    override: process.env.NINE1BOT_INSTALL_DIR,
+    compiled: NINE1BOT_PROVENANCE.build.compiled,
+    execPath: process.execPath,
+    sourceFileUrl: import.meta.url,
+  })
+}
 
-  // 判断是否是编译后的发行版
-  // 编译后目录名格式：nine1bot-linux-x64, nine1bot-windows-x64 等
-  const dirName = basename(execDir)
-  if (dirName.startsWith('nine1bot-')) {
-    return execDir
-  }
-
-  // 开发模式：从源码路径计算
-  // 当前文件: packages/nine1bot/src/config/loader.ts
-  // 安装根目录: 向上 4 级
-  const currentFile = fileURLToPath(import.meta.url)
-  return resolve(dirname(currentFile), '..', '..', '..', '..')
+export function getPlatformPackageResourcesRoot(): string {
+  return resolvePackageResourcesRoot({
+    installDir: getInstallDir(),
+    compiled: NINE1BOT_PROVENANCE.build.compiled,
+  })
 }
 
 /**

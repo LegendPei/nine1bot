@@ -48,6 +48,27 @@ function packageResources(root = join(import.meta.dir, '..')) {
   }
 }
 
+function platformContext(
+  settings: Record<string, unknown>,
+  resourceRoot = join(import.meta.dir, '..'),
+): PlatformAdapterContext {
+  return {
+    platformId: 'feishu',
+    enabled: true,
+    settings,
+    features: {},
+    env: { PATH: '' },
+    packageResources: packageResources(resourceRoot),
+    secrets: {
+      async get() { return undefined },
+      async set() {},
+      async delete() {},
+      async has() { return false },
+    },
+    audit: { write() {} },
+  }
+}
+
 describe('Feishu platform adapter package', () => {
   test('parses Phase 1 Feishu URL routes', () => {
     expect(parseFeishuUrl('https://gdut-topview.feishu.cn/docx/GeVqd0rdho2WbPxLCyWcXI8nnpg')).toMatchObject({
@@ -182,26 +203,35 @@ describe('Feishu platform adapter package', () => {
   })
 
   test('discovers companion and official skill directories', async () => {
-    await withTempDir(async (officialDirectory) => {
-      await writeSkill(officialDirectory, 'lark-doc')
-      await writeSkill(officialDirectory, 'lark-drive')
-      await writeSkill(officialDirectory, 'custom-skill')
+    await withTempDir(async (packageRoot) => {
+      await withTempDir(async (officialDirectory) => {
+        const companionDirectory = join(packageRoot, 'skills')
+        await writeSkill(companionDirectory, FEISHU_CURRENT_PAGE_SKILL)
+        await writeSkill(officialDirectory, 'lark-doc')
+        await writeSkill(officialDirectory, 'lark-drive')
+        await writeSkill(officialDirectory, 'custom-skill')
 
-      const status = inspectFeishuSkillSources({ officialSkillsDirectory: officialDirectory })
+        const status = inspectFeishuSkillSources(platformContext(
+          { officialSkillsDirectory: officialDirectory },
+          packageRoot,
+        ))
 
-      expect(status.companion).toMatchObject({
-        exists: true,
-        readable: true,
-        skillCount: 1,
-        skills: [FEISHU_CURRENT_PAGE_SKILL],
+        expect(status.companion).toMatchObject({
+          directory: companionDirectory,
+          exists: true,
+          readable: true,
+          skillCount: 1,
+          skills: [FEISHU_CURRENT_PAGE_SKILL],
+        })
+        expect(status.official).toMatchObject({
+          exists: true,
+          readable: true,
+          skillCount: 2,
+          skills: ['lark-doc', 'lark-drive'],
+        })
+        expect(resolveOfficialSkillsDirectory({ officialSkillsDirectory: officialDirectory }))
+          .toBe(status.official.directory)
       })
-      expect(status.official).toMatchObject({
-        exists: true,
-        readable: true,
-        skillCount: 2,
-        skills: ['lark-doc', 'lark-drive'],
-      })
-      expect(resolveOfficialSkillsDirectory({ officialSkillsDirectory: officialDirectory })).toBe(status.official.directory)
     })
   })
 

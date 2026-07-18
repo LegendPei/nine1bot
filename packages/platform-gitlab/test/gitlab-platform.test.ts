@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { PlatformAdapterContext } from '@nine1bot/platform-protocol'
 import {
   buildGitLabPageContextPayload,
   createGitLabPlatformAdapter,
@@ -16,6 +17,19 @@ function packageResources(root = join(import.meta.dir, '..')) {
   return {
     root,
     resolve: (...segments: string[]) => join(root, ...segments),
+  }
+}
+
+function platformContext(resourceRoot = join(import.meta.dir, '..')): PlatformAdapterContext {
+  return {
+    platformId: 'gitlab',
+    enabled: true,
+    settings: {},
+    features: {},
+    env: {},
+    packageResources: packageResources(resourceRoot),
+    secrets: secretAccess(),
+    audit: { write() {} },
   }
 }
 
@@ -114,15 +128,22 @@ describe('GitLab platform adapter package', () => {
   })
 
   test('declares platform-scoped runtime sources for GitLab review assets', () => {
-    expect(gitlabPlatformContribution.runtime?.sources).toMatchObject({
+    const packageRoot = join(import.meta.dir, 'injected-platform-gitlab')
+    const provider = gitlabPlatformContribution.runtime?.sources
+    expect(typeof provider).toBe('function')
+    const sources = typeof provider === 'function' ? provider(platformContext(packageRoot)) : provider
+
+    expect(sources).toMatchObject({
       agents: [{
         id: 'gitlab-review-agents',
+        directory: join(packageRoot, 'agents'),
         namespace: 'platform.gitlab',
         visibility: 'recommendable',
         lifecycle: 'platform-enabled',
       }],
       skills: [{
         id: 'gitlab-review-skills',
+        directory: join(packageRoot, 'skills'),
         namespace: 'platform.gitlab',
         visibility: 'declared-only',
         lifecycle: 'platform-enabled',

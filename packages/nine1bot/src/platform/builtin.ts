@@ -6,6 +6,7 @@ import {
   type PlatformBackgroundServicesStartOptions,
   type PlatformManagerConfig,
 } from './manager'
+import { getPlatformPackageResourcesRoot } from '../config/loader'
 
 export const builtinPlatformContributions = [
   gitlabPlatformContribution,
@@ -18,6 +19,7 @@ export type BuiltinPlatformManagerOptions = {
   config?: PlatformManagerConfig
   secrets?: PlatformSecretAccess
   env?: Record<string, string | undefined>
+  packageResourcesRoot?: string
 }
 
 export function getBuiltinPlatformManager(options: BuiltinPlatformManagerOptions = {}) {
@@ -27,6 +29,7 @@ export function getBuiltinPlatformManager(options: BuiltinPlatformManagerOptions
       config: options.config,
       secrets: options.secrets,
       env: options.env,
+      packageResourcesRoot: options.packageResourcesRoot ?? getPlatformPackageResourcesRoot(),
     })
     return builtinPlatformManager
   }
@@ -45,6 +48,7 @@ export async function startBuiltinPlatformBackgroundServices(options: PlatformBa
     config: options.config,
     secrets: options.secrets,
     env: options.env,
+    packageResourcesRoot: options.packageResourcesRoot,
   })
   return manager.startBackgroundServices(options)
 }
