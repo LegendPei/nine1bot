@@ -19,6 +19,7 @@ import type {
 } from '@nine1bot/platform-protocol'
 import { normalize as normalizePath, posix as posixPath, win32 as win32Path } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { accessSync, constants, statSync } from 'node:fs'
 import { RuntimePlatformAdapterRegistry } from '../../../../opencode/packages/opencode/src/runtime/platform/adapter'
 import { RuntimeSourceRegistry } from '../../../../opencode/packages/opencode/src/runtime/source/registry'
 import { createPlatformPackageResources } from './package-resources'
@@ -723,18 +724,36 @@ export class PlatformAdapterManager {
 
     return {
       agents: (normalizedSources.agents ?? []).map((source) => {
-        const sourceStatus = registeredAgents.has(source.id) ? 'registered' : status
+        const sourceRegistered = record.enabled
+          && record.registered
+          && record.lifecycleStatus !== 'error'
+          && registeredAgents.has(source.id)
+        const directoryError = sourceRegistered
+          ? runtimeSourceDirectoryError(source.directory)
+          : undefined
+        const sourceStatus = sourceRegistered
+          ? directoryError ? 'error' : 'registered'
+          : status
         return {
           id: source.id,
           directory: source.directory,
           namespace: source.namespace,
           visibility: source.visibility,
           status: sourceStatus,
-          error: runtimeSourceError(record, source.id, sourceStatus),
+          error: directoryError ?? runtimeSourceError(record, source.id, sourceStatus),
         }
       }),
       skills: (normalizedSources.skills ?? []).map((source) => {
-        const sourceStatus = registeredSkills.has(source.id) ? 'registered' : status
+        const sourceRegistered = record.enabled
+          && record.registered
+          && record.lifecycleStatus !== 'error'
+          && registeredSkills.has(source.id)
+        const directoryError = sourceRegistered
+          ? runtimeSourceDirectoryError(source.directory)
+          : undefined
+        const sourceStatus = sourceRegistered
+          ? directoryError ? 'error' : 'registered'
+          : status
         return {
           id: source.id,
           directory: source.directory,
@@ -742,7 +761,7 @@ export class PlatformAdapterManager {
           includeNamePrefix: source.includeNamePrefix,
           visibility: source.visibility,
           status: sourceStatus,
-          error: runtimeSourceError(record, source.id, sourceStatus),
+          error: directoryError ?? runtimeSourceError(record, source.id, sourceStatus),
         }
       }),
     }
@@ -983,6 +1002,22 @@ function runtimeSourceStatus(record: PlatformManagerRecord): PlatformRuntimeSour
   if (record.lifecycleStatus === 'error') return 'error'
   if (!record.registered) return 'disabled'
   return 'error'
+}
+
+function runtimeSourceDirectoryError(directory: string): string | undefined {
+  try {
+    const stats = statSync(directory)
+    if (!stats.isDirectory()) {
+      return `Runtime source path is not a directory: ${directory}`
+    }
+    accessSync(directory, constants.R_OK)
+    return undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return `Runtime source directory does not exist: ${directory}`
+    }
+    return `Runtime source directory is not readable: ${directory}: ${error instanceof Error ? error.message : String(error)}`
+  }
 }
 
 function normalizeRuntimeSources(sources?: PlatformRuntimeSourcesDescriptor): PlatformRuntimeSourcesDescriptor | undefined {

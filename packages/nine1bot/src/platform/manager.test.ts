@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { join, normalize, win32 as win32Path } from 'node:path'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import type {
   PlatformAdapterContext,
   PlatformAdapterContribution,
@@ -74,22 +77,37 @@ function memorySecrets() {
   return { access, values }
 }
 
-function runtimeSources(): PlatformRuntimeSourcesDescriptor {
+function runtimeSources(root?: string): PlatformRuntimeSourcesDescriptor {
   return {
     agents: [{
       id: 'demo-agents',
-      directory: '/tmp/demo/agents',
+      directory: root ? join(root, 'agents') : '/tmp/demo/agents',
       namespace: 'demo.agent',
       visibility: 'recommendable',
       lifecycle: 'platform-enabled',
     }],
     skills: [{
       id: 'demo-skills',
-      directory: '/tmp/demo/skills',
+      directory: root ? join(root, 'skills') : '/tmp/demo/skills',
       namespace: 'demo.skill',
       visibility: 'declared-only',
       lifecycle: 'platform-enabled',
     }],
+  }
+}
+
+async function withRuntimeSourceDirectories<T>(
+  run: (paths: { root: string; agents: string; skills: string }) => Promise<T>,
+): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), 'nine1bot-runtime-sources-'))
+  const agents = join(root, 'agents')
+  const skills = join(root, 'skills')
+  await mkdir(agents)
+  await mkdir(skills)
+  try {
+    return await run({ root, agents, skills })
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 }
 
@@ -295,137 +313,144 @@ describe('PlatformAdapterManager', () => {
   })
 
   it('registers runtime sources for enabled platforms', async () => {
-    const manager = new PlatformAdapterManager({
-      contributions: [contribution('demo', {
-        defaultEnabled: true,
-        sources: runtimeSources(),
-      })],
-    })
+    await withRuntimeSourceDirectories(async ({ root, agents, skills }) => {
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('demo', {
+          defaultEnabled: true,
+          sources: runtimeSources(root),
+        })],
+      })
 
-    manager.registerRuntimeAdapters()
+      manager.registerRuntimeAdapters()
 
-    expect(RuntimeSourceRegistry.listOwner('demo')).toMatchObject({
-      owner: {
-        id: 'demo',
-        kind: 'platform',
-        enabled: true,
-      },
-      agents: [{
-        id: 'demo-agents',
-        directory: '/tmp/demo/agents',
-        visibility: 'recommendable',
-      }],
-      skills: [{
-        id: 'demo-skills',
-        directory: '/tmp/demo/skills',
-        visibility: 'declared-only',
-      }],
+      expect(RuntimeSourceRegistry.listOwner('demo')).toMatchObject({
+        owner: {
+          id: 'demo',
+          kind: 'platform',
+          enabled: true,
+        },
+        agents: [{
+          id: 'demo-agents',
+          directory: agents,
+          visibility: 'recommendable',
+        }],
+        skills: [{
+          id: 'demo-skills',
+          directory: skills,
+          visibility: 'declared-only',
+        }],
+      })
+      const detail = await manager.getDetail('demo')
+      expect(detail?.runtimeSources).toMatchObject({
+        agents: [{
+          id: 'demo-agents',
+          status: 'registered',
+        }],
+        skills: [{
+          id: 'demo-skills',
+          status: 'registered',
+        }],
+      })
+      expect(detail?.runtimeSources?.agents[0]?.error).toBeUndefined()
+      expect(detail?.runtimeSources?.skills[0]?.error).toBeUndefined()
     })
-    const detail = await manager.getDetail('demo')
-    expect(detail?.runtimeSources).toMatchObject({
-      agents: [{
-        id: 'demo-agents',
-        status: 'registered',
-      }],
-      skills: [{
-        id: 'demo-skills',
-        status: 'registered',
-      }],
-    })
-    expect(detail?.runtimeSources?.agents[0]?.error).toBeUndefined()
-    expect(detail?.runtimeSources?.skills[0]?.error).toBeUndefined()
   })
 
   it('registers runtime sources generated from current platform settings', async () => {
-    const manager = new PlatformAdapterManager({
-      contributions: [contribution('demo', {
-        defaultEnabled: true,
-        sources: (ctx) => ({
-          skills: [{
-            id: 'demo-skills',
-            directory: String((ctx.settings as Record<string, unknown>).directory ?? '/tmp/default-skills'),
-            visibility: 'default',
-            lifecycle: 'platform-enabled',
-          }],
-        }),
-      })],
-      config: {
-        demo: {
-          settings: {
-            directory: '/tmp/custom-skills',
+    await withRuntimeSourceDirectories(async ({ skills }) => {
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('demo', {
+          defaultEnabled: true,
+          sources: (ctx) => ({
+            skills: [{
+              id: 'demo-skills',
+              directory: String((ctx.settings as Record<string, unknown>).directory ?? skills),
+              visibility: 'default',
+              lifecycle: 'platform-enabled',
+            }],
+          }),
+        })],
+        config: {
+          demo: {
+            settings: {
+              directory: skills,
+            },
           },
         },
-      },
-    })
+      })
 
-    manager.registerRuntimeAdapters()
+      manager.registerRuntimeAdapters()
 
-    expect(RuntimeSourceRegistry.listOwner('demo').skills).toContainEqual(expect.objectContaining({
-      id: 'demo-skills',
-      directory: '/tmp/custom-skills',
-    }))
-    await expect(manager.getDetail('demo')).resolves.toMatchObject({
-      runtimeSources: {
-        skills: [{
-          id: 'demo-skills',
-          directory: '/tmp/custom-skills',
-          status: 'registered',
-        }],
-      },
+      expect(RuntimeSourceRegistry.listOwner('demo').skills).toContainEqual(expect.objectContaining({
+        id: 'demo-skills',
+        directory: skills,
+      }))
+      await expect(manager.getDetail('demo')).resolves.toMatchObject({
+        runtimeSources: {
+          skills: [{
+            id: 'demo-skills',
+            directory: skills,
+            status: 'registered',
+          }],
+        },
+      })
     })
   })
 
   it('normalizes Windows runtime source paths before registering and reporting details', async () => {
-    const manager = new PlatformAdapterManager({
-      contributions: [contribution('feishu', {
-        defaultEnabled: true,
-        sources: {
-          agents: [{
-            id: 'feishu-agents',
-            directory: '/C:/code/nine1bot/packages/platform-feishu/agents',
-            namespace: 'feishu.agent',
-            visibility: 'recommendable',
-            lifecycle: 'platform-enabled',
-          }],
-          skills: [{
-            id: 'feishu-skills',
-            directory: 'file:///C:/code/nine1bot/packages/platform-feishu/skills',
-            namespace: 'feishu.skill',
-            visibility: 'declared-only',
-            lifecycle: 'platform-enabled',
-          }],
-        },
-      })],
-    })
+    await withRuntimeSourceDirectories(async ({ agents, skills }) => {
+      const windowsAgentUrlPath = `/${agents.replaceAll('\\', '/')}`
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('feishu', {
+          defaultEnabled: true,
+          sources: {
+            agents: [{
+              id: 'feishu-agents',
+              directory: windowsAgentUrlPath,
+              namespace: 'feishu.agent',
+              visibility: 'recommendable',
+              lifecycle: 'platform-enabled',
+            }],
+            skills: [{
+              id: 'feishu-skills',
+              directory: pathToFileURL(skills).href,
+              namespace: 'feishu.skill',
+              visibility: 'declared-only',
+              lifecycle: 'platform-enabled',
+            }],
+          },
+        })],
+      })
 
-    manager.registerRuntimeAdapters()
+      manager.registerRuntimeAdapters()
 
-    const expectedAgentDirectory = win32Path.normalize('C:/code/nine1bot/packages/platform-feishu/agents')
-    const expectedSkillDirectory = win32Path.normalize('C:/code/nine1bot/packages/platform-feishu/skills')
+      const expectedAgentDirectory = win32Path.normalize(agents)
+      const expectedSkillDirectory = win32Path.normalize(skills)
 
-    expect(RuntimeSourceRegistry.listOwner('feishu')).toMatchObject({
-      agents: [{
-        id: 'feishu-agents',
-        directory: expectedAgentDirectory,
-      }],
-      skills: [{
-        id: 'feishu-skills',
-        directory: expectedSkillDirectory,
-      }],
-    })
-    await expect(manager.getDetail('feishu')).resolves.toMatchObject({
-      runtimeSources: {
+      expect(RuntimeSourceRegistry.listOwner('feishu')).toMatchObject({
         agents: [{
           id: 'feishu-agents',
           directory: expectedAgentDirectory,
-          status: 'registered',
         }],
         skills: [{
           id: 'feishu-skills',
           directory: expectedSkillDirectory,
-          status: 'registered',
         }],
-      },
+      })
+      await expect(manager.getDetail('feishu')).resolves.toMatchObject({
+        runtimeSources: {
+          agents: [{
+            id: 'feishu-agents',
+            directory: expectedAgentDirectory,
+            status: 'registered',
+          }],
+          skills: [{
+            id: 'feishu-skills',
+            directory: expectedSkillDirectory,
+            status: 'registered',
+          }],
+        },
+      })
     })
   })
 
@@ -454,6 +479,92 @@ describe('PlatformAdapterManager', () => {
         }],
       },
     })
+  })
+
+  it('reports a registered source whose directory is missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-source-status-'))
+    const missing = join(root, 'missing-skills')
+    try {
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('demo', {
+          defaultEnabled: true,
+          sources: {
+            skills: [{
+              id: 'demo-skills',
+              directory: missing,
+              visibility: 'declared-only',
+              lifecycle: 'platform-enabled',
+            }],
+          },
+        })],
+      })
+      manager.registerRuntimeAdapters()
+
+      expect((await manager.getDetail('demo'))?.runtimeSources?.skills[0]).toMatchObject({
+        status: 'error',
+        error: `Runtime source directory does not exist: ${missing}`,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a registered source whose path is not a directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-source-status-'))
+    const file = join(root, 'skills.txt')
+    try {
+      await writeFile(file, 'not a directory', 'utf8')
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('demo', {
+          defaultEnabled: true,
+          sources: {
+            skills: [{
+              id: 'demo-skills',
+              directory: file,
+              visibility: 'declared-only',
+              lifecycle: 'platform-enabled',
+            }],
+          },
+        })],
+      })
+      manager.registerRuntimeAdapters()
+
+      expect((await manager.getDetail('demo'))?.runtimeSources?.skills[0]).toMatchObject({
+        status: 'error',
+        error: `Runtime source path is not a directory: ${file}`,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a registered source with a real readable directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-source-status-'))
+    const skills = join(root, 'skills')
+    try {
+      await mkdir(skills)
+      const manager = new PlatformAdapterManager({
+        contributions: [contribution('demo', {
+          defaultEnabled: true,
+          sources: {
+            skills: [{
+              id: 'demo-skills',
+              directory: skills,
+              visibility: 'declared-only',
+              lifecycle: 'platform-enabled',
+            }],
+          },
+        })],
+      })
+      manager.registerRuntimeAdapters()
+
+      expect((await manager.getDetail('demo'))?.runtimeSources?.skills[0]).toMatchObject({
+        status: 'registered',
+        error: undefined,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('does not register runtime sources for disabled platforms', async () => {
@@ -1047,75 +1158,77 @@ describe('PlatformAdapterManager', () => {
   })
 
   it('applies action updatedSettings and re-registers runtime sources', async () => {
-    const baseContribution = contribution('demo', {
-      defaultEnabled: true,
-      sources: (ctx) => ({
-        skills: [{
-          id: 'demo-skills',
-          directory: String((ctx.settings as Record<string, unknown>).directory ?? '/tmp/default-skills'),
-          visibility: 'default',
-          lifecycle: 'platform-enabled',
-        }],
-      }),
-    })
-    const manager = new PlatformAdapterManager({
-      contributions: [{
-        ...baseContribution,
-        descriptor: {
-          ...baseContribution.descriptor,
-          config: {
-            sections: [{
-              id: 'settings',
-              title: 'Settings',
-              fields: [{
-                key: 'directory',
-                label: 'Directory',
-                type: 'string',
+    await withRuntimeSourceDirectories(async ({ skills }) => {
+      const baseContribution = contribution('demo', {
+        defaultEnabled: true,
+        sources: (ctx) => ({
+          skills: [{
+            id: 'demo-skills',
+            directory: String((ctx.settings as Record<string, unknown>).directory ?? skills),
+            visibility: 'default',
+            lifecycle: 'platform-enabled',
+          }],
+        }),
+      })
+      const manager = new PlatformAdapterManager({
+        contributions: [{
+          ...baseContribution,
+          descriptor: {
+            ...baseContribution.descriptor,
+            config: {
+              sections: [{
+                id: 'settings',
+                title: 'Settings',
+                fields: [{
+                  key: 'directory',
+                  label: 'Directory',
+                  type: 'string',
+                }],
               }],
+            },
+            actions: [{
+              id: 'directory.configure',
+              label: 'Configure directory',
+              kind: 'button',
             }],
           },
-          actions: [{
-            id: 'directory.configure',
-            label: 'Configure directory',
-            kind: 'button',
+          handleAction: async () => ({
+            status: 'ok',
+            updatedSettings: {
+              directory: skills,
+            },
+            updatedStatus: {
+              status: 'available',
+              message: 'directory configured',
+            },
+          }),
+        }],
+      })
+      manager.registerRuntimeAdapters()
+
+      await expect(manager.executeAction('demo', 'directory.configure')).resolves.toMatchObject({
+        status: 'ok',
+        updatedSettings: {
+          directory: skills,
+        },
+      })
+
+      expect(manager.configSnapshot().demo?.settings).toEqual({
+        directory: skills,
+      })
+      expect(RuntimeSourceRegistry.listOwner('demo').skills).toContainEqual(expect.objectContaining({
+        id: 'demo-skills',
+        directory: skills,
+      }))
+      await expect(manager.getDetail('demo')).resolves.toMatchObject({
+        runtimeSources: {
+          skills: [{
+            id: 'demo-skills',
+            directory: skills,
+            status: 'registered',
           }],
         },
-        handleAction: async () => ({
-          status: 'ok',
-          updatedSettings: {
-            directory: '/tmp/action-skills',
-          },
-          updatedStatus: {
-            status: 'available',
-            message: 'directory configured',
-          },
-        }),
-      }],
-    })
-    manager.registerRuntimeAdapters()
-
-    await expect(manager.executeAction('demo', 'directory.configure')).resolves.toMatchObject({
-      status: 'ok',
-      updatedSettings: {
-        directory: '/tmp/action-skills',
-      },
-    })
-
-    expect(manager.configSnapshot().demo?.settings).toEqual({
-      directory: '/tmp/action-skills',
-    })
-    expect(RuntimeSourceRegistry.listOwner('demo').skills).toContainEqual(expect.objectContaining({
-      id: 'demo-skills',
-      directory: '/tmp/action-skills',
-    }))
-    await expect(manager.getDetail('demo')).resolves.toMatchObject({
-      runtimeSources: {
-        skills: [{
-          id: 'demo-skills',
-          directory: '/tmp/action-skills',
-          status: 'registered',
-        }],
-      },
+      })
     })
   })
 
