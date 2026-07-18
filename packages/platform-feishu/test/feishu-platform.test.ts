@@ -41,6 +41,8 @@ import {
   resolveOfficialSkillsDirectory,
 } from '../src/skills'
 
+const testCliPath = process.execPath
+
 function packageResources(root = join(import.meta.dir, '..')) {
   return {
     root,
@@ -658,7 +660,8 @@ describe('Feishu platform adapter package', () => {
     })
     const result = await enrichFeishuPageContext({
       page,
-      settings: { cliPath: 'lark-cli' },
+      settings: { cliPath: testCliPath },
+      env: { PATH: '' },
       observedAt: 1000,
       runner,
     })
@@ -721,7 +724,8 @@ describe('Feishu platform adapter package', () => {
       }
       const result = await enrichFeishuPageContext({
         page: buildFeishuPageContextPayload({ url, title: 'Visible' }),
-        settings: { cliPath: 'lark-cli' },
+        settings: { cliPath: testCliPath },
+        env: { PATH: '' },
         runner,
       })
 
@@ -752,7 +756,8 @@ describe('Feishu platform adapter package', () => {
 
     await expect(enrichFeishuPageContext({
       page,
-      settings: { cliPath: 'lark-cli' },
+      settings: { cliPath: testCliPath },
+      env: { PATH: '' },
       runner: async () => ({ exitCode: 0, stdout: JSON.stringify({ tokenStatus: 'expired' }), stderr: '' }),
     })).resolves.toMatchObject({
       summary: { status: 'need_login' },
@@ -760,7 +765,8 @@ describe('Feishu platform adapter package', () => {
 
     await expect(enrichFeishuPageContext({
       page,
-      settings: { cliPath: 'lark-cli' },
+      settings: { cliPath: testCliPath },
+      env: { PATH: '' },
       runner: async (_command, args) => {
         if (args.join(' ') === 'auth status') return authOk()
         return { exitCode: 1, stdout: '', stderr: JSON.stringify({ error: { code: 99991663, message: 'Permission denied' } }) }
@@ -771,7 +777,8 @@ describe('Feishu platform adapter package', () => {
 
     await expect(enrichFeishuPageContext({
       page,
-      settings: { cliPath: 'lark-cli' },
+      settings: { cliPath: testCliPath },
+      env: { PATH: '' },
       runner: async (_command, args) => {
         if (args.join(' ') === 'auth status') return authOk()
         return { exitCode: null, stdout: '', stderr: '', timedOut: true }
