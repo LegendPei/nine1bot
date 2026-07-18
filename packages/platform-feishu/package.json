@@ -10,6 +10,11 @@
     "directory": "packages/platform-feishu"
   },
   "type": "module",
+  "nine1bot": {
+    "releaseResources": [
+      "skills"
+    ]
+  },
   "exports": {
     ".": "./src/index.ts",
     "./browser": "./src/browser.ts",

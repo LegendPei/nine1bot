@@ -10,6 +10,12 @@
     "directory": "packages/platform-gitlab"
   },
   "type": "module",
+  "nine1bot": {
+    "releaseResources": [
+      "agents",
+      "skills"
+    ]
+  },
   "exports": {
     ".": "./src/index.ts",
     "./browser": "./src/browser.ts",
