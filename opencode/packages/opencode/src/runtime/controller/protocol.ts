@@ -216,6 +216,7 @@ export namespace RuntimeControllerProtocol {
     "runtime.turn.started",
     "runtime.turn.completed",
     "runtime.turn.failed",
+    "runtime.turn.cancelled",
     "runtime.tool.started",
     "runtime.tool.completed",
     "runtime.tool.failed",

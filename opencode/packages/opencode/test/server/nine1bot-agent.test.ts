@@ -342,7 +342,7 @@ describe("nine1bot controller api", () => {
       fn: async () => {
         const app = Server.App()
         const session = await Session.create({})
-        SessionPrompt._testing.reserve(session.id)
+        const lease = SessionPrompt._testing.reserve(session.id)
 
         const beforeMessages = await Session.messages({ sessionID: session.id })
         const response = await app.request(`/nine1bot/agent/sessions/${session.id}/messages`, {
@@ -381,6 +381,7 @@ describe("nine1bot controller api", () => {
         expect(await RuntimeContextEvents.list({ sessionID: session.id, projectID: session.projectID })).toHaveLength(0)
 
         SessionPrompt.cancel(session.id)
+        SessionPrompt._testing.release(session.id, lease.id)
         await Session.remove(session.id)
       },
     })

@@ -6,7 +6,9 @@ import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { RuntimeContextEvents } from "../../src/runtime/context/events"
 import { SessionRuntimeProfile } from "../../src/runtime/session/profile"
+import type { SessionProfileSnapshot } from "../../src/runtime/protocol/agent-run-spec"
 import { Log } from "../../src/util/log"
+import { tmpdir } from "../fixture/fixture"
 
 const projectRoot = path.join(__dirname, "../..")
 const jsonHeaders = {
@@ -15,15 +17,74 @@ const jsonHeaders = {
 }
 Log.init({ print: false })
 
+function createTestSession() {
+  const profile: SessionProfileSnapshot = {
+    id: "profile_busy_test",
+    createdAt: Date.now(),
+    source: "new-session",
+    sourceTemplateIds: ["busy-test"],
+    agent: {
+      name: "build",
+      source: "default-user-template",
+    },
+    defaultModel: {
+      providerID: "test-provider",
+      modelID: "test-model",
+      source: "default-user-template",
+    },
+    context: {
+      blocks: [],
+    },
+    resources: {
+      builtinTools: {},
+      mcp: {
+        servers: [],
+        lifecycle: "session",
+        mergeMode: "additive-only",
+      },
+      skills: {
+        skills: [],
+        lifecycle: "session",
+        mergeMode: "additive-only",
+      },
+    },
+    permissions: {
+      rules: {},
+      source: [],
+      mergeMode: "strict",
+    },
+    orchestration: {
+      mode: "single",
+    },
+  }
+  return Session.createNext({
+    directory: Instance.directory,
+    runtimeProfile: profile,
+  })
+}
+
 describe("session prompt routes busy semantics", () => {
+  test("abort keeps the session busy until the running lease exits", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const lease = SessionPrompt._testing.reserve("session_test")
+
+        expect(SessionPrompt.cancel("session_test")).toBe(true)
+        expect(() => SessionPrompt._testing.reserve("session_test")).toThrow(Session.BusyError)
+        expect(SessionPrompt._testing.release("session_test", lease.id)).toBe(true)
+      },
+    })
+  })
+
   test("message endpoint returns 409 without persisting a queued prompt", async () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
 
-        SessionPrompt._testing.reserve(session.id)
+        const lease = SessionPrompt._testing.reserve(session.id)
         const beforeMessages = await Session.messages({ sessionID: session.id })
 
         const response = await app.request(`/session/${session.id}/message`, {
@@ -61,6 +122,7 @@ describe("session prompt routes busy semantics", () => {
         expect(await RuntimeContextEvents.list({ sessionID: session.id, projectID: session.projectID })).toHaveLength(0)
 
         SessionPrompt.cancel(session.id)
+        SessionPrompt._testing.release(session.id, lease.id)
         await Session.remove(session.id)
       },
     })
@@ -71,9 +133,9 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
 
-        SessionPrompt._testing.reserve(session.id)
+        const lease = SessionPrompt._testing.reserve(session.id)
         const beforeMessages = await Session.messages({ sessionID: session.id })
 
         const response = await app.request(`/session/${session.id}/prompt_async`, {
@@ -102,6 +164,7 @@ describe("session prompt routes busy semantics", () => {
         expect(afterMessages.length).toBe(beforeMessages.length)
 
         SessionPrompt.cancel(session.id)
+        SessionPrompt._testing.release(session.id, lease.id)
         await Session.remove(session.id)
       },
     })
@@ -112,7 +175,7 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
 
         const response = await app.request(`/session/${session.id}/prompt_async`, {
           method: "POST",
@@ -144,7 +207,7 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
 
         const response = await app.request(`/session/${session.id}/prompt_async`, {
           method: "POST",
@@ -197,7 +260,7 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
 
         const response = await app.request(`/session/${session.id}/message`, {
           method: "POST",
@@ -253,7 +316,7 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
         await SessionRuntimeProfile.remove(session)
         const legacySession = await Session.update(
           session.id,
@@ -263,7 +326,7 @@ describe("session prompt routes busy semantics", () => {
           { touch: false },
         )
 
-        SessionPrompt._testing.reserve(session.id)
+        const lease = SessionPrompt._testing.reserve(session.id)
         const response = await app.request(`/nine1bot/agent/sessions/${session.id}/messages`, {
           method: "POST",
           headers: jsonHeaders,
@@ -283,17 +346,24 @@ describe("session prompt routes busy semantics", () => {
         expect(await Session.messages({ sessionID: session.id })).toHaveLength(0)
 
         SessionPrompt.cancel(session.id)
+        SessionPrompt._testing.release(session.id, lease.id)
         await Session.remove(session.id)
       },
     })
   })
 
   test("controller accepted message persists a legacy-resumed profile after reservation", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        model: "test-provider/test-model",
+      },
+    })
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
         await SessionRuntimeProfile.remove(session)
         await Session.update(
           session.id,
@@ -305,9 +375,16 @@ describe("session prompt routes busy semantics", () => {
 
         const response = await app.request(`/nine1bot/agent/sessions/${session.id}/messages`, {
           method: "POST",
-          headers: jsonHeaders,
+          headers: {
+            ...jsonHeaders,
+            "x-opencode-directory": tmp.path,
+          },
           body: JSON.stringify({
             noReply: true,
+            model: {
+              providerID: "test-provider",
+              modelID: "test-model",
+            },
             parts: [
               {
                 type: "text",
@@ -334,7 +411,7 @@ describe("session prompt routes busy semantics", () => {
       directory: projectRoot,
       fn: async () => {
         const app = Server.App()
-        const session = await Session.create({})
+        const session = await createTestSession()
         const repoPage = {
           platform: "gitlab",
           pageType: "repo",

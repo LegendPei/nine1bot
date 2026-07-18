@@ -383,21 +383,6 @@ export async function sendControllerMessage(sessionID: string, body: RuntimeCont
     throw error
   }
 
-  RuntimeControllerEvents.bindTurn(sessionID, turnSnapshotId)
-  await Bus.publish(RuntimeControllerEvents.TurnStarted, {
-    sessionID,
-    turnSnapshotId,
-    profileSnapshotId: prompt.runtimeProfileSnapshot?.id,
-    agent: prompt.agent,
-    model: prompt.model
-      ? {
-          providerID: prompt.model.providerID,
-          modelID: prompt.model.modelID,
-          source: prompt.runtimeModelSource,
-        }
-      : undefined,
-  })
-
   try {
     await SessionPrompt.promptAsync(prompt)
   } catch (error) {

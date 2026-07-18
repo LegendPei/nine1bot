@@ -39,6 +39,7 @@ export const RUNTIME_EVENT_TYPES = [
   'runtime.turn.started',
   'runtime.turn.completed',
   'runtime.turn.failed',
+  'runtime.turn.cancelled',
   'runtime.todo.updated',
 ]
 
@@ -178,16 +179,32 @@ export function normalizeRuntimeEventEnvelope(envelope: RuntimeEventEnvelope): N
       ]
 
     case 'runtime.turn.completed':
+      if (data.finishReason === 'tool-calls') return []
       return [{ type: 'session.idle', properties: { sessionID } }]
 
+    case 'runtime.turn.cancelled':
+      return [
+        {
+          type: 'session.idle',
+          properties: {
+            sessionID,
+            cancelled: true,
+            reason: data.reason,
+          },
+        },
+      ]
+
     case 'runtime.turn.failed':
+      const runtimeError = asRecord(data.error)
       return [
         {
           type: 'session.error',
           properties: {
             sessionID,
             error: {
-              ...asRecord(data.error),
+              ...runtimeError,
+              name: runtimeError.name ?? data.errorType,
+              message: runtimeError.message ?? data.errorMessage,
               sessionID,
             },
           },

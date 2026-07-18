@@ -137,10 +137,23 @@ describe('normalizeRuntimeEventEnvelope', () => {
   })
 
   it('maps turn completion and failures to session lifecycle events', () => {
+    expect(
+      normalizeRuntimeEventEnvelope(envelope('runtime.turn.completed', { finishReason: 'tool-calls' })),
+    ).toEqual([])
+
     expect(normalizeRuntimeEventEnvelope(envelope('runtime.turn.completed', { status: 'idle' }))[0]).toEqual({
       type: 'session.idle',
       properties: {
         sessionID: 'ses_123',
+      },
+    })
+
+    expect(normalizeRuntimeEventEnvelope(envelope('runtime.turn.cancelled', { reason: 'user-requested' }))[0]).toEqual({
+      type: 'session.idle',
+      properties: {
+        sessionID: 'ses_123',
+        cancelled: true,
+        reason: 'user-requested',
       },
     })
 
@@ -150,6 +163,22 @@ describe('normalizeRuntimeEventEnvelope', () => {
         sessionID: 'ses_123',
         error: {
           message: 'failed',
+          sessionID: 'ses_123',
+        },
+      },
+    })
+
+    expect(
+      normalizeRuntimeEventEnvelope(
+        envelope('runtime.turn.failed', { errorType: 'APIError', errorMessage: 'provider unavailable' }),
+      )[0],
+    ).toEqual({
+      type: 'session.error',
+      properties: {
+        sessionID: 'ses_123',
+        error: {
+          name: 'APIError',
+          message: 'provider unavailable',
           sessionID: 'ses_123',
         },
       },

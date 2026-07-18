@@ -27,17 +27,6 @@ export namespace SessionProcessor {
   // Session-level doom loop counter (persists across processor instances)
   const sessionDoomLoopCounts: Map<string, number> = new Map()
 
-  function assistantErrorMessage(error: MessageV2.Assistant["error"] | undefined) {
-    if (!error) return undefined
-    const directMessage = "message" in error ? error.message : undefined
-    if (typeof directMessage === "string") return directMessage
-    const data = "data" in error ? error.data : undefined
-    if (data && typeof data === "object" && "message" in data && typeof data.message === "string") {
-      return data.message
-    }
-    return undefined
-  }
-
   export function getDoomLoopCount(sessionID: string): number {
     return sessionDoomLoopCounts.get(sessionID) || 0
   }
@@ -90,41 +79,6 @@ export namespace SessionProcessor {
 
     const turnSnapshotId = () => RuntimeControllerEvents.turnSnapshotIdFor(input.sessionID)
 
-    const publishTurnCompleted = async () => {
-      const completedAt = input.assistantMessage.time.completed ?? Date.now()
-      await Bus.publish(RuntimeControllerEvents.TurnCompleted, {
-        sessionID: input.sessionID,
-        turnSnapshotId: turnSnapshotId(),
-        agent: input.assistantMessage.agent,
-        providerID: input.model.providerID,
-        modelID: input.model.id,
-        finishReason: input.assistantMessage.finish,
-        tokens: input.assistantMessage.tokens,
-        costUsd: input.assistantMessage.cost,
-        firstTokenLatencyMs: firstResponseAt
-          ? Math.max(0, firstResponseAt - input.assistantMessage.time.created)
-          : undefined,
-        durationMs: Math.max(0, completedAt - input.assistantMessage.time.created),
-        completedAt,
-      })
-    }
-
-    const publishTurnFailed = async () => {
-      const failedAt = input.assistantMessage.time.completed ?? Date.now()
-      const error = input.assistantMessage.error
-      await Bus.publish(RuntimeControllerEvents.TurnFailed, {
-        sessionID: input.sessionID,
-        turnSnapshotId: turnSnapshotId(),
-        agent: input.assistantMessage.agent,
-        providerID: input.model.providerID,
-        modelID: input.model.id,
-        errorType: error?.name ?? RuntimeMetricsEvents.normalizeErrorType(error),
-        errorMessage: assistantErrorMessage(error),
-        durationMs: Math.max(0, failedAt - input.assistantMessage.time.created),
-        failedAt,
-      })
-    }
-
     const publishToolStarted = async (part: MessageV2.ToolPart) => {
       if (part.state.status !== "running") return
       await Bus.publish(RuntimeControllerEvents.ToolStarted, {
@@ -176,6 +130,9 @@ export namespace SessionProcessor {
     const result = {
       get message() {
         return input.assistantMessage
+      },
+      get firstResponseAt() {
+        return firstResponseAt
       },
       partFromToolCall(toolCallID: string) {
         return toolcalls[toolCallID]
@@ -613,11 +570,7 @@ Possible questions to ask:
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
           if (needsCompaction) return "compact"
-          if (input.assistantMessage.error) {
-            await publishTurnFailed()
-            return "stop"
-          }
-          await publishTurnCompleted()
+          if (input.assistantMessage.error) return "stop"
           if (blocked) return "stop"
           return "continue"
         }

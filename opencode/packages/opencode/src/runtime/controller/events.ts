@@ -92,6 +92,16 @@ export namespace RuntimeControllerEvents {
     }),
   )
 
+  export const TurnCancelled = BusEvent.define(
+    "runtime.turn.cancelled",
+    z.object({
+      sessionID: z.string(),
+      turnSnapshotId: z.string().optional(),
+      cancelledAt: z.number(),
+      reason: z.string().optional(),
+    }),
+  )
+
   const ToolEventBase = z.object({
     sessionID: z.string(),
     turnSnapshotId: z.string().optional(),
@@ -221,28 +231,8 @@ export namespace RuntimeControllerEvents {
         ]
         break
       case "session.idle":
-        if (turnSnapshotId) {
-          projected = [
-            envelope({
-              ...base,
-              type: "runtime.turn.completed",
-              data: { status: "idle" },
-            }),
-          ]
-          clearTurn(sessionID, turnSnapshotId)
-        }
         break
       case "session.error":
-        if (turnSnapshotId) {
-          projected = [
-            envelope({
-              ...base,
-              type: "runtime.turn.failed",
-              data: { error: properties.error },
-            }),
-          ]
-          clearTurn(sessionID, turnSnapshotId)
-        }
         break
       case "message.created":
         projected = [
@@ -473,6 +463,16 @@ export namespace RuntimeControllerEvents {
           envelope({
             ...base,
             type: "runtime.turn.failed",
+            data: properties,
+          }),
+        ]
+        clearTurn(sessionID, turnSnapshotId)
+        break
+      case "runtime.turn.cancelled":
+        projected = [
+          envelope({
+            ...base,
+            type: "runtime.turn.cancelled",
             data: properties,
           }),
         ]

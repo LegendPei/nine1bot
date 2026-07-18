@@ -146,6 +146,23 @@ describe("RuntimeControllerEvents", () => {
       costUsd: 0.12,
     })
 
+    const turnCancelled = RuntimeControllerEvents.project({
+      type: "runtime.turn.cancelled",
+      properties: {
+        sessionID: "session_test",
+        turnSnapshotId: "turn_cancelled",
+        cancelledAt: 456,
+        reason: "user-requested",
+      },
+    })
+
+    expect(turnCancelled).toHaveLength(1)
+    expect(turnCancelled[0]?.type).toBe("runtime.turn.cancelled")
+    expect(turnCancelled[0]?.data).toMatchObject({
+      cancelledAt: 456,
+      reason: "user-requested",
+    })
+
     const toolCompleted = RuntimeControllerEvents.project({
       type: "runtime.tool.completed",
       properties: {
@@ -168,5 +185,31 @@ describe("RuntimeControllerEvents", () => {
       toolCallId: "call_test",
       durationMs: 15,
     })
+  })
+
+  test("does not synthesize terminal events from legacy idle or error notifications", () => {
+    RuntimeControllerEvents.bindTurn("session_idle_test", "turn_idle_test")
+    expect(
+      RuntimeControllerEvents.project({
+        type: "session.idle",
+        properties: {
+          sessionID: "session_idle_test",
+        },
+      }),
+    ).toEqual([])
+
+    RuntimeControllerEvents.bindTurn("session_error_test", "turn_error_test")
+    expect(
+      RuntimeControllerEvents.project({
+        type: "session.error",
+        properties: {
+          sessionID: "session_error_test",
+          error: { message: "failed" },
+        },
+      }),
+    ).toEqual([])
+
+    RuntimeControllerEvents.clearTurn("session_idle_test", "turn_idle_test")
+    RuntimeControllerEvents.clearTurn("session_error_test", "turn_error_test")
   })
 })

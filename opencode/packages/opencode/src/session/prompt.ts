@@ -41,7 +41,6 @@ import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { Tool } from "@/tool/tool"
 import { PermissionNext } from "@/permission/next"
-import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
@@ -57,6 +56,8 @@ import { RuntimeContextLegacy } from "@/runtime/context/legacy"
 import { RuntimeContextPipeline } from "@/runtime/context/pipeline"
 import { RuntimeResourceResolver } from "@/runtime/resource/resolver"
 import { RuntimeControllerEvents } from "@/runtime/controller/events"
+import { RunLease } from "./run-lease"
+import { RuntimeMetricsEvents } from "@/runtime/metrics/events"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -192,20 +193,8 @@ export namespace SessionPrompt {
     ]
   }
 
-  const state = Instance.state(
-    () => {
-      const data: Record<string, { abort: AbortController }> = {}
-      return data
-    },
-    async (current) => {
-      for (const item of Object.values(current)) {
-        item.abort.abort()
-      }
-    },
-  )
-
   export function assertNotBusy(sessionID: string) {
-    const match = state()[sessionID]
+    const match = RunLease.current(sessionID)
     if (match) throw new Session.BusyError(sessionID)
   }
 
@@ -279,42 +268,129 @@ export namespace SessionPrompt {
   })
   export type PromptInput = z.infer<typeof PromptInput>
 
-  function reserve(sessionID: string) {
-    const s = state()
-    if (s[sessionID]) {
-      throw new Session.BusyError(sessionID)
-    }
-    const controller = new AbortController()
-    s[sessionID] = {
-      abort: controller,
-    }
-    SessionStatus.set(sessionID, { type: "busy" })
-    return controller.signal
+  function releaseLease(lease: RunLease.Info) {
+    if (!RunLease.release(lease.sessionID, lease.id)) return false
+    SessionProcessor.resetDoomLoopCount(lease.sessionID)
+    return true
   }
 
-  function release(sessionID: string, options?: { abort?: boolean }) {
-    const s = state()
-    const match = s[sessionID]
-    if (!match) return
-    if (options?.abort) {
-      match.abort.abort()
+  type TurnTerminal = {
+    message?: MessageV2.Assistant
+    firstResponseAt?: number
+    error?: unknown
+    finishReason?: string
+    settled?: boolean
+  }
+
+  function assistantErrorMessage(error: MessageV2.Assistant["error"] | undefined) {
+    if (!error) return undefined
+    const directMessage = "message" in error ? error.message : undefined
+    if (typeof directMessage === "string") return directMessage
+    const data = "data" in error ? error.data : undefined
+    if (data && typeof data === "object" && "message" in data && typeof data.message === "string") {
+      return data.message
     }
-    delete s[sessionID]
-    SessionStatus.set(sessionID, { type: "idle" })
-    SessionProcessor.resetDoomLoopCount(sessionID)
+    return undefined
+  }
+
+  async function publishTurnTerminal(input: {
+    sessionID: string
+    runtimeTurnSnapshotId?: string
+    lease?: RunLease.Info
+    terminal: TurnTerminal
+  }) {
+    const turnSnapshotId = input.runtimeTurnSnapshotId ?? RuntimeControllerEvents.turnSnapshotIdFor(input.sessionID)
+    if (!turnSnapshotId) return
+
+    const message = input.terminal.message
+    const completedAt = message?.time.completed ?? Date.now()
+    try {
+      if (input.lease?.controller.signal.aborted) {
+        await Bus.publish(RuntimeControllerEvents.TurnCancelled, {
+          sessionID: input.sessionID,
+          turnSnapshotId,
+          cancelledAt: Date.now(),
+          reason: "user-requested",
+        })
+        return
+      }
+
+      const assistantError = message?.error
+      const error = input.terminal.error ?? assistantError
+      if (error) {
+        await Bus.publish(RuntimeControllerEvents.TurnFailed, {
+          sessionID: input.sessionID,
+          turnSnapshotId,
+          agent: message?.agent,
+          providerID: message?.providerID,
+          modelID: message?.modelID,
+          errorType: assistantError?.name ?? RuntimeMetricsEvents.normalizeErrorType(error),
+          errorMessage:
+            assistantErrorMessage(assistantError) ?? (error instanceof Error ? error.message : String(error)),
+          durationMs: message ? Math.max(0, completedAt - message.time.created) : undefined,
+          failedAt: completedAt,
+        })
+        return
+      }
+
+      await Bus.publish(RuntimeControllerEvents.TurnCompleted, {
+        sessionID: input.sessionID,
+        turnSnapshotId,
+        agent: message?.agent,
+        providerID: message?.providerID,
+        modelID: message?.modelID,
+        finishReason: input.terminal.finishReason ?? message?.finish,
+        tokens: message?.tokens,
+        costUsd: message?.cost,
+        firstTokenLatencyMs:
+          message && input.terminal.firstResponseAt
+            ? Math.max(0, input.terminal.firstResponseAt - message.time.created)
+            : undefined,
+        durationMs: message ? Math.max(0, completedAt - message.time.created) : undefined,
+        completedAt,
+      })
+    } finally {
+      RuntimeControllerEvents.clearTurn(input.sessionID, turnSnapshotId)
+    }
+  }
+
+  async function publishTurnTerminalSafely(input: Parameters<typeof publishTurnTerminal>[0]) {
+    await publishTurnTerminal(input).catch((error) => {
+      log.error("failed to publish turn terminal event", {
+        sessionID: input.sessionID,
+        error,
+      })
+    })
   }
 
   export const _testing = {
-    reserve,
-    release,
+    reserve: RunLease.reserve,
+    release: RunLease.release,
   }
 
   async function acceptPrompt(input: PromptInput, timing?: RuntimeTiming.Trace) {
-    const abort = reserve(input.sessionID)
-    timing?.mark("busy.reserved")
-    let session = await Session.get(input.sessionID)
-    timing?.mark("session.loaded", { directory: session.directory })
+    const lease = RunLease.reserve(input.sessionID)
     try {
+      timing?.mark("busy.reserved")
+      if (input.runtimeTurnSnapshotId) {
+        RuntimeControllerEvents.bindTurn(input.sessionID, input.runtimeTurnSnapshotId)
+        await Bus.publish(RuntimeControllerEvents.TurnStarted, {
+          sessionID: input.sessionID,
+          turnSnapshotId: input.runtimeTurnSnapshotId,
+          profileSnapshotId: input.runtimeProfileSnapshot?.id,
+          agent: input.agent,
+          model: input.model
+            ? {
+                providerID: input.model.providerID,
+                modelID: input.model.modelID,
+                source: input.runtimeModelSource,
+              }
+            : undefined,
+        })
+      }
+
+      let session = await Session.get(input.sessionID)
+      timing?.mark("session.loaded", { directory: session.directory })
       session = await ensureRuntimeProfile(input, session, timing)
       const preparedContextEvent = await RuntimeContextEvents.preparePageEvent({
         sessionID: session.id,
@@ -358,11 +434,17 @@ export namespace SessionPrompt {
       }
 
       return {
-        abort,
+        lease,
         message,
       }
     } catch (error) {
-      release(input.sessionID)
+      await publishTurnTerminalSafely({
+        sessionID: input.sessionID,
+        runtimeTurnSnapshotId: input.runtimeTurnSnapshotId,
+        lease,
+        terminal: { error },
+      })
+      releaseLease(lease)
       throw error
     }
   }
@@ -461,12 +543,18 @@ export namespace SessionPrompt {
     const timing = RuntimeTiming.start({ sessionID: input.sessionID, operation: "prompt", source: "session.prompt" })
     const accepted = await acceptPrompt(input, timing)
     if (input.noReply === true) {
-      release(input.sessionID)
+      await publishTurnTerminalSafely({
+        sessionID: input.sessionID,
+        runtimeTurnSnapshotId: input.runtimeTurnSnapshotId,
+        lease: accepted.lease,
+        terminal: { finishReason: "no-reply" },
+      })
+      releaseLease(accepted.lease)
       timing.mark("prompt.no_reply.completed")
       return accepted.message
     }
 
-    return loopWithAbort(input.sessionID, accepted.abort, timing, input.runtimeTurnSnapshotId)
+    return loopWithTerminalErrors(input.sessionID, accepted.lease, timing, input.runtimeTurnSnapshotId)
   })
 
   export const promptAsync = fn(PromptInput, async (input) => {
@@ -477,12 +565,18 @@ export namespace SessionPrompt {
     })
     const accepted = await acceptPrompt(input, timing)
     if (input.noReply === true) {
-      release(input.sessionID)
+      await publishTurnTerminalSafely({
+        sessionID: input.sessionID,
+        runtimeTurnSnapshotId: input.runtimeTurnSnapshotId,
+        lease: accepted.lease,
+        terminal: { finishReason: "no-reply" },
+      })
+      releaseLease(accepted.lease)
       timing.mark("prompt_async.no_reply.completed")
       return
     }
 
-    void loopWithAbort(input.sessionID, accepted.abort, timing, input.runtimeTurnSnapshotId).catch((error) =>
+    void loopWithTerminalErrors(input.sessionID, accepted.lease, timing, input.runtimeTurnSnapshotId).catch((error) =>
       log.error("prompt_async failed", { sessionID: input.sessionID, error }),
     )
   })
@@ -540,16 +634,29 @@ export namespace SessionPrompt {
 
   export function cancel(sessionID: string) {
     log.info("cancel", { sessionID })
-    release(sessionID, { abort: true })
+    return RunLease.cancel(sessionID)
   }
 
   async function loopWithAbort(
     sessionID: string,
-    abort: AbortSignal,
+    lease: RunLease.Info,
     timing?: RuntimeTiming.Trace,
     runtimeTurnSnapshotId?: string,
   ) {
-    using _ = defer(() => release(sessionID))
+    const abort = lease.controller.signal
+    const terminal: TurnTerminal = {}
+    using leaseRelease = defer(() => {
+      releaseLease(lease)
+    })
+    await using terminalPublisher = defer(async () => {
+      if (!abort.aborted && !terminal.error && !terminal.message?.error && !terminal.settled) return
+      await publishTurnTerminalSafely({
+        sessionID,
+        runtimeTurnSnapshotId,
+        lease,
+        terminal,
+      })
+    })
 
     let step = 0
     const session = await Session.get(sessionID)
@@ -586,6 +693,7 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      if (lastAssistant) terminal.message = lastAssistant
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
@@ -615,6 +723,7 @@ export namespace SessionPrompt {
         )
       } catch (e) {
         if (Provider.ModelNotFoundError.isInstance(e)) {
+          terminal.error = e
           const { providerID, modelID, suggestions } = e.data
           const hint = suggestions?.length ? ` Did you mean: ${suggestions.join(", ")}?` : ""
           Bus.publish(Session.Event.Error, {
@@ -623,8 +732,6 @@ export namespace SessionPrompt {
               message: `Model not found: ${providerID}/${modelID}.${hint} Please configure a valid model in settings.`
             }).toObject(),
           })
-          // 设置会话为空闲状态，而不是崩溃
-          SessionStatus.set(sessionID, { type: "idle" })
           log.error("model not found, exiting loop gracefully", { providerID, modelID })
           break
         }
@@ -742,6 +849,7 @@ export namespace SessionPrompt {
         assistantMessage.finish = "tool-calls"
         assistantMessage.time.completed = Date.now()
         await Session.updateMessage(assistantMessage)
+        terminal.message = assistantMessage
         if (result && part.state.status === "running") {
           await Session.updatePart({
             ...part,
@@ -1071,6 +1179,8 @@ export namespace SessionPrompt {
         tools,
         model,
       }, { timing })
+      terminal.message = processor.message
+      terminal.firstResponseAt = processor.firstResponseAt
       timing?.mark("processor.process.completed", { step, result })
       if (result === "stop") break
       if (result === "compact") {
@@ -1086,14 +1196,34 @@ export namespace SessionPrompt {
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
+      terminal.message = item.info
+      terminal.settled = true
       return item
     }
     throw new Error("Impossible")
   }
 
+  async function loopWithTerminalErrors(
+    sessionID: string,
+    lease: RunLease.Info,
+    timing?: RuntimeTiming.Trace,
+    runtimeTurnSnapshotId?: string,
+  ) {
+    try {
+      return await loopWithAbort(sessionID, lease, timing, runtimeTurnSnapshotId)
+    } catch (error) {
+      await publishTurnTerminalSafely({
+        sessionID,
+        lease,
+        terminal: { error },
+      })
+      throw error
+    }
+  }
+
   export const loop = fn(Identifier.schema("session"), async (sessionID) => {
-    const abort = reserve(sessionID)
-    return loopWithAbort(sessionID, abort)
+    const lease = RunLease.reserve(sessionID)
+    return loopWithTerminalErrors(sessionID, lease)
   })
 
   async function lastModel(sessionID: string) {
@@ -1726,8 +1856,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   })
   export type ShellInput = z.infer<typeof ShellInput>
   export async function shell(input: ShellInput) {
-    const abort = reserve(input.sessionID)
-    using _ = defer(() => release(input.sessionID))
+    const lease = RunLease.reserve(input.sessionID)
+    using _ = defer(() => {
+      releaseLease(lease)
+    })
+    const abort = lease.controller.signal
 
     const session = await Session.get(input.sessionID)
     if (session.revert) {
