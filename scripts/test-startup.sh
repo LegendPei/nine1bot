@@ -147,7 +147,8 @@ fi
 # 清理: 终止服务器进程
 echo "Stopping server..."
 if [ "$PLATFORM" = "windows" ]; then
-    taskkill //F //PID "$PROC_PID" //T 2>/dev/null || true
+    powershell.exe -NoProfile -NonInteractive -Command \
+        "Stop-Process -Id $PROC_PID -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
 else
     kill "$PROC_PID" 2>/dev/null || true
     sleep 1
