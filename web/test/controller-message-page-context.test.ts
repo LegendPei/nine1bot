@@ -6,6 +6,7 @@ type FetchCall = {
   url: string
   method: string
   body?: any
+  signal?: AbortSignal | null
 }
 
 const originalFetch = globalThis.fetch
@@ -33,6 +34,7 @@ function installFetchMock() {
       url,
       method: init?.method || 'GET',
       body,
+      signal: init?.signal,
     })
     return jsonResponse({ accepted: true, sessionId: 'ses_1', turnSnapshotId: 'turn_1' })
   }) as typeof fetch
@@ -101,6 +103,18 @@ describe('Controller message page context', () => {
     })
     expect(calls[0]?.body.clientCapabilities.pageContext).toBe(false)
     expect(calls[0]?.body.clientCapabilities.selectionContext).toBe(false)
+  })
+
+  it('uses abortable bounded requests for agent control calls', async () => {
+    await api.sendMessage('ses_1', 'hello')
+    await api.changeSessionModel('ses_1', {
+      providerID: 'test-provider',
+      modelID: 'test-model',
+    })
+    await api.abortSession('ses_1')
+
+    expect(calls).toHaveLength(3)
+    expect(calls.every((call) => call.signal instanceof AbortSignal)).toBe(true)
   })
 
   it('creates browser-extension sessions with page context when available', async () => {

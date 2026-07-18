@@ -54,6 +54,80 @@ test("ask - adds to pending list", async () => {
   })
 })
 
+test("ask - abort rejects and removes the pending request", async () => {
+  await using tmp = await tmpdir({ git: true })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const controller = new AbortController()
+      const askPromise = Question.ask(
+        {
+          sessionID: "ses_abort",
+          questions: [
+            {
+              question: "Continue?",
+              header: "Continue",
+              options: [{ label: "Yes", description: "Continue" }],
+            },
+          ],
+        },
+        { signal: controller.signal },
+      )
+      const outcome = askPromise.then(
+        () => "resolved",
+        (error) => error,
+      )
+
+      controller.abort()
+      const result = await Promise.race([outcome, Bun.sleep(30).then(() => "pending")])
+      if (result === "pending") {
+        const pending = await Question.list()
+        if (pending[0]) await Question.reject(pending[0].id)
+      }
+
+      expect(result).toBeInstanceOf(Question.RejectedError)
+      expect(await Question.list()).toHaveLength(0)
+    },
+  })
+})
+
+test("ask - already aborted signal never publishes a pending request", async () => {
+  await using tmp = await tmpdir({ git: true })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const controller = new AbortController()
+      controller.abort()
+
+      const askPromise = Question.ask(
+        {
+          sessionID: "ses_already_aborted",
+          questions: [
+            {
+              question: "Continue?",
+              header: "Continue",
+              options: [{ label: "Yes", description: "Continue" }],
+            },
+          ],
+        },
+        { signal: controller.signal },
+      )
+      const outcome = askPromise.then(
+        () => "resolved",
+        (error) => error,
+      )
+      const result = await Promise.race([outcome, Bun.sleep(30).then(() => "pending")])
+      if (result === "pending") {
+        const pending = await Question.list()
+        if (pending[0]) await Question.reject(pending[0].id)
+      }
+
+      expect(result).toBeInstanceOf(Question.RejectedError)
+      expect(await Question.list()).toHaveLength(0)
+    },
+  })
+})
+
 // reply tests
 
 test("reply - resolves the pending ask with answers", async () => {

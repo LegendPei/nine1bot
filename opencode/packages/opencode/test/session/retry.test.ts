@@ -57,12 +57,16 @@ describe("session.retry.delay", () => {
     expect(SessionRetry.delay(1, error)).toBe(2000)
   })
 
-  test("uses retry-after values even when exceeding 10 minutes with headers", () => {
+  test("caps explicit retry hints at 30 seconds", () => {
     const error = apiError({ "retry-after": "50" })
-    expect(SessionRetry.delay(1, error)).toBe(50000)
+    expect(SessionRetry.delay(1, error)).toBe(30000)
 
     const longError = apiError({ "retry-after-ms": "700000" })
-    expect(SessionRetry.delay(1, longError)).toBe(700000)
+    expect(SessionRetry.delay(1, longError)).toBe(30000)
+  })
+
+  test("allows at most five total provider attempts", () => {
+    expect([1, 2, 3, 4, 5].map(SessionRetry.canRetry)).toEqual([true, true, true, true, false])
   })
 
   test("sleep caps delay to max 32-bit signed integer to avoid TimeoutOverflowWarning", async () => {

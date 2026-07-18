@@ -86,6 +86,7 @@ export namespace Question {
         info: Request
         resolve: (answers: Answer[]) => void
         reject: (e: any) => void
+        cleanup: () => void
       }
     > = {}
 
@@ -94,12 +95,16 @@ export namespace Question {
     }
   })
 
-  export async function ask(input: {
-    sessionID: string
-    questions: Info[]
-    tool?: { messageID: string; callID: string }
-  }): Promise<Answer[]> {
+  export async function ask(
+    input: {
+      sessionID: string
+      questions: Info[]
+      tool?: { messageID: string; callID: string }
+    },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Answer[]> {
     const s = await state()
+    if (options.signal?.aborted) throw new RejectedError()
     const id = Identifier.ascending("question")
 
     log.info("asking", { id, questions: input.questions.length })
@@ -111,10 +116,28 @@ export namespace Question {
         questions: input.questions,
         tool: input.tool,
       }
+      const cleanup = () => options.signal?.removeEventListener("abort", onAbort)
+      const onAbort = () => {
+        const existing = s.pending[id]
+        if (!existing) return
+        delete s.pending[id]
+        existing.cleanup()
+        Bus.publish(Event.Rejected, {
+          sessionID: info.sessionID,
+          requestID: info.id,
+        })
+        existing.reject(new RejectedError())
+      }
       s.pending[id] = {
         info,
         resolve,
         reject,
+        cleanup,
+      }
+      options.signal?.addEventListener("abort", onAbort, { once: true })
+      if (options.signal?.aborted) {
+        onAbort()
+        return
       }
       Bus.publish(Event.Asked, info)
     })
@@ -128,6 +151,7 @@ export namespace Question {
       return
     }
     delete s.pending[input.requestID]
+    existing.cleanup()
 
     log.info("replied", { requestID: input.requestID, answers: input.answers })
 
@@ -148,6 +172,7 @@ export namespace Question {
       return
     }
     delete s.pending[requestID]
+    existing.cleanup()
 
     log.info("rejected", { requestID })
 

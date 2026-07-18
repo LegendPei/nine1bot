@@ -18,6 +18,7 @@ import { Question } from "@/question"
 import type { RuntimeTiming } from "./timing"
 import { RuntimeControllerEvents } from "@/runtime/controller/events"
 import { RuntimeMetricsEvents } from "@/runtime/metrics/events"
+import { ProgressWatchdog } from "./progress-watchdog"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -144,14 +145,25 @@ export namespace SessionProcessor {
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         while (true) {
+          let providerTimedOut = false
+          const attemptController = new AbortController()
+          const attemptAbort = AbortSignal.any([input.abort, attemptController.signal])
+          const watchdog = ProgressWatchdog.create({
+            timeoutMs: ProgressWatchdog.PROVIDER_INACTIVITY_TIMEOUT_MS,
+            onTimeout() {
+              providerTimedOut = true
+              attemptController.abort(new Error("Provider stream made no progress for 5 minutes"))
+            },
+          })
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             timing?.mark("llm.stream.call.started", { attempt })
-            const stream = await LLM.stream(streamInput)
+            const stream = await LLM.stream({ ...streamInput, abort: attemptAbort })
             timing?.mark("llm.stream.call.completed", { attempt })
 
             for await (const value of stream.fullStream) {
+              watchdog.touch()
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -509,7 +521,12 @@ Possible questions to ask:
               error: e,
               stack: JSON.stringify(e.stack),
             })
-            const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+            const error = providerTimedOut
+              ? new MessageV2.APIError({
+                  message: "Provider stream made no progress for 5 minutes",
+                  isRetryable: true,
+                }).toObject()
+              : MessageV2.fromError(e, { providerID: input.model.providerID })
             if (SessionCompaction.isContextLengthError(error)) {
               log.info("context length error, triggering compaction", { sessionID: input.sessionID })
               needsCompaction = true
@@ -518,21 +535,26 @@ Possible questions to ask:
             const retry = SessionRetry.retryable(error)
             if (retry !== undefined) {
               attempt++
-              const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
-              SessionStatus.set(input.sessionID, {
-                type: "retry",
-                attempt,
-                message: retry,
-                next: Date.now() + delay,
-              })
-              await SessionRetry.sleep(delay, input.abort).catch(() => {})
-              continue
+              if (SessionRetry.canRetry(attempt)) {
+                const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
+                SessionStatus.set(input.sessionID, {
+                  type: "retry",
+                  attempt,
+                  message: retry,
+                  next: Date.now() + delay,
+                })
+                await SessionRetry.sleep(delay, input.abort).catch(() => {})
+                input.abort.throwIfAborted()
+                continue
+              }
             }
             input.assistantMessage.error = error
             Bus.publish(Session.Event.Error, {
               sessionID: input.assistantMessage.sessionID,
               error: input.assistantMessage.error,
             })
+          } finally {
+            watchdog.stop()
           }
           if (snapshot) {
             const patch = await Snapshot.patch(snapshot)

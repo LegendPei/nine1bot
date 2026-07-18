@@ -957,7 +957,7 @@ export const api = {
       parts.push(...files)
     }
 
-    const res = await fetchWithDirectory(`${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -983,7 +983,7 @@ export const api = {
     sessionId: string,
     model: { providerID: string; modelID: string }
   ): Promise<{ sessionId: string; currentModel?: SessionRuntimeSummary['currentModel']; profileSnapshotId?: string }> {
-    const res = await fetchWithDirectory(`${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/model`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/model`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model })
@@ -1076,7 +1076,7 @@ export const api = {
 
   // 中止会话
   async abortSession(sessionId: string): Promise<void> {
-    const res = await fetchWithDirectory(`${BASE_URL}/session/${sessionId}/abort`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/session/${sessionId}/abort`, {
       method: 'POST'
     })
     if (!res.ok) {

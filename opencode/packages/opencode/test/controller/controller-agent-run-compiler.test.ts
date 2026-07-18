@@ -7,6 +7,8 @@ import { RuntimeContextPipeline } from "../../src/runtime/context/pipeline"
 import { SessionRuntimeProfile } from "../../src/runtime/session/profile"
 import { Session } from "../../src/session"
 import { Log } from "../../src/util/log"
+import { RuntimePromptBridgeCompiler } from "../../src/runtime/bridge/prompt-compiler"
+import type { TurnRuntimeSnapshot } from "../../src/runtime/protocol/agent-run-spec"
 
 const projectRoot = path.join(__dirname, "../..")
 Log.init({ print: false })
@@ -156,6 +158,24 @@ describe("controller agent run compiler", () => {
         await Session.remove(session.id)
       },
     })
+  })
+
+  test("propagates only explicit turn runtime timeouts to the prompt", async () => {
+    const snapshot = (timeoutMs?: number) =>
+      ({
+        id: "turn_timeout_test",
+        session: { id: "ses_timeout_test" },
+        input: { parts: [] },
+        model: { providerID: "test-provider", modelID: "test-model" },
+        agent: { name: "build" },
+        runtime: { timeoutMs },
+      }) as unknown as TurnRuntimeSnapshot
+
+    const bounded = RuntimePromptBridgeCompiler.compilePrompt(snapshot(12_345))
+    const unbounded = RuntimePromptBridgeCompiler.compilePrompt(snapshot())
+
+    expect(bounded.runtimeTimeoutMs).toBe(12_345)
+    expect(unbounded.runtimeTimeoutMs).toBeUndefined()
   })
 
   test("compiles a transient legacy-resumed profile without persisting it before prompt acceptance", async () => {

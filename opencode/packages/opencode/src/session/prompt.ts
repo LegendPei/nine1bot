@@ -210,6 +210,7 @@ export namespace SessionPrompt {
     runtimeModelSource: z.enum(["profile-snapshot", "session-choice"]).optional(),
     runtimeProfileSnapshot: z.custom<SessionProfileSnapshot>().optional(),
     runtimeTurnSnapshotId: z.string().optional(),
+    runtimeTimeoutMs: z.number().positive().optional(),
     agent: z.string().optional(),
     noReply: z.boolean().optional(),
     tools: z
@@ -272,6 +273,28 @@ export namespace SessionPrompt {
     if (!RunLease.release(lease.sessionID, lease.id)) return false
     SessionProcessor.resetDoomLoopCount(lease.sessionID)
     return true
+  }
+
+  function withAbortSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted()
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => signal.removeEventListener("abort", onAbort)
+      const onAbort = () => {
+        cleanup()
+        reject(signal.reason)
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
+      promise.then(
+        (value) => {
+          cleanup()
+          resolve(value)
+        },
+        (error) => {
+          cleanup()
+          reject(error)
+        },
+      )
+    })
   }
 
   type TurnTerminal = {
@@ -554,7 +577,13 @@ export namespace SessionPrompt {
       return accepted.message
     }
 
-    return loopWithTerminalErrors(input.sessionID, accepted.lease, timing, input.runtimeTurnSnapshotId)
+    return loopWithTerminalErrors(
+      input.sessionID,
+      accepted.lease,
+      timing,
+      input.runtimeTurnSnapshotId,
+      input.runtimeTimeoutMs,
+    )
   })
 
   export const promptAsync = fn(PromptInput, async (input) => {
@@ -576,9 +605,13 @@ export namespace SessionPrompt {
       return
     }
 
-    void loopWithTerminalErrors(input.sessionID, accepted.lease, timing, input.runtimeTurnSnapshotId).catch((error) =>
-      log.error("prompt_async failed", { sessionID: input.sessionID, error }),
-    )
+    void loopWithTerminalErrors(
+      input.sessionID,
+      accepted.lease,
+      timing,
+      input.runtimeTurnSnapshotId,
+      input.runtimeTimeoutMs,
+    ).catch((error) => log.error("prompt_async failed", { sessionID: input.sessionID, error }))
   })
 
   export async function resolvePromptParts(template: string): Promise<PromptInput["parts"]> {
@@ -642,14 +675,16 @@ export namespace SessionPrompt {
     lease: RunLease.Info,
     timing?: RuntimeTiming.Trace,
     runtimeTurnSnapshotId?: string,
+    runtimeTimeoutMs?: number,
   ) {
-    const abort = lease.controller.signal
+    const deadline = runtimeTimeoutMs === undefined ? undefined : AbortSignal.timeout(runtimeTimeoutMs)
+    const abort = deadline ? AbortSignal.any([lease.controller.signal, deadline]) : lease.controller.signal
     const terminal: TurnTerminal = {}
     using leaseRelease = defer(() => {
       releaseLease(lease)
     })
     await using terminalPublisher = defer(async () => {
-      if (!abort.aborted && !terminal.error && !terminal.message?.error && !terminal.settled) return
+      if (!lease.controller.signal.aborted && !terminal.error && !terminal.message?.error && !terminal.settled) return
       await publishTurnTerminalSafely({
         sessionID,
         runtimeTurnSnapshotId,
@@ -1037,11 +1072,14 @@ export namespace SessionPrompt {
           const resolvedResources = (await RuntimeFeatureFlags.resourceResolverEnabled())
             ? resourceCache?.userMessageID === lastUser.id
               ? resourceCache.resolved
-              : await RuntimeResourceResolver.resolve({
-                  sessionID,
-                  turnSnapshotId: runtimeTurnSnapshotId,
-                  profile: await SessionRuntimeProfile.read(session),
-                })
+              : await withAbortSignal(
+                  RuntimeResourceResolver.resolve({
+                    sessionID,
+                    turnSnapshotId: runtimeTurnSnapshotId,
+                    profile: await SessionRuntimeProfile.read(session),
+                  }),
+                  abort,
+                )
             : undefined
           if (resolvedResources) {
             resourceCache = {
@@ -1049,16 +1087,19 @@ export namespace SessionPrompt {
               resolved: resolvedResources,
             }
           }
-          return resolveTools({
-            agent,
-            session,
-            model,
-            tools: lastUser.tools,
-            processor,
-            bypassAgentCheck,
-            messages: msgs,
-            resources: resolvedResources,
-          })
+          return withAbortSignal(
+            resolveTools({
+              agent,
+              session,
+              model,
+              tools: lastUser.tools,
+              processor,
+              bypassAgentCheck,
+              messages: msgs,
+              resources: resolvedResources,
+            }),
+            abort,
+          )
         },
         { step },
       )
@@ -1193,6 +1234,9 @@ export namespace SessionPrompt {
       }
       continue
     }
+    if (abort.aborted && !lease.controller.signal.aborted && !terminal.message?.error) {
+      terminal.error = abort.reason instanceof Error ? abort.reason : new Error("Turn runtime deadline exceeded")
+    }
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
@@ -1208,9 +1252,10 @@ export namespace SessionPrompt {
     lease: RunLease.Info,
     timing?: RuntimeTiming.Trace,
     runtimeTurnSnapshotId?: string,
+    runtimeTimeoutMs?: number,
   ) {
     try {
-      return await loopWithAbort(sessionID, lease, timing, runtimeTurnSnapshotId)
+      return await loopWithAbort(sessionID, lease, timing, runtimeTurnSnapshotId, runtimeTimeoutMs)
     } catch (error) {
       await publishTurnTerminalSafely({
         sessionID,

@@ -9,11 +9,14 @@ export const QuestionTool = Tool.define("question", {
     questions: z.array(Question.Info.omit({ custom: true })).describe("Questions to ask"),
   }),
   async execute(params, ctx) {
-    const answers = await Question.ask({
-      sessionID: ctx.sessionID,
-      questions: params.questions,
-      tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
-    })
+    const answers = await Question.ask(
+      {
+        sessionID: ctx.sessionID,
+        questions: params.questions,
+        tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
+      },
+      { signal: ctx.abort },
+    )
 
     function format(answer: Question.Answer | undefined) {
       if (!answer?.length) return "Unanswered"

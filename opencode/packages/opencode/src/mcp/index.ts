@@ -289,6 +289,58 @@ export namespace MCP {
     return entry?.timeout ?? defaultTimeout
   }
 
+  type PromptToolSource = {
+    server: string
+    timeoutMs: number
+    client: Pick<MCPClient, "listTools">
+    cached?: MCPToolDef[]
+  }
+
+  type PromptToolFailure = {
+    server: string
+    message: string
+  }
+
+  async function resolveToolSources(
+    sources: PromptToolSource[],
+    onFailure?: (failure: PromptToolFailure) => void | Promise<void>,
+  ) {
+    const resolved = await Promise.all(
+      sources.map(async (source) => {
+        if (source.cached) {
+          return {
+            server: source.server,
+            cached: true,
+            tools: source.cached,
+          }
+        }
+
+        try {
+          const result = await withTimeout(source.client.listTools(), source.timeoutMs)
+          return {
+            server: source.server,
+            cached: false,
+            tools: result.tools,
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          await Promise.resolve(onFailure?.({ server: source.server, message })).catch((failureError) => {
+            log.warn("failed to report MCP tool resolution failure", {
+              server: source.server,
+              error: failureError,
+            })
+          })
+          return undefined
+        }
+      }),
+    )
+    return resolved.filter((item): item is NonNullable<typeof item> => item !== undefined)
+  }
+
+  export const _testing = {
+    resolveToolSources,
+  }
+
   async function refreshTools(serverName: string, client: MCPClient, timeout?: number) {
     const toolsResult = await withTimeout(client.listTools(), timeout ?? DEFAULT_TIMEOUT)
     const s = await state()
@@ -587,13 +639,10 @@ export namespace MCP {
     return Date.now() + delay + jitter
   }
 
-  async function markFailed(serverName: string, error: string) {
+  async function markFailed(serverName: string, error: string, options: { awaitClose?: boolean } = {}) {
     const s = await state()
     const client = s.clients[serverName]
     if (client) {
-      await client.close().catch((closeError) => {
-        log.error("Failed to close MCP client after error", { serverName, error: closeError })
-      })
       delete s.clients[serverName]
     }
     s.status[serverName] = {
@@ -613,6 +662,12 @@ export namespace MCP {
     s.reconnect[serverName] = {
       attempts,
       nextAt: computeNextReconnect(attempts),
+    }
+    if (client) {
+      const closing = client.close().catch((closeError) => {
+        log.error("Failed to close MCP client after error", { serverName, error: closeError })
+      })
+      if (options.awaitClose !== false) await closing
     }
   }
 
@@ -1456,7 +1511,6 @@ export namespace MCP {
     const cfg = await Config.get()
     const config = cfg.mcp ?? {}
     const s = await state()
-    const defaultTimeout = cfg.experimental?.mcp_timeout
     const result: Record<string, Tool> = {}
     const allowedServers = options?.servers ? new Set(options.servers) : undefined
 
@@ -1482,48 +1536,67 @@ export namespace MCP {
       }
     }
 
-    for (const [clientName, client] of Object.entries(clientsSnapshot)) {
-      if (allowedServers && !allowedServers.has(clientName)) continue
-      const mcpConfig = config[clientName]
-      const entry = isMcpConfigured(mcpConfig) ? mcpConfig : undefined
-      if (!entry || entry.enabled === false) continue
-      // Only include tools from connected MCPs (skip disabled ones)
-      if (s.status[clientName]?.status !== "connected") {
-        continue
-      }
-
-      const toolsResult = await client.listTools().catch((e) => {
-        log.error("failed to get tools", { clientName, error: e.message })
-        const message = e instanceof Error ? e.message : String(e)
-        void markFailed(clientName, message)
-        void options?.onFailure?.({
-          server: clientName,
+    const sources = (
+      await Promise.all(
+        Object.entries(clientsSnapshot).map(async ([clientName, client]): Promise<PromptToolSource | undefined> => {
+          if (allowedServers && !allowedServers.has(clientName)) return undefined
+          const mcpConfig = config[clientName]
+          const entry = isMcpConfigured(mcpConfig) ? mcpConfig : undefined
+          if (!entry || entry.enabled === false || s.status[clientName]?.status !== "connected") return undefined
+          const cached = Object.hasOwn(s.tools, clientName)
+            ? s.tools[clientName].map(
+                (tool): MCPToolDef => ({
+                  name: tool.name,
+                  description: tool.description,
+                  inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
+                }),
+              )
+            : undefined
+          return {
+            server: clientName,
+            client,
+            timeoutMs: await getServerTimeout(clientName, entry),
+            cached,
+          } satisfies PromptToolSource
+        }),
+      )
+    ).filter((source): source is PromptToolSource => source !== undefined)
+    const sourceByServer = new Map(sources.map((source) => [source.server, source]))
+    const resolved = await resolveToolSources(sources, async (failure) => {
+      log.error("failed to get tools", { clientName: failure.server, error: failure.message })
+      await Promise.all([
+        markFailed(failure.server, failure.message, { awaitClose: false }),
+        options?.onFailure?.({
+          server: failure.server,
           stage: "resolve",
           reason: "list-tools-failed",
-          message,
-        })
-        return undefined
-      })
-      if (!toolsResult) {
-        continue
+          message: failure.message,
+        }),
+      ])
+    })
+
+    for (const item of resolved) {
+      const source = sourceByServer.get(item.server)
+      if (!source) continue
+      if (!item.cached) {
+        s.tools[item.server] = item.tools.map(toToolInfo)
+        s.health[item.server] = {
+          ok: true,
+          checkedAt: new Date().toISOString(),
+          tools: item.tools.length,
+        }
       }
-      s.tools[clientName] = toolsResult.tools.map(toToolInfo)
-      s.health[clientName] = {
-        ok: true,
-        checkedAt: new Date().toISOString(),
-        tools: toolsResult.tools.length,
-      }
-      const timeout = entry?.timeout ?? defaultTimeout
-      for (const mcpTool of toolsResult.tools) {
-        const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
-        const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(
-          clientName,
-          mcpTool,
-          client,
-          timeout,
-        )
-      }
+      const converted = await Promise.all(
+        item.tools.map(async (mcpTool) => {
+          const sanitizedClientName = item.server.replace(/[^a-zA-Z0-9_-]/g, "_")
+          const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
+          return [
+            sanitizedClientName + "_" + sanitizedToolName,
+            await convertMcpTool(item.server, mcpTool, source.client as MCPClient, source.timeoutMs),
+          ] as const
+        }),
+      )
+      Object.assign(result, Object.fromEntries(converted))
     }
     return result
   }

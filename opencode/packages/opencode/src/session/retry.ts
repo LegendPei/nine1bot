@@ -5,8 +5,14 @@ import { iife } from "@/util/iife"
 export namespace SessionRetry {
   export const RETRY_INITIAL_DELAY = 2000
   export const RETRY_BACKOFF_FACTOR = 2
-  export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
+  export const MAX_ATTEMPTS = 5
+  export const MAX_DELAY_MS = 30_000
+  export const RETRY_MAX_DELAY_NO_HEADERS = MAX_DELAY_MS
   export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
+
+  export function canRetry(attempt: number) {
+    return attempt < MAX_ATTEMPTS
+  }
 
   export async function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -32,26 +38,26 @@ export namespace SessionRetry {
         const retryAfterMs = headers["retry-after-ms"]
         if (retryAfterMs) {
           const parsedMs = Number.parseFloat(retryAfterMs)
-          if (!Number.isNaN(parsedMs)) {
-            return parsedMs
+          if (!Number.isNaN(parsedMs) && parsedMs >= 0) {
+            return Math.min(parsedMs, MAX_DELAY_MS)
           }
         }
 
         const retryAfter = headers["retry-after"]
         if (retryAfter) {
           const parsedSeconds = Number.parseFloat(retryAfter)
-          if (!Number.isNaN(parsedSeconds)) {
+          if (!Number.isNaN(parsedSeconds) && parsedSeconds >= 0) {
             // convert seconds to milliseconds
-            return Math.ceil(parsedSeconds * 1000)
+            return Math.min(Math.ceil(parsedSeconds * 1000), MAX_DELAY_MS)
           }
           // Try parsing as HTTP date format
           const parsed = Date.parse(retryAfter) - Date.now()
           if (!Number.isNaN(parsed) && parsed > 0) {
-            return Math.ceil(parsed)
+            return Math.min(Math.ceil(parsed), MAX_DELAY_MS)
           }
         }
 
-        return RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1)
+        return Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), MAX_DELAY_MS)
       }
     }
 

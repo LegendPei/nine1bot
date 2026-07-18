@@ -48,6 +48,7 @@ export namespace RuntimePromptBridgeCompiler {
           : undefined,
       runtimeProfileSnapshot: snapshot.session.profileSnapshot,
       runtimeTurnSnapshotId: snapshot.id,
+      runtimeTimeoutMs: snapshot.runtime.timeoutMs,
       agent: snapshot.agent.name,
       noReply: snapshot.runtime.noReply,
       tools: compileTools(snapshot),
