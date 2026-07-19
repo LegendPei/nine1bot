@@ -575,7 +575,7 @@ function confirmRemove(name: string) {
 
 .btn-sm {
   padding: var(--space-xs) var(--space-sm);
-  font-size: 13px;
+  font-size: var(--text-13);
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -592,7 +592,7 @@ function confirmRemove(name: string) {
 /* 添加表单样式 */
 .add-form {
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   overflow: hidden;
 }
@@ -602,12 +602,12 @@ function confirmRemove(name: string) {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-sm) var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .form-title {
   font-weight: 500;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .btn-icon {
@@ -643,18 +643,18 @@ function confirmRemove(name: string) {
 }
 
 .form-label {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-secondary);
 }
 
 .form-input {
   padding: var(--space-sm) var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
   transition: border-color var(--transition-fast);
 }
 
@@ -668,13 +668,13 @@ function confirmRemove(name: string) {
 }
 
 .form-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
 .form-error {
   color: var(--error);
-  font-size: 13px;
+  font-size: var(--text-13);
   padding: var(--space-sm);
   background: rgba(239, 68, 68, 0.1);
   border-radius: var(--radius-sm);
@@ -690,7 +690,7 @@ function confirmRemove(name: string) {
   align-items: center;
   gap: var(--space-xs);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .radio-item input {
@@ -702,7 +702,7 @@ function confirmRemove(name: string) {
   justify-content: flex-end;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
 }
 
@@ -711,16 +711,16 @@ function confirmRemove(name: string) {
   display: flex;
   padding: var(--space-sm) var(--space-md);
   gap: var(--space-xs);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .mode-btn {
   padding: var(--space-xs) var(--space-sm);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
@@ -733,12 +733,12 @@ function confirmRemove(name: string) {
 .mode-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 /* JSON 编辑 */
 .json-hint {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   margin-bottom: var(--space-sm);
   line-height: 1.5;
@@ -749,18 +749,18 @@ function confirmRemove(name: string) {
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .json-textarea {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.5;
   resize: vertical;
   min-height: 200px;
@@ -790,12 +790,13 @@ function confirmRemove(name: string) {
 }
 
 .btn-danger {
+  background: transparent;
   color: var(--text-muted);
 }
 
 .btn-danger:hover {
   color: var(--error);
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--error-subtle);
 }
 
 .error-text {
@@ -805,7 +806,7 @@ function confirmRemove(name: string) {
 
 .tools-section {
   padding-top: var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .tools-title {

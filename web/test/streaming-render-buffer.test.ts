@@ -48,4 +48,34 @@ describe('createFrameDeltaBuffer', () => {
     frames[0]()
     expect(applied).toEqual(['hello'])
   })
+
+  it('falls back to setTimeout when the document is hidden (background tab)', async () => {
+    const applied: string[] = []
+    const globalRef = globalThis as Record<string, unknown>
+    const originalDocument = globalRef.document
+    const originalRaf = globalRef.requestAnimationFrame
+    const originalCancelRaf = globalRef.cancelAnimationFrame
+    globalRef.document = { hidden: true }
+    globalRef.requestAnimationFrame = () => {
+      throw new Error('requestAnimationFrame must not be used while the tab is hidden')
+    }
+    globalRef.cancelAnimationFrame = () => {
+      throw new Error('cancelAnimationFrame must not be used while the tab is hidden')
+    }
+    try {
+      const buffer = createFrameDeltaBuffer({
+        apply(delta) {
+          applied.push(delta.delta)
+        },
+      })
+      buffer.push({ messageID: 'message_1', partID: 'part_1', field: 'text', delta: 'x' })
+      // 默认调度在后台标签页改走 setTimeout(100ms)，delta 不应一直积压
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(applied).toEqual(['x'])
+    } finally {
+      globalRef.document = originalDocument
+      globalRef.requestAnimationFrame = originalRaf
+      globalRef.cancelAnimationFrame = originalCancelRaf
+    }
+  })
 })

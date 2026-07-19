@@ -139,10 +139,6 @@ function downloadFile() {
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .error-state {
   display: flex;
   flex-direction: column;
@@ -166,7 +162,7 @@ function downloadFile() {
 
 .error-hint {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .download-btn {
@@ -177,8 +173,8 @@ function downloadFile() {
   background: var(--accent);
   border: none;
   border-radius: var(--radius-sm);
-  color: white;
-  font-size: 13px;
+  color: var(--accent-fg);
+  font-size: var(--text-13);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -210,7 +206,7 @@ function downloadFile() {
 
 .docx-container :deep(td),
 .docx-container :deep(th) {
-  border: 0.5px solid #ddd;
+  border: 1px solid var(--border-default);
   padding: 8px;
 }
 </style>

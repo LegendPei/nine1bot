@@ -123,10 +123,10 @@ function selectResult(result: FileSearchResult) {
   width: 100%;
   padding: var(--space-sm) var(--space-sm) var(--space-sm) 34px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .search-input:focus {
@@ -160,7 +160,7 @@ function selectResult(result: FileSearchResult) {
   padding: var(--space-md);
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .search-loading {
@@ -171,7 +171,7 @@ function selectResult(result: FileSearchResult) {
 }
 
 .search-error {
-  color: var(--error, #ef4444);
+  color: var(--error);
 }
 
 .loading-spinner-sm {
@@ -183,14 +183,10 @@ function selectResult(result: FileSearchResult) {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .search-results {
   max-height: 300px;
   overflow-y: auto;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
 }
@@ -230,13 +226,13 @@ function selectResult(result: FileSearchResult) {
 }
 
 .result-name {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
 }
 
 .result-path {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);
   overflow: hidden;

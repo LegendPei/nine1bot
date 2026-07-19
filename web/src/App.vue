@@ -27,6 +27,7 @@ import McpProjectPanel from './components/McpProjectPanel.vue'
 import RightPanel from './components/RightPanel.vue'
 import { useAgentTerminal } from './composables/useAgentTerminal'
 import { useFilePreview } from './composables/useFilePreview'
+import { useTheme } from './composables/useTheme'
 import { Globe2, Plus, RefreshCw, Settings, Terminal } from 'lucide-vue-next'
 import { getTrustedExtensionParentContext, isTrustedExtensionParentEvent } from './utils/extension-parent'
 
@@ -103,6 +104,7 @@ const {
   fileContent,
   isLoadingContent,
   contentError,
+  isContentTruncated,
   loadFileContent,
   clearFileContent,
 } = useFiles()
@@ -121,6 +123,9 @@ const {
 } = useSettings()
 
 const { isBrowserExtension } = useClientSurface()
+
+// 主题在 App 根初始化一次：启动即应用 data-theme，不随设置面板卸载失效
+useTheme()
 
 // App mode (chat / agent)
 const { mode: appMode, setMode: setAppMode } = useAppMode()
@@ -173,6 +178,8 @@ const showMetricsPage = ref(false)
 const showAutomationsPage = ref(false)
 
 const sidebarCollapsed = ref(false)
+// 移动端（≤768px）侧边栏抽屉开关
+const sidebarMobileOpen = ref(false)
 const projectContextRevision = ref(0)
 const extensionPageContext = ref<RequestPagePayload | undefined>()
 const extensionPageLoading = ref(false)
@@ -222,15 +229,15 @@ const isEmptyState = computed(() =>
 )
 
 const extensionPageLabel = computed(() => {
-  if (extensionPageLoading.value) return 'Checking current page...'
+  if (extensionPageLoading.value) return '正在检测当前页面...'
   const page = extensionPageContext.value
-  if (!page) return 'No page context'
+  if (!page) return '无页面上下文'
   return page.title || page.url || page.platform
 })
 
 const extensionPageDetail = computed(() => {
   const page = extensionPageContext.value
-  if (!page) return 'Open a supported page to include browser context.'
+  if (!page) return '打开受支持的页面以纳入浏览器上下文。'
   const parts = [page.platform, page.pageType, page.url].filter(Boolean)
   return parts.join(' · ')
 })
@@ -450,10 +457,8 @@ onMounted(async () => {
     await loadPendingRequests()
   }
 
-  if (!isBrowserExtension.value) {
-    // Cmd+K / Ctrl+K shortcut for search
-    document.addEventListener('keydown', handleGlobalKeydown)
-  }
+  // Cmd+K / Ctrl+K 搜索（仅主界面）与 Escape 关闭浮层
+  document.addEventListener('keydown', handleGlobalKeydown)
 })
 
 onUnmounted(() => {
@@ -488,8 +493,16 @@ onUnmounted(() => {
 
 function handleGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    if (isBrowserExtension.value) return
     e.preventDefault()
     showSearch.value = !showSearch.value
+    return
+  }
+  // Escape 统一关闭浮层（搜索/文件查看器/目录选择器各自处理自己的 Escape）
+  if (e.key === 'Escape') {
+    if (showPlanPanel.value) showPlanPanel.value = false
+    else if (showTodoList.value) showTodoList.value = false
+    else if (showMcpPanel.value) showMcpPanel.value = false
   }
 }
 
@@ -518,7 +531,7 @@ watch(appMode, (newMode) => {
   stopGlobalRecentPolling()
 })
 
-async function handleSend(content: string, files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode?: boolean) {
+async function handleSend(content: string, files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode?: boolean, onResult?: (success: boolean) => void) {
   // If viewing projects page, close it
   if (showProjectsPage.value) {
     showProjectsPage.value = false
@@ -541,7 +554,8 @@ async function handleSend(content: string, files?: Array<{ type: 'file'; mime: s
     finalContent = `[规划模式] 请先制定详细的执行计划，列出所有待办事项，等待我确认后再执行。\n\n${content}`
   }
 
-  await sendMessage(finalContent, model, files)
+  const success = await sendMessage(finalContent, model, files)
+  onResult?.(success)
 }
 
 async function ensureCurrentSessionId() {
@@ -550,6 +564,7 @@ async function ensureCurrentSessionId() {
 }
 
 function handleNewSession() {
+  sidebarMobileOpen.value = false
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
@@ -563,6 +578,7 @@ function toggleSidebar() {
 
 // Mode switch handler — auto navigate to new chat
 function handleSwitchMode(newMode: 'chat' | 'agent') {
+  sidebarMobileOpen.value = false
   setAppMode(newMode)
   showProjectsPage.value = false
   showMetricsPage.value = false
@@ -571,6 +587,7 @@ function handleSwitchMode(newMode: 'chat' | 'agent') {
 }
 
 async function handleSelectProject(projectId: string) {
+  sidebarMobileOpen.value = false
   if (!projectId) {
     clearProject()
     return
@@ -594,6 +611,7 @@ async function handleSelectProject(projectId: string) {
 }
 
 function handleOpenProjects() {
+  sidebarMobileOpen.value = false
   showMetricsPage.value = false
   showProjectsPage.value = true
   showAutomationsPage.value = false
@@ -603,6 +621,7 @@ function handleOpenProjects() {
 }
 
 function handleOpenAutomations() {
+  sidebarMobileOpen.value = false
   showAutomationsPage.value = true
   showProjectsPage.value = false
   showMetricsPage.value = false
@@ -612,12 +631,14 @@ function handleOpenAutomations() {
 }
 
 function handleOpenMetrics() {
+  sidebarMobileOpen.value = false
   showProjectsPage.value = false
   showAutomationsPage.value = false
   showMetricsPage.value = true
 }
 
 function handleToggleMetrics() {
+  sidebarMobileOpen.value = false
   showProjectsPage.value = false
   showAutomationsPage.value = false
   showMetricsPage.value = !showMetricsPage.value
@@ -665,12 +686,17 @@ async function handleCreateProject(name: string, instructions: string, directory
   await refreshGlobalRecentsIfAgent()
 }
 
-async function handleUpdateProject(projectId: string, updates: { name?: string; instructions?: string }) {
-  await updateProject(projectId, updates)
+async function handleUpdateProject(projectId: string, updates: { name?: string; instructions?: string }, done?: () => void) {
+  try {
+    await updateProject(projectId, updates)
+  } finally {
+    done?.()
+  }
 }
 
 // Handle search result selection
 function handleSearchSelect(sessionId: string) {
+  sidebarMobileOpen.value = false
   showSearch.value = false
   showProjectsPage.value = false
   showMetricsPage.value = false
@@ -703,6 +729,7 @@ async function handleProjectSelectSession(session: Session) {
 }
 
 async function handleSidebarSelectSession(session: Session) {
+  sidebarMobileOpen.value = false
   showProjectsPage.value = false
   showMetricsPage.value = false
   showAutomationsPage.value = false
@@ -805,8 +832,8 @@ function handlePromptSelect(prompt: string) {
     <header class="extension-chat-header">
       <div class="extension-header-main">
         <div class="extension-title-row">
-          <span class="extension-title">Browser chat</span>
-          <span class="extension-badge">Extension</span>
+          <span class="extension-title">浏览器对话</span>
+          <span class="extension-badge">扩展</span>
         </div>
         <div class="extension-page-context" :title="extensionPageDetail">
           <Globe2 :size="14" />
@@ -814,7 +841,7 @@ function handlePromptSelect(prompt: string) {
         </div>
       </div>
       <div class="extension-header-actions">
-        <button class="extension-icon-btn" type="button" title="Refresh page context" @click="refreshExtensionPageContext">
+        <button class="extension-icon-btn" type="button" title="刷新页面上下文" @click="refreshExtensionPageContext">
           <RefreshCw :size="16" />
         </button>
         <button class="extension-icon-btn" type="button" title="设置" @click="openSettings">
@@ -822,7 +849,7 @@ function handlePromptSelect(prompt: string) {
         </button>
         <button class="extension-action-btn" type="button" @click="handleNewSession">
           <Plus :size="16" />
-          <span>New</span>
+          <span>新会话</span>
         </button>
       </div>
     </header>
@@ -840,6 +867,7 @@ function handlePromptSelect(prompt: string) {
         :messages="messages"
         :isLoading="isLoading"
         :isStreaming="isStreaming"
+        :sessionId="currentSession?.id"
         :pendingQuestions="pendingQuestions"
         :pendingPermissions="pendingPermissions"
         :sessionError="sessionError"
@@ -864,7 +892,6 @@ function handlePromptSelect(prompt: string) {
         :currentProvider="currentProvider"
         :currentModel="currentModel"
         mode="chat"
-        :messages="messages"
         @send="handleSend"
         @abort="abortCurrentSession"
         @select-model="handleSelectModel"
@@ -926,6 +953,7 @@ function handlePromptSelect(prompt: string) {
     <!-- Sidebar -->
     <Sidebar
       :collapsed="sidebarCollapsed"
+      :mobileOpen="sidebarMobileOpen"
       :sessions="sidebarSessions"
       :currentSession="currentSession"
       :isDraftSession="isDraftSession"
@@ -958,6 +986,13 @@ function handlePromptSelect(prompt: string) {
       @open-automations="handleOpenAutomations"
     />
 
+    <!-- 移动端侧边栏遮罩（点击关闭） -->
+    <div
+      v-if="sidebarMobileOpen"
+      class="sidebar-scrim"
+      @click="sidebarMobileOpen = false"
+    ></div>
+
     <!-- Main Content -->
     <div class="main-content">
       <!-- Header -->
@@ -969,6 +1004,7 @@ function handlePromptSelect(prompt: string) {
         :retryInfo="retryInfo"
         :showMetrics="showMetricsPage"
         @toggle-sidebar="toggleSidebar"
+        @toggle-mobile-sidebar="sidebarMobileOpen = !sidebarMobileOpen"
         @abort="abortCurrentSession"
         @toggle-metrics="handleToggleMetrics"
       />
@@ -1012,6 +1048,7 @@ function handlePromptSelect(prompt: string) {
               :messages="messages"
               :isLoading="isLoading"
               :isStreaming="isStreaming"
+              :sessionId="currentSession?.id"
               :pendingQuestions="pendingQuestions"
               :pendingPermissions="pendingPermissions"
               :sessionError="sessionError"
@@ -1036,7 +1073,6 @@ function handlePromptSelect(prompt: string) {
               :currentProvider="currentProvider"
               :currentModel="currentModel"
               :mode="appMode"
-              :messages="messages"
               @send="handleSend"
               @abort="abortCurrentSession"
               @select-model="handleSelectModel"
@@ -1111,6 +1147,7 @@ function handlePromptSelect(prompt: string) {
       :file="fileContent"
       :isLoading="isLoadingContent"
       :error="contentError"
+      :truncated="isContentTruncated"
       @close="closeFileViewer"
     />
 
@@ -1162,7 +1199,7 @@ function handlePromptSelect(prompt: string) {
   gap: var(--space-md);
   min-height: 58px;
   padding: 10px 12px;
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   background: var(--bg-elevated);
 }
 
@@ -1180,8 +1217,7 @@ function handlePromptSelect(prompt: string) {
 }
 
 .extension-title {
-  font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -1191,8 +1227,7 @@ function handlePromptSelect(prompt: string) {
   border-radius: var(--radius-full);
   background: var(--accent-subtle);
   color: var(--accent);
-  font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 16px;
 }
 
@@ -1202,8 +1237,7 @@ function handlePromptSelect(prompt: string) {
   align-items: center;
   gap: 6px;
   color: var(--text-muted);
-  font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .extension-page-context span {
@@ -1251,7 +1285,7 @@ function handlePromptSelect(prompt: string) {
   padding: 0 10px;
   background: var(--accent);
   color: var(--accent-fg);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
@@ -1276,7 +1310,7 @@ function handlePromptSelect(prompt: string) {
   gap: 10px;
   margin: 10px 0 0;
   padding: 10px 12px;
-  border: 0.5px solid rgba(180, 35, 24, 0.22);
+  border: 1px solid rgba(180, 35, 24, 0.22);
   border-radius: var(--radius-md);
   background: rgba(180, 35, 24, 0.06);
   color: var(--text-primary);
@@ -1290,13 +1324,13 @@ function handlePromptSelect(prompt: string) {
 }
 
 .extension-connection-banner strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
 .extension-connection-banner span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1312,7 +1346,7 @@ function handlePromptSelect(prompt: string) {
   background: var(--accent);
   color: var(--accent-fg);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1321,13 +1355,13 @@ function handlePromptSelect(prompt: string) {
   position: absolute;
   right: 12px;
   bottom: 86px;
-  z-index: 80;
+  z-index: var(--z-fixed);
   width: min(330px, calc(100% - 24px));
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 12px;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-lg);
@@ -1347,13 +1381,13 @@ function handlePromptSelect(prompt: string) {
 }
 
 .extension-terminal-notice strong {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
 .extension-terminal-notice span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.4;
 }
 
@@ -1372,14 +1406,14 @@ function handlePromptSelect(prompt: string) {
 .panel-overlay {
   position: absolute;
   inset: 0;
-  z-index: 99;
+  z-index: var(--z-scrim);
 }
 
 .plan-panel-container {
   position: absolute;
   top: calc(var(--header-height) + var(--space-md));
   left: var(--space-md);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   width: 520px;
   max-width: calc(100% - var(--space-md) * 2);
 }
@@ -1388,7 +1422,7 @@ function handlePromptSelect(prompt: string) {
   position: absolute;
   top: calc(var(--header-height) + var(--space-md));
   right: var(--space-md);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   width: 360px;
   max-width: calc(100% - var(--space-md) * 2);
 }
@@ -1398,7 +1432,7 @@ function handlePromptSelect(prompt: string) {
   bottom: 100px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   width: 320px;
   max-width: calc(100% - var(--space-md) * 2);
 }
@@ -1421,7 +1455,7 @@ function handlePromptSelect(prompt: string) {
   position: fixed;
   bottom: var(--space-lg);
   right: var(--space-lg);
-  z-index: 1000;
+  z-index: var(--z-overlay);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -1434,7 +1468,7 @@ function handlePromptSelect(prompt: string) {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   animation: slideIn 0.3s var(--ease-smooth);
@@ -1466,7 +1500,7 @@ function handlePromptSelect(prompt: string) {
 }
 
 .notification-toast.info .notification-icon {
-  background: rgba(99, 102, 241, 0.2);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
 }
 

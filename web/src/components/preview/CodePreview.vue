@@ -104,22 +104,22 @@ const lineNumbers = computed(() => {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-tertiary);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
 .language-badge {
   padding: 2px 8px;
   background: var(--accent);
-  color: white;
-  font-size: 11px;
+  color: var(--accent-fg);
+  font-size: var(--text-xs);
   font-weight: 600;
   border-radius: var(--radius-sm);
   text-transform: uppercase;
 }
 
 .line-count {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -130,9 +130,9 @@ const lineNumbers = computed(() => {
   margin-left: auto;
   padding: 4px 10px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -171,16 +171,12 @@ const lineNumbers = computed(() => {
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .code-container {
   flex: 1;
   display: flex;
   overflow: auto;
   font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.5;
 }
 
@@ -193,7 +189,7 @@ const lineNumbers = computed(() => {
   text-align: right;
   user-select: none;
   flex-shrink: 0;
-  border-right: 0.5px solid var(--border-default);
+  border-right: 1px solid var(--border-default);
 }
 
 .line-numbers span {

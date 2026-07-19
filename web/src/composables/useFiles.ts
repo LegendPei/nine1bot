@@ -1,6 +1,9 @@
 import { ref } from 'vue'
 import { api, type FileItem, type FileContent, type FileSearchResult } from '../api/client'
 
+// 文件内容超过该字符数时截断展示（约 500KB 文本）
+export const MAX_FILE_CONTENT_CHARS = 500 * 1024
+
 export interface FileTreeNode extends FileItem {
   children?: FileTreeNode[]
   isExpanded?: boolean
@@ -17,6 +20,8 @@ export function useFiles() {
   const fileContent = ref<FileContent | null>(null)
   const isLoadingContent = ref(false)
   const contentError = ref<string | null>(null)
+  // 大文件保护：内容被截断时置 true，FileViewer 据此显示提示条
+  const isContentTruncated = ref(false)
 
   // 文件搜索
   const searchResults = ref<FileSearchResult[]>([])
@@ -28,11 +33,19 @@ export function useFiles() {
     currentDirectory.value = directory
   }
 
+  // 递增请求序号，响应返回时只有最新请求才能写入状态（防乱序竞态）
+  let loadFilesRequest = 0
+  let loadContentRequest = 0
+  let contentRequestPath = ''
+  let searchRequest = 0
+
   async function loadFiles(path: string = '') {
+    const requestId = ++loadFilesRequest
     try {
       isLoading.value = true
       currentPath.value = path
       const items = await api.getFiles(path, currentDirectory.value)
+      if (requestId !== loadFilesRequest) return
 
       // 排序：目录在前，文件在后，按名称排序
       files.value = items
@@ -42,10 +55,13 @@ export function useFiles() {
           return a.type === 'directory' ? -1 : 1
         })
     } catch (error) {
+      if (requestId !== loadFilesRequest) return
       console.error('Failed to load files:', error)
       files.value = []
     } finally {
-      isLoading.value = false
+      if (requestId === loadFilesRequest) {
+        isLoading.value = false
+      }
     }
   }
 
@@ -76,16 +92,30 @@ export function useFiles() {
 
   // 加载文件内容
   async function loadFileContent(path: string) {
+    const requestId = ++loadContentRequest
+    contentRequestPath = path
     isLoadingContent.value = true
     contentError.value = null
+    isContentTruncated.value = false
     try {
-      fileContent.value = await api.getFileContent(path, currentDirectory.value)
+      const content = await api.getFileContent(path, currentDirectory.value)
+      if (requestId !== loadContentRequest || contentRequestPath !== path) return
+      // 大文件保护：超长文本截断，避免一次性渲染拖垮页面
+      if (content.content && content.content.length > MAX_FILE_CONTENT_CHARS) {
+        fileContent.value = { ...content, content: content.content.slice(0, MAX_FILE_CONTENT_CHARS) }
+        isContentTruncated.value = true
+      } else {
+        fileContent.value = content
+      }
     } catch (error: any) {
+      if (requestId !== loadContentRequest || contentRequestPath !== path) return
       console.error('Failed to load file content:', error)
       contentError.value = error.message || '无法加载文件内容'
       fileContent.value = null
     } finally {
-      isLoadingContent.value = false
+      if (requestId === loadContentRequest) {
+        isLoadingContent.value = false
+      }
     }
   }
 
@@ -93,10 +123,12 @@ export function useFiles() {
   function clearFileContent() {
     fileContent.value = null
     contentError.value = null
+    isContentTruncated.value = false
   }
 
   // 搜索文件
   async function searchFiles(pattern: string) {
+    const requestId = ++searchRequest
     if (!pattern.trim()) {
       searchResults.value = []
       return
@@ -105,13 +137,18 @@ export function useFiles() {
     isSearching.value = true
     searchError.value = null
     try {
-      searchResults.value = await api.searchFiles(pattern)
+      const results = await api.searchFiles(pattern)
+      if (requestId !== searchRequest) return
+      searchResults.value = results
     } catch (error: any) {
+      if (requestId !== searchRequest) return
       console.error('Failed to search files:', error)
       searchError.value = error.message || '搜索失败'
       searchResults.value = []
     } finally {
-      isSearching.value = false
+      if (requestId === searchRequest) {
+        isSearching.value = false
+      }
     }
   }
 
@@ -133,6 +170,7 @@ export function useFiles() {
     fileContent,
     isLoadingContent,
     contentError,
+    isContentTruncated,
     loadFileContent,
     clearFileContent,
     // 文件搜索

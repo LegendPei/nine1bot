@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { Plus, Search, FolderOpen, Clock, ArrowLeft, MessageSquare, Save, Pencil, Check, X, Folder, Trash2, Globe, EllipsisVertical, Upload } from 'lucide-vue-next'
 import { projectApi, type Session, type ProjectEnvironmentResponse, type ProjectSharedFile } from '../api/client'
 import type { ProjectInfo } from './Sidebar.vue'
@@ -13,7 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectProject: [projectId: string]
-  updateProject: [projectId: string, updates: { name?: string; instructions?: string }]
+  updateProject: [projectId: string, updates: { name?: string; instructions?: string }, done?: () => void]
   selectSession: [session: Session]
   newSession: [projectId: string]
   createProject: [name: string, instructions: string, directory?: string]
@@ -40,8 +40,11 @@ const showDeleteConfirm = ref(false)
 
 // Session context menu
 const sessionContextMenu = ref<{ x: number; y: number; session: Session } | null>(null)
+const sessionContextMenuEl = ref<HTMLElement | null>(null)
 const isRenamingSession = ref<string | null>(null)
 const renameSessionTitle = ref('')
+// 删除会话确认
+const deletingSession = ref<Session | null>(null)
 
 // Detail view state
 const isEditingName = ref(false)
@@ -177,11 +180,10 @@ function saveName() {
 async function saveInstructions() {
   if (!props.currentProject) return
   isSaving.value = true
-  try {
-    emit('updateProject', props.currentProject.id, { instructions: instructions.value })
-  } finally {
-    setTimeout(() => { isSaving.value = false }, 500)
-  }
+  // 保存状态由父级处理完成后通过回调复位，不再用固定时长假状态
+  emit('updateProject', props.currentProject.id, { instructions: instructions.value }, () => {
+    isSaving.value = false
+  })
 }
 
 async function saveEnvironmentVariable() {
@@ -192,7 +194,7 @@ async function saveEnvironmentVariable() {
   envError.value = ''
 
   if (!ENV_KEY_REGEX.test(key)) {
-    envError.value = 'Key must match ^[A-Z_][A-Z0-9_]*$'
+    envError.value = '变量名需匹配 ^[A-Z_][A-Z0-9_]*$'
     return
   }
 
@@ -204,7 +206,7 @@ async function saveEnvironmentVariable() {
     await loadEnvironment(props.currentProject.id)
   } catch (error) {
     console.error('Failed to save environment variable:', error)
-    envError.value = 'Failed to save variable'
+    envError.value = '保存变量失败'
   } finally {
     isSavingEnv.value = false
   }
@@ -274,7 +276,7 @@ function getProjectName(project: ProjectInfo): string {
 }
 
 function getSessionTitle(session: Session): string {
-  return session.title || `浼氳瘽 ${session.id.slice(0, 6)}`
+  return session.title || `会话 ${session.id.slice(0, 6)}`
 }
 
 function formatTime(timestamp: number): string {
@@ -284,11 +286,11 @@ function formatTime(timestamp: number): string {
   const days = Math.floor(diff / 86400000)
   const months = Math.floor(days / 30)
 
-  if (hours < 1) return 'just now'
-  if (hours < 24) return `${hours}h ago`
-  if (days < 7) return `${days}d ago`
-  if (months < 1) return `${Math.floor(days / 7)}w ago`
-  return `Updated ${months} month${months > 1 ? 's' : ''} ago`
+  if (hours < 1) return '刚刚'
+  if (hours < 24) return `${hours} 小时前`
+  if (days < 7) return `${days} 天前`
+  if (months < 1) return `${Math.floor(days / 7)} 周前`
+  return `${months} 个月前更新`
 }
 
 function confirmDeleteProject() {
@@ -337,6 +339,18 @@ const effectivePrompt = computed(() => {
 function openSessionContextMenu(e: MouseEvent, session: Session) {
   e.preventDefault()
   sessionContextMenu.value = { x: e.clientX, y: e.clientY, session }
+  // 视口边界钳制：菜单超出右/下边缘时向内收
+  void nextTick(() => {
+    const menu = sessionContextMenuEl.value
+    const current = sessionContextMenu.value
+    if (!menu || !current || current.session.id !== session.id) return
+    const rect = menu.getBoundingClientRect()
+    const x = Math.max(8, Math.min(current.x, window.innerWidth - rect.width - 8))
+    const y = Math.max(8, Math.min(current.y, window.innerHeight - rect.height - 8))
+    if (x !== current.x || y !== current.y) {
+      sessionContextMenu.value = { ...current, x, y }
+    }
+  })
 }
 
 function closeSessionContextMenu() {
@@ -365,8 +379,18 @@ function cancelSessionRename() {
 
 function contextMenuDeleteSession() {
   if (!sessionContextMenu.value) return
-  emit('deleteSession', sessionContextMenu.value.session.id)
+  deletingSession.value = sessionContextMenu.value.session
   closeSessionContextMenu()
+}
+
+function cancelDeleteSession() {
+  deletingSession.value = null
+}
+
+function confirmDeleteSession() {
+  if (!deletingSession.value) return
+  emit('deleteSession', deletingSession.value.id)
+  deletingSession.value = null
 }
 </script>
 
@@ -378,7 +402,7 @@ function contextMenuDeleteSession() {
         <!-- Back button -->
         <button class="back-btn" @click="emit('selectProject', '')">
           <ArrowLeft :size="16" />
-          <span>Back to Projects</span>
+          <span>返回项目列表</span>
         </button>
 
         <!-- Project Header -->
@@ -402,7 +426,7 @@ function contextMenuDeleteSession() {
             <div v-else class="project-name-display">
               <h2 class="project-name-text">{{ getProjectName(currentProject) }}</h2>
               <button class="icon-btn" @click="startEditName"><Pencil :size="14" /></button>
-              <button class="icon-btn danger-icon" @click="showDeleteConfirm = true" title="Forget Project">
+              <button class="icon-btn danger-icon" @click="showDeleteConfirm = true" title="移除项目">
                 <Trash2 :size="14" />
               </button>
             </div>
@@ -413,19 +437,19 @@ function contextMenuDeleteSession() {
         <!-- Sessions Section -->
         <div class="project-section">
           <div class="project-section-header">
-            <h3 class="project-section-title">Sessions</h3>
+            <h3 class="project-section-title">会话</h3>
             <button class="btn btn-ghost btn-sm" @click="emit('newSession', currentProject.id)">
               <Plus :size="14" />
-              <span>New Session</span>
+              <span>新建会话</span>
             </button>
           </div>
 
           <div v-if="isLoadingSessions" class="sessions-loading">
-            Loading sessions...
+            正在加载会话...
           </div>
 
           <div v-else-if="sessions.length === 0" class="sessions-empty">
-            No sessions in this project yet. Create one to get started.
+            该项目下暂无会话，创建一个开始使用。
           </div>
 
           <div v-else class="sessions-list">
@@ -457,7 +481,7 @@ function contextMenuDeleteSession() {
                   {{ formatTime(session.time.updated) }}
                 </span>
                 <div class="session-row-actions" @click.stop>
-                  <button class="session-action-btn" @click="openSessionContextMenu($event, session)" title="More actions">
+                  <button class="session-action-btn" @click="openSessionContextMenu($event, session)" title="更多操作">
                     <EllipsisVertical :size="14" />
                   </button>
                 </div>
@@ -469,45 +493,45 @@ function contextMenuDeleteSession() {
         <!-- Instructions Section -->
         <div class="project-section">
           <div class="project-section-header">
-            <h3 class="project-section-title">Project Instructions</h3>
+            <h3 class="project-section-title">项目指令</h3>
           </div>
-          <p class="project-section-desc">These instructions will be shared across all sessions in this project.</p>
+          <p class="project-section-desc">这些指令会共享给该项目下的所有会话。</p>
           <textarea
             v-model="instructions"
             class="project-instructions-input"
-            placeholder="Enter instructions for this project... (e.g., 'You are a helpful assistant. Always respond in Chinese.')"
+            placeholder="输入该项目的指令…（例如「你是一个乐于助人的助手，始终用中文回答。」）"
             rows="6"
           ></textarea>
           <div class="project-section-actions">
             <button class="btn btn-primary btn-sm" @click="saveInstructions" :disabled="isSaving">
               <Save :size="14" />
-              <span>{{ isSaving ? 'Saving...' : 'Save' }}</span>
+              <span>{{ isSaving ? '保存中...' : '保存' }}</span>
             </button>
           </div>
         </div>
 
         <div class="project-section">
           <div class="project-section-header">
-            <h3 class="project-section-title">Environment Variables</h3>
+            <h3 class="project-section-title">环境变量</h3>
           </div>
-          <p class="project-section-desc">Values are for execution only. Prompt only receives variable keys.</p>
+          <p class="project-section-desc">变量值仅用于执行，提示词中只会包含变量名。</p>
           <div class="env-form">
             <input v-model="envKey" class="dialog-input" placeholder="KEY_NAME" />
-            <input v-model="envValue" class="dialog-input" placeholder="Value" />
+            <input v-model="envValue" class="dialog-input" placeholder="变量值" />
             <button class="btn btn-primary btn-sm" @click="saveEnvironmentVariable" :disabled="isSavingEnv">
               <Plus :size="14" />
-              <span>{{ isSavingEnv ? 'Saving...' : 'Set' }}</span>
+              <span>{{ isSavingEnv ? '保存中...' : '设置' }}</span>
             </button>
           </div>
           <p v-if="envError" class="env-error">{{ envError }}</p>
 
           <div v-if="environment.keys.length === 0" class="sessions-empty">
-            No environment variables configured.
+            尚未配置环境变量。
           </div>
           <div v-else class="shared-files-list">
             <div v-for="key in environment.keys" :key="key" class="shared-file-row">
               <span class="shared-file-name">{{ key }}</span>
-              <span class="shared-file-meta">configured</span>
+              <span class="shared-file-meta">已配置</span>
               <button class="session-action-btn danger" @click="deleteEnvironmentVariable(key)">
                 <Trash2 :size="14" />
               </button>
@@ -517,17 +541,17 @@ function contextMenuDeleteSession() {
 
         <div class="project-section">
           <div class="project-section-header">
-            <h3 class="project-section-title">Shared Files</h3>
+            <h3 class="project-section-title">共享文件</h3>
             <button class="btn btn-ghost btn-sm" @click="triggerSharedFileUpload" :disabled="isUploadingSharedFile">
               <Upload :size="14" />
-              <span>{{ isUploadingSharedFile ? 'Uploading...' : 'Upload File' }}</span>
+              <span>{{ isUploadingSharedFile ? '上传中...' : '上传文件' }}</span>
             </button>
           </div>
-          <p class="project-section-desc">Stored under <code>.nine1bot/projectfiles</code>.</p>
+          <p class="project-section-desc">存储在 <code>.nine1bot/projectfiles</code> 目录下。</p>
           <input ref="sharedFileInput" type="file" style="display: none" @change="onSharedFilePicked" />
 
-          <div v-if="isLoadingSharedFiles" class="sessions-loading">Loading shared files...</div>
-          <div v-else-if="sharedFiles.length === 0" class="sessions-empty">No shared files yet.</div>
+          <div v-if="isLoadingSharedFiles" class="sessions-loading">正在加载共享文件...</div>
+          <div v-else-if="sharedFiles.length === 0" class="sessions-empty">暂无共享文件。</div>
           <div v-else class="shared-files-list">
             <div v-for="file in sharedFiles" :key="file.relativePath" class="shared-file-row">
               <span class="shared-file-name">{{ file.relativePath }}</span>
@@ -544,11 +568,11 @@ function contextMenuDeleteSession() {
           <div class="project-section-header">
             <h3 class="project-section-title">
               <Globe :size="14" style="vertical-align: -2px; margin-right: 4px;" />
-              Effective Prompt
+              生效提示词
             </h3>
           </div>
           <p class="project-section-desc">
-            Combined view of global preferences and project instructions that will be applied to all sessions.
+            全局偏好与项目指令的组合视图，将应用于该项目下所有会话。
           </p>
           <div class="effective-prompt-preview">
             <pre class="effective-prompt-text">{{ effectivePrompt }}</pre>
@@ -562,10 +586,10 @@ function contextMenuDeleteSession() {
       <div class="projects-list-content">
         <!-- Header -->
         <div class="projects-list-header">
-          <h1 class="projects-title">Projects</h1>
+          <h1 class="projects-title">项目</h1>
           <button class="btn btn-primary create-project-btn" @click="showCreateDialog = true">
             <FolderOpen :size="16" />
-            <span>Open Directory</span>
+            <span>打开目录</span>
           </button>
         </div>
 
@@ -576,7 +600,7 @@ function contextMenuDeleteSession() {
             v-model="searchQuery"
             type="text"
             class="projects-search-input"
-            placeholder="Search projects..."
+            placeholder="搜索项目..."
           />
         </div>
 
@@ -597,16 +621,16 @@ function contextMenuDeleteSession() {
         </div>
 
         <div v-else-if="searchQuery" class="projects-empty">
-          <p>No projects matching "{{ searchQuery }}"</p>
+          <p>没有匹配 "{{ searchQuery }}" 的项目</p>
         </div>
 
         <div v-else class="projects-empty">
           <FolderOpen :size="48" class="empty-icon" />
-          <p class="empty-title">No projects yet</p>
-          <p class="empty-desc">Open a directory to discover and manage its project settings.</p>
+          <p class="empty-title">暂无项目</p>
+          <p class="empty-desc">打开一个目录，即可发现和管理它的项目设置。</p>
           <button class="btn btn-primary" @click="showCreateDialog = true">
             <FolderOpen :size="16" />
-            <span>Open your first directory</span>
+            <span>打开第一个目录</span>
           </button>
         </div>
       </div>
@@ -617,18 +641,18 @@ function contextMenuDeleteSession() {
       <div v-if="showCreateDialog" class="dialog-overlay" @click="showCreateDialog = false">
         <div class="create-project-dialog" @click.stop>
           <div class="dialog-header">
-            <span>Open Directory</span>
+            <span>打开目录</span>
             <button class="action-btn" @click="showCreateDialog = false">
               <X :size="16" />
             </button>
           </div>
           <div class="dialog-body">
             <div class="form-group">
-              <label class="form-label">Directory</label>
+              <label class="form-label">目录</label>
               <div class="directory-picker-row">
                 <button class="directory-pick-btn" @click="pickDirectory">
                   <Folder :size="14" />
-                  <span>{{ newProjectDirectory || 'Choose directory' }}</span>
+                  <span>{{ newProjectDirectory || '选择目录' }}</span>
                 </button>
                 <button v-if="newProjectDirectory" class="icon-btn" @click="newProjectDirectory = ''">
                   <X :size="14" />
@@ -636,30 +660,30 @@ function contextMenuDeleteSession() {
               </div>
             </div>
             <div class="form-group">
-              <label class="form-label">Project name (optional)</label>
+              <label class="form-label">项目名称（可选）</label>
               <input
                 v-model="newProjectName"
                 type="text"
                 class="dialog-input"
-                placeholder="My Project"
+                placeholder="我的项目"
                 @keyup.enter="handleCreateProject"
                 autofocus
               />
             </div>
             <div class="form-group">
-              <label class="form-label">Instructions (optional)</label>
+              <label class="form-label">指令（可选）</label>
               <textarea
                 v-model="newProjectInstructions"
                 class="dialog-textarea"
-                placeholder="Add custom instructions for this project..."
+                placeholder="为该项目添加自定义指令..."
                 rows="4"
               ></textarea>
             </div>
           </div>
           <div class="dialog-footer">
-            <button class="btn btn-ghost btn-sm" @click="showCreateDialog = false">Cancel</button>
+            <button class="btn btn-ghost btn-sm" @click="showCreateDialog = false">取消</button>
             <button class="btn btn-primary btn-sm" @click="handleCreateProject" :disabled="!newProjectDirectory.trim()">
-              Open Directory
+              打开目录
             </button>
           </div>
         </div>
@@ -671,20 +695,45 @@ function contextMenuDeleteSession() {
       <div v-if="showDeleteConfirm" class="dialog-overlay" @click="showDeleteConfirm = false">
         <div class="dialog" @click.stop>
           <div class="dialog-header">
-            <span>Forget Project</span>
+            <span>移除项目</span>
             <button class="action-btn" @click="showDeleteConfirm = false">
               <X :size="16" />
             </button>
           </div>
           <div class="dialog-body">
-            <p class="dialog-message">Forget project "{{ currentProject ? getProjectName(currentProject) : '' }}"?</p>
-            <p class="dialog-warning">This only hides it from the list. Directory and files are not deleted.</p>
+            <p class="dialog-message">确定要移除项目 "{{ currentProject ? getProjectName(currentProject) : '' }}" 吗？</p>
+            <p class="dialog-warning">只会从列表中隐藏，目录和文件不会被删除。</p>
           </div>
           <div class="dialog-footer">
-            <button class="btn btn-ghost btn-sm" @click="showDeleteConfirm = false">Cancel</button>
+            <button class="btn btn-ghost btn-sm" @click="showDeleteConfirm = false">取消</button>
             <button class="btn btn-danger btn-sm" @click="confirmDeleteProject">
               <Trash2 :size="14" />
-              Forget
+              移除
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Delete Session Confirmation Dialog -->
+    <Teleport to="body">
+      <div v-if="deletingSession" class="dialog-overlay" @click="cancelDeleteSession">
+        <div class="dialog" @click.stop>
+          <div class="dialog-header">
+            <span>删除会话</span>
+            <button class="action-btn" @click="cancelDeleteSession">
+              <X :size="16" />
+            </button>
+          </div>
+          <div class="dialog-body">
+            <p class="dialog-message">确定要删除会话 "{{ getSessionTitle(deletingSession) }}" 吗？</p>
+            <p class="dialog-warning">此操作不可撤销，所有消息将被永久删除。</p>
+          </div>
+          <div class="dialog-footer">
+            <button class="btn btn-ghost btn-sm" @click="cancelDeleteSession">取消</button>
+            <button class="btn btn-danger btn-sm" @click="confirmDeleteSession">
+              <Trash2 :size="14" />
+              删除
             </button>
           </div>
         </div>
@@ -700,18 +749,19 @@ function contextMenuDeleteSession() {
         @contextmenu.prevent="closeSessionContextMenu"
       >
         <div
+          ref="sessionContextMenuEl"
           class="context-menu"
           :style="{ left: sessionContextMenu.x + 'px', top: sessionContextMenu.y + 'px' }"
           @click.stop
         >
           <button class="context-menu-item" @click="contextMenuRenameSession">
             <Pencil :size="14" />
-            <span>Rename</span>
+            <span>重命名</span>
           </button>
           <div class="context-menu-divider"></div>
           <button class="context-menu-item danger" @click="contextMenuDeleteSession">
             <Trash2 :size="14" />
-            <span>Delete</span>
+            <span>删除</span>
           </button>
         </div>
       </div>
@@ -760,7 +810,7 @@ function contextMenuDeleteSession() {
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 /* Search */
@@ -786,7 +836,7 @@ function contextMenuDeleteSession() {
   border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   outline: none;
   transition: border-color 0.2s ease;
 }
@@ -824,15 +874,14 @@ function contextMenuDeleteSession() {
 }
 
 .project-card-name {
-  font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: var(--text-md);
   font-weight: 600;
   color: var(--text-primary);
   margin: 0 0 var(--space-sm) 0;
 }
 
 .project-card-desc {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-secondary);
   line-height: 1.5;
   margin: 0;
@@ -840,7 +889,7 @@ function contextMenuDeleteSession() {
 }
 
 .project-card-time {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   margin-top: var(--space-md);
 }
@@ -862,14 +911,14 @@ function contextMenuDeleteSession() {
 }
 
 .projects-empty .empty-title {
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 500;
   color: var(--text-secondary);
   margin: 0 0 var(--space-xs) 0;
 }
 
 .projects-empty .empty-desc {
-  font-size: 14px;
+  font-size: var(--text-base);
   margin: 0 0 var(--space-lg) 0;
   max-width: 400px;
 }
@@ -893,7 +942,7 @@ function contextMenuDeleteSession() {
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
@@ -964,7 +1013,7 @@ function contextMenuDeleteSession() {
 }
 
 .project-path {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   font-family: var(--font-mono, monospace);
 }
@@ -999,7 +1048,7 @@ function contextMenuDeleteSession() {
   flex-direction: column;
   gap: var(--space-sm);
   padding: var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   background: var(--bg-composer);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
@@ -1018,15 +1067,14 @@ function contextMenuDeleteSession() {
 }
 
 .project-section-title {
-  font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
 }
 
 .project-section-desc {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   margin: 0;
   line-height: 1.5;
@@ -1040,7 +1088,7 @@ function contextMenuDeleteSession() {
   border-radius: var(--radius-md);
   color: var(--text-primary);
   font-family: var(--font-serif);
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
   resize: vertical;
   outline: none;
@@ -1074,14 +1122,14 @@ function contextMenuDeleteSession() {
 
 .env-error {
   color: var(--error);
-  font-size: 12px;
+  font-size: var(--text-sm);
   margin: 0;
 }
 
 .shared-files-list {
   display: flex;
   flex-direction: column;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
@@ -1092,7 +1140,7 @@ function contextMenuDeleteSession() {
   gap: 8px;
   align-items: center;
   padding: 10px 12px;
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .shared-file-row:last-child {
@@ -1101,7 +1149,7 @@ function contextMenuDeleteSession() {
 
 .shared-file-name {
   font-family: var(--font-mono, monospace);
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1109,7 +1157,7 @@ function contextMenuDeleteSession() {
 }
 
 .shared-file-meta {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -1119,13 +1167,13 @@ function contextMenuDeleteSession() {
   padding: 24px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .sessions-list {
   display: flex;
   flex-direction: column;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--bg-primary);
@@ -1140,8 +1188,7 @@ function contextMenuDeleteSession() {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   text-align: left;
   cursor: pointer;
   transition: background var(--transition-fast), transform var(--transition-fast);
@@ -1149,7 +1196,7 @@ function contextMenuDeleteSession() {
 }
 
 .session-row:not(:last-child) {
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .session-row:hover {
@@ -1175,7 +1222,7 @@ function contextMenuDeleteSession() {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -1221,7 +1268,7 @@ function contextMenuDeleteSession() {
 /* === Create Project Dialog === */
 .create-project-dialog {
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
   width: 480px;
   max-width: 90vw;
@@ -1238,7 +1285,7 @@ function contextMenuDeleteSession() {
 
 .form-label {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-secondary);
   margin-bottom: var(--space-xs);
@@ -1248,10 +1295,10 @@ function contextMenuDeleteSession() {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .dialog-input:focus {
@@ -1263,11 +1310,11 @@ function contextMenuDeleteSession() {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-family: var(--font-serif);
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.5;
   resize: vertical;
   min-height: 80px;
@@ -1296,11 +1343,11 @@ function contextMenuDeleteSession() {
   padding: 8px 14px;
   width: 100%;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   transition: all var(--transition-fast);
   text-align: left;
@@ -1328,7 +1375,7 @@ function contextMenuDeleteSession() {
   min-width: 0;
   padding: 2px 8px;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-primary);
   background: var(--bg-primary);
   border: 1px solid var(--accent);
@@ -1339,7 +1386,7 @@ function contextMenuDeleteSession() {
 /* Effective Prompt */
 .effective-prompt-preview {
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: 14px 16px;
   max-height: 300px;
@@ -1372,7 +1419,7 @@ function contextMenuDeleteSession() {
 
 .effective-prompt-text {
   font-family: var(--font-serif);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.7;
   color: var(--text-secondary);
   white-space: pre-wrap;
@@ -1384,18 +1431,18 @@ function contextMenuDeleteSession() {
 .context-menu-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1100;
+  z-index: var(--z-context-overlay);
 }
 
 .context-menu {
   position: fixed;
   min-width: 180px;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   padding: 4px;
-  z-index: 1101;
+  z-index: var(--z-context-menu);
   animation: menuIn 0.1s ease-out;
 }
 
@@ -1414,7 +1461,7 @@ function contextMenuDeleteSession() {
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
@@ -1435,7 +1482,7 @@ function contextMenuDeleteSession() {
 }
 
 .context-menu-divider {
-  height: 0.5px;
+  height: 1px;
   background: var(--border-subtle);
   margin: 4px 0;
 }

@@ -95,7 +95,7 @@ const rejectQuestion = () => {
           <line x1="12" y1="17" x2="12.01" y2="17"/>
         </svg>
       </div>
-      <span class="question-label">AI needs your input</span>
+      <span class="question-label">AI 需要你的输入</span>
     </div>
 
     <div v-for="(question, qIndex) in request.questions" :key="qIndex" class="question-item">
@@ -120,7 +120,7 @@ const rejectQuestion = () => {
           v-model="customInputs[qIndex]"
           type="text"
           class="custom-input"
-          placeholder="Or type your own answer..."
+          placeholder="或者输入你自己的回答..."
           :disabled="isAnswered || isSubmitting"
           @keyup.enter="submitAnswer"
         />
@@ -129,7 +129,7 @@ const rejectQuestion = () => {
 
     <div v-if="!isAnswered" class="question-actions">
       <button class="btn btn-ghost" :disabled="isSubmitting" @click="rejectQuestion">
-        Skip
+        跳过
       </button>
       <button
         class="btn btn-primary"
@@ -137,7 +137,7 @@ const rejectQuestion = () => {
         @click="submitAnswer"
       >
         <span v-if="isSubmitting" class="loading-spinner small"></span>
-        <span v-else>Submit</span>
+        <span v-else>提交</span>
       </button>
     </div>
 
@@ -145,7 +145,7 @@ const rejectQuestion = () => {
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M20 6L9 17l-5-5"/>
       </svg>
-      <span>Answered</span>
+      <span>已回答</span>
     </div>
   </div>
 </template>
@@ -153,7 +153,7 @@ const rejectQuestion = () => {
 <style scoped>
 .agent-question {
   background: var(--glass-bg);
-  border: 0.5px solid var(--glass-border);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   margin: var(--space-sm) 0;
@@ -211,7 +211,7 @@ const rejectQuestion = () => {
   align-items: flex-start;
   padding: var(--space-sm) var(--space-md);
   background: var(--surface-2);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -253,7 +253,7 @@ const rejectQuestion = () => {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
   background: var(--surface-1);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.875rem;
@@ -274,7 +274,7 @@ const rejectQuestion = () => {
   justify-content: flex-end;
   gap: var(--space-sm);
   padding-top: var(--space-sm);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .question-answered {
@@ -285,7 +285,7 @@ const rejectQuestion = () => {
   font-size: 0.75rem;
   font-weight: 500;
   padding-top: var(--space-sm);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .loading-spinner.small {

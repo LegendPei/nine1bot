@@ -17,7 +17,7 @@ const terminalViewerRef = ref<InstanceType<typeof AgentTerminalViewer> | null>(n
 
 // 获取终端状态颜色
 function getStatusColor(status: string): string {
-  return status === 'running' ? 'var(--success, #10b981)' : 'var(--text-muted)'
+  return status === 'running' ? 'var(--success)' : 'var(--text-muted)'
 }
 
 // 格式化时间
@@ -127,7 +127,7 @@ defineExpose({ fit })
   flex-wrap: wrap;
   gap: var(--space-xs);
   padding: var(--space-sm);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
@@ -137,9 +137,9 @@ defineExpose({ fit })
   gap: 6px;
   padding: 6px 10px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -152,7 +152,7 @@ defineExpose({ fit })
 .terminal-tab.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .terminal-tab.exited {
@@ -160,7 +160,7 @@ defineExpose({ fit })
 }
 
 .terminal-tab.active .status-dot {
-  border: 0.5px solid white;
+  border: 1px solid white;
 }
 
 .status-dot {
@@ -178,8 +178,7 @@ defineExpose({ fit })
 }
 
 .tab-time {
-  font-size: 10px;
-  opacity: 0.7;
+  font-size: var(--text-xs);
 }
 
 .close-tab-btn {
@@ -200,7 +199,7 @@ defineExpose({ fit })
 
 .close-tab-btn:hover {
   opacity: 1;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--active-overlay);
 }
 
 .terminal-body {
@@ -218,7 +217,7 @@ defineExpose({ fit })
   padding: var(--space-xs) var(--space-sm);
   background: var(--bg-secondary);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   margin-bottom: var(--space-sm);
   flex-shrink: 0;
@@ -241,22 +240,17 @@ defineExpose({ fit })
 }
 
 .close-single-btn:hover {
-  background: var(--danger, #f7768e);
+  background: var(--danger);
   color: white;
 }
 
 .separator {
-  color: var(--border-default);
+  color: var(--text-subtle);
 }
 
+/* 空状态：使用全局 .empty-state，此处仅补充布局 */
 .empty-state {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  text-align: center;
   padding: var(--space-lg);
 }
 
@@ -266,8 +260,7 @@ defineExpose({ fit })
 }
 
 .empty-hint {
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: var(--text-sm);
   margin-top: var(--space-xs);
 }
 </style>

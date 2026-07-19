@@ -175,6 +175,8 @@ export function useSession() {
    * 不会立即调用后端 API，只有发送消息时才真正创建
    */
   function createSession(directory: string) {
+    // 使任何在途的选择/创建请求失效，防止其返回后抢占新草稿
+    selectionVersion++
     // 进入草稿模式，清空当前会话状态
     isDraftSession.value = true
     currentSession.value = null
@@ -324,11 +326,18 @@ export function useSession() {
     directory: string,
     pageContext?: Awaited<ReturnType<typeof collectActivePageContext>>
   ): Promise<Session> {
+    const requestVersion = ++selectionVersion
     try {
       isLoading.value = true
       setApiDirectory(directory)
       reconnectEventsForDirectory()
       const session = await api.createSession(directory, pageContext)
+      // 创建请求在途期间用户可能已选择其他会话：新会话照常加入列表，
+      // 但不抢占 currentSession、不订阅其事件流
+      if (requestVersion !== selectionVersion) {
+        await loadSessions()
+        return session
+      }
       currentSession.value = session
       isDraftSession.value = false
       // 使用服务器返回的实际目录，而不是传入的参数
@@ -344,7 +353,9 @@ export function useSession() {
       console.error('Failed to create session:', error)
       throw error
     } finally {
-      isLoading.value = false
+      if (requestVersion === selectionVersion) {
+        isLoading.value = false
+      }
     }
   }
 
@@ -368,15 +379,7 @@ export function useSession() {
       reconnectEventsForDirectory()
       unsubscribeSessionRuntimeEvents()
       messages.value = []  // Clear immediately to avoid flash of old content
-      const initialGeneration = sessionEventReconciler.begin(session.id)
-      sessionEventGeneration = initialGeneration
-      await reconcileSession(session.id, initialGeneration)
-      if (
-        requestVersion !== selectionVersion ||
-        currentSession.value?.id !== session.id
-      ) {
-        return
-      }
+      // reconcile 统一由 openSessionEventStreamAndReconcile 在事件流就绪后执行一次
       await openSessionEventStreamAndReconcile(session.id)
     } catch (error) {
       if (requestVersion === selectionVersion) {
@@ -426,7 +429,7 @@ export function useSession() {
     content: string,
     model?: { providerID: string; modelID: string },
     files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>
-  ) {
+  ): Promise<boolean> {
     const draftPageContext =
       isDraftSession.value || !currentSession.value
         ? await collectActivePageContext().catch((error) => {
@@ -437,13 +440,13 @@ export function useSession() {
     // 如果是草稿模式或没有当前会话，先创建会话
     const ensuredSession = await ensureSession(draftPageContext)
     if (!ensuredSession) {
-      return
+      return false
     }
 
-    if (!currentSession.value) return
+    if (!currentSession.value) return false
 
     // Check if this session is already streaming
-    if (isSessionRunning(currentSession.value.id)) return
+    if (isSessionRunning(currentSession.value.id)) return false
 
     // Check parallel limit
     if (!canStartNewAgent.value) {
@@ -451,7 +454,7 @@ export function useSession() {
         message: `最多支持 ${MAX_PARALLEL_AGENTS} 个并行 agent，请等待其中一个完成`,
         dismissable: true
       }
-      return
+      return false
     }
 
     // Mark session as running BEFORE the API call
@@ -486,32 +489,43 @@ export function useSession() {
         }))
       const sendResult = await api.sendMessage(sessionId, content, files, pageContext)
       showContextEnrichmentNotice(sessionId, sendResult.contextEnrichment)
+      return true
     } catch (error: any) {
       // Ignore abort errors
       const errorMessage = error.message?.toLowerCase() || ''
       if (errorMessage.includes('aborted') || errorMessage.includes('abort') || error.name === 'AbortError') {
         console.log('Request aborted')
         await reconcileCurrentSessionState(sessionId)
-        return
+        return false
       }
       // Handle session busy error
       if (error instanceof SessionBusyError) {
         console.log('Session is busy:', error.sessionID)
-        sessionError.value = {
-          message: '该会话正在被其他客户端使用中，请稍后重试或创建新会话',
-          dismissable: true
+        // 用户可能已切换到其他会话，仅在仍是当前会话时展示错误
+        if (currentSession.value?.id === sessionId) {
+          sessionError.value = {
+            message: '该会话正在被其他客户端使用中，请稍后重试或创建新会话',
+            dismissable: true
+          }
         }
         await reconcileCurrentSessionState(sessionId)
-        return
+        return false
       }
       console.error('Failed to send message:', error)
-      sessionError.value = {
-        message: `发送失败: ${error.message || '未知错误'}`,
-        dismissable: true
+      // 用户可能已切换到其他会话，仅在仍是当前会话时展示错误
+      if (currentSession.value?.id === sessionId) {
+        sessionError.value = {
+          message: `发送失败: ${error.message || '未知错误'}`,
+          dismissable: true
+        }
       }
       await reconcileCurrentSessionState(sessionId)
+      return false
     } finally {
-      streamingMessage.value = null
+      // 仅在仍是当前会话时清理流式指示，避免清掉新会话的状态
+      if (currentSession.value?.id === sessionId) {
+        streamingMessage.value = null
+      }
       // Note: Don't set running to false here - SSE events will handle that via session.idle
     }
   }
@@ -949,6 +963,17 @@ export function useSession() {
           const reconnectGeneration = sessionEventReconciler.begin(sessionId)
           sessionEventGeneration = reconnectGeneration
           void reconcileSession(sessionId, reconnectGeneration)
+        },
+        onGiveUp() {
+          if (subscriptionVersion !== sessionEventSubscriptionVersion) return
+          // 重连彻底失败：复位 running 状态，避免 runningCount 泄漏锁死新 agent
+          setSessionRunning(sessionId, false)
+          if (currentSession.value?.id === sessionId) {
+            sessionError.value = {
+              message: '连接已断开，请刷新或重新发送',
+              dismissable: true
+            }
+          }
         },
       },
     )

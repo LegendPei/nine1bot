@@ -70,6 +70,19 @@ const enabledMcpServers = computed(() =>
   mcpServers.value.filter((server) => server.status !== 'disabled'),
 )
 
+function getStatusText(status: string): string {
+  switch (status) {
+    case 'connected': return '已连接'
+    case 'connecting': return '连接中...'
+    case 'auth_in_progress': return '授权中...'
+    case 'disabled': return '已断开'
+    case 'failed': return '连接失败'
+    case 'needs_auth': return '需要授权'
+    case 'needs_client_registration': return '需要静态客户端'
+    default: return status
+  }
+}
+
 const selectedModelParts = computed(() => {
   if (!selectedModel.value) return null
   const [providerID, ...modelParts] = selectedModel.value.split('/')
@@ -333,7 +346,7 @@ onUnmounted(() => {
                 <span class="resource-icon"><Wrench :size="16" /></span>
                 <span class="resource-main">
                   <strong>{{ server.name }}</strong>
-                  <small>{{ server.status }}<template v-if="server.tools?.length"> · {{ server.tools.length }} tools</template></small>
+                  <small>{{ getStatusText(server.status) }}<template v-if="server.tools?.length"> · {{ server.tools.length }} 个工具</template></small>
                 </span>
                 <CheckCircle2 v-if="selectedMcpServers.includes(server.name)" :size="16" />
               </button>
@@ -364,9 +377,9 @@ onUnmounted(() => {
           </section>
 
           <section v-if="activeTab === 'relay'" class="settings-section">
-            <h3>Browser relay</h3>
-            <p>修改浏览器插件连接到的 Nine1Bot Origin。Bootstrap 与 WebSocket endpoint 会自动派生。</p>
-            <label>Browser relay origin</label>
+            <h3>浏览器 relay</h3>
+            <p>修改浏览器插件连接到的 Nine1Bot Origin。Bootstrap 与 WebSocket 端点会自动派生。</p>
+            <label>浏览器 relay Origin</label>
             <input v-model="relayDraft" type="url" spellcheck="false" placeholder="http://127.0.0.1:4096" />
             <div class="relay-actions">
               <button class="primary-btn" type="button" @click="saveRelay">保存并重连</button>
@@ -378,7 +391,7 @@ onUnmounted(() => {
                 <code>{{ relaySettings.bootstrapUrl || '-' }}</code>
               </div>
               <div>
-                <span>Extension</span>
+                <span>插件</span>
                 <code>{{ relaySettings.extensionUrl || '-' }}</code>
               </div>
             </div>
@@ -425,7 +438,7 @@ onUnmounted(() => {
 
 .modal-header h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-md);
   font-weight: 650;
 }
 
@@ -462,7 +475,7 @@ onUnmounted(() => {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
 }
 
@@ -481,14 +494,14 @@ onUnmounted(() => {
 
 .settings-section h3 {
   margin: 0 0 6px;
-  font-size: 15px;
+  font-size: var(--text-md);
   font-weight: 650;
 }
 
 .settings-section p {
   margin: 0 0 18px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.5;
 }
 
@@ -499,13 +512,13 @@ onUnmounted(() => {
   background: var(--bg-secondary);
   color: var(--text-muted);
   text-align: center;
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .default-card,
 .model-card,
 .resource-card {
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-primary);
@@ -559,8 +572,8 @@ onUnmounted(() => {
   padding: 2px 8px;
   border-radius: var(--radius-full);
   background: var(--warning-subtle, rgba(245, 158, 11, 0.12));
-  color: var(--warning, #b45309);
-  font-size: 11px;
+  color: var(--warning);
+  font-size: var(--text-xs);
 }
 
 .auth-badge.ok {
@@ -610,7 +623,7 @@ onUnmounted(() => {
 .model-card strong,
 .resource-card strong {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 600;
 }
 
@@ -620,14 +633,14 @@ onUnmounted(() => {
   display: block;
   margin-top: 4px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.35;
 }
 
 textarea,
 input {
   width: 100%;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
@@ -644,14 +657,14 @@ textarea {
 input {
   height: 38px;
   padding: 0 11px;
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 label {
   display: block;
   margin-bottom: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
@@ -686,7 +699,7 @@ label {
   border: 0;
   border-radius: var(--radius-md);
   padding: 0 13px;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 600;
   cursor: pointer;
 }
@@ -717,7 +730,7 @@ label {
   gap: 8px;
   align-items: start;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 code {
@@ -734,7 +747,7 @@ code {
   gap: 8px;
   margin-top: 14px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .modal-footer {
@@ -743,13 +756,13 @@ code {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 24px 18px;
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .status-message {
   min-height: 18px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .status-message.success {

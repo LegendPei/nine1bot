@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
+import type { ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { agentTerminalApi } from '../api/client'
@@ -30,6 +31,36 @@ let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeTimeout: ReturnType<typeof setTimeout> | null = null
+let themeObserver: MutationObserver | null = null
+
+// 从设计 token 读取终端配色（亮/暗主题各一套，定义在 style.css）
+function readTerminalTheme(): ITheme {
+  const css = getComputedStyle(document.documentElement)
+  const v = (name: string) => css.getPropertyValue(name).trim()
+  return {
+    background: v('--terminal-bg'),
+    foreground: v('--terminal-fg'),
+    cursor: v('--terminal-cursor'),
+    cursorAccent: v('--terminal-bg'),
+    selectionBackground: v('--terminal-selection'),
+    black: v('--terminal-black'),
+    red: v('--terminal-red'),
+    green: v('--terminal-green'),
+    yellow: v('--terminal-yellow'),
+    blue: v('--terminal-blue'),
+    magenta: v('--terminal-magenta'),
+    cyan: v('--terminal-cyan'),
+    white: v('--terminal-white'),
+    brightBlack: v('--terminal-bright-black'),
+    brightRed: v('--terminal-bright-red'),
+    brightGreen: v('--terminal-bright-green'),
+    brightYellow: v('--terminal-bright-yellow'),
+    brightBlue: v('--terminal-bright-blue'),
+    brightMagenta: v('--terminal-bright-magenta'),
+    brightCyan: v('--terminal-bright-cyan'),
+    brightWhite: v('--terminal-bright-white'),
+  }
+}
 
 // 当前后端终端的尺寸
 let currentBackendRows = props.rows || 24
@@ -51,29 +82,7 @@ onMounted(async () => {
     cursorBlink: isRunning,  // 运行中时光标闪烁
     disableStdin: false,  // 允许输入
     scrollback: 5000,  // 增加滚动历史行数
-    theme: {
-      background: '#1a1b26',
-      foreground: '#a9b1d6',
-      cursor: '#c0caf5',
-      cursorAccent: '#1a1b26',
-      selectionBackground: '#33467c',
-      black: '#32344a',
-      red: '#f7768e',
-      green: '#9ece6a',
-      yellow: '#e0af68',
-      blue: '#7aa2f7',
-      magenta: '#ad8ee6',
-      cyan: '#449dab',
-      white: '#787c99',
-      brightBlack: '#444b6a',
-      brightRed: '#ff7a93',
-      brightGreen: '#b9f27c',
-      brightYellow: '#ff9e64',
-      brightBlue: '#7da6ff',
-      brightMagenta: '#bb9af7',
-      brightCyan: '#0db9d7',
-      brightWhite: '#acb0d0',
-    },
+    theme: readTerminalTheme(),
     fontFamily: '"SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace',
     fontSize: 13,
     lineHeight: 1,
@@ -87,6 +96,14 @@ onMounted(async () => {
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.open(terminalRef.value)
+
+  // 主题切换时同步终端配色
+  themeObserver = new MutationObserver(() => {
+    if (terminal) {
+      terminal.options.theme = readTerminalTheme()
+    }
+  })
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
 
   // 监听用户输入
   terminal.onData((data) => {
@@ -129,6 +146,9 @@ onUnmounted(() => {
   }
   if (resizeObserver) {
     resizeObserver.disconnect()
+  }
+  if (themeObserver) {
+    themeObserver.disconnect()
   }
   terminal?.dispose()
   terminal = null
@@ -315,7 +335,7 @@ defineExpose({
   position: relative;
   width: 100%;
   height: 100%;
-  background: #1a1b26;
+  background: var(--terminal-bg);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
@@ -340,9 +360,9 @@ defineExpose({
 .exited-badge {
   display: inline-block;
   padding: 2px 8px;
-  background: rgba(247, 118, 142, 0.8);
+  background: var(--error);
   color: white;
-  font-size: 11px;
+  font-size: var(--text-xs);
   border-radius: 4px;
 }
 

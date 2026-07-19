@@ -1416,6 +1416,7 @@ export const api = {
             }, delay)
           } else {
             console.error('Runtime EventSource max reconnect attempts reached')
+            options.onGiveUp?.()
           }
         }
       }
@@ -1520,6 +1521,8 @@ export interface EventStreamSubscription {
 
 export interface EventStreamOptions {
   onReconnect?(generation: number): void
+  // 重连次数耗尽、彻底放弃时触发
+  onGiveUp?(): void
 }
 
 export interface GlobalSSEEventEnvelope {

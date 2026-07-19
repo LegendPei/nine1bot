@@ -38,16 +38,20 @@ function cleanupResizeListeners() {
     document.removeEventListener('mouseup', currentMouseUpHandler)
     currentMouseUpHandler = null
   }
+  document.body.style.userSelect = ''
   isResizing.value = false
 }
 
 // 开始调整大小
 function startResize(e: MouseEvent) {
+  e.preventDefault()
   cleanupResizeListeners()
 
   isResizing.value = true
   const startX = e.clientX
   const startWidth = panelWidth.value
+  // 拖拽期间禁止文本选择，避免鼠标移出面板时误选页面内容
+  document.body.style.userSelect = 'none'
 
   currentMouseMoveHandler = (e: MouseEvent) => {
     const diff = startX - e.clientX
@@ -146,7 +150,7 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
   position: relative;
   height: 100%;
   background: var(--bg-primary);
-  border-left: 0.5px solid var(--border-default);
+  border-left: 1px solid var(--border-default);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -161,7 +165,7 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
   cursor: ew-resize;
   background: transparent;
   transition: background 0.2s;
-  z-index: 10;
+  z-index: var(--z-sticky);
 }
 
 .resize-handle:hover {
@@ -173,7 +177,7 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-sm) var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
@@ -189,9 +193,9 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
   gap: 6px;
   padding: 6px 12px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-secondary);
   cursor: pointer;
@@ -205,7 +209,7 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
 .tab-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .tab-btn.disabled {
@@ -215,7 +219,7 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
 
 .badge {
   background: rgba(255, 255, 255, 0.2);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 8px;
@@ -260,13 +264,13 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
   gap: 4px;
   padding: 8px 12px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-right: none;
   border-radius: var(--radius-md) 0 0 var(--radius-md);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
-  z-index: 100;
+  z-index: var(--z-dropdown);
 }
 
 .expand-btn:hover {
@@ -276,10 +280,17 @@ watch([isPanelOpen, panelWidth, activeTab], () => {
 
 .expand-count {
   background: var(--accent);
-  color: white;
-  font-size: 10px;
+  color: var(--accent-fg);
+  font-size: var(--text-xs);
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 8px;
+}
+
+/* 移动端隐藏固定定位的展开按钮，避免遮挡内容 */
+@media (max-width: 768px) {
+  .expand-btn {
+    display: none;
+  }
 }
 </style>

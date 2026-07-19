@@ -186,26 +186,25 @@ async function handleDeleteCustomProvider(providerId: string) {
 
     <div class="import-auth-panel">
       <div class="import-auth-copy">
-        <div class="import-auth-title">Import from OpenCode</div>
-        <div class="import-auth-desc">Imports OpenCode auth once. Nine1Bot only uses local auth after import.</div>
+        <div class="import-auth-title">从 OpenCode 导入</div>
+        <div class="import-auth-desc">仅导入一次 OpenCode 认证信息，导入后 Nine1Bot 仅使用本地认证。</div>
       </div>
       <button class="btn btn-secondary" :disabled="importing" @click="emit('import-opencode')">
-        {{ importing ? 'Importing...' : 'Import Auth' }}
+        {{ importing ? '导入中...' : '导入认证' }}
       </button>
     </div>
 
     <div v-if="importResult" class="import-auth-result">
-      <p v-if="!importResult.sourceFound" class="text-muted text-sm">No OpenCode auth file was found.</p>
+      <p v-if="!importResult.sourceFound" class="text-muted text-sm">未找到 OpenCode 认证文件。</p>
       <template v-else>
         <p class="text-sm">
-          Imported {{ importResult.imported.length }} item<span v-if="importResult.imported.length !== 1">s</span>
-          from {{ importResult.totalSource }} source record<span v-if="importResult.totalSource !== 1">s</span>.
+          已从 {{ importResult.totalSource }} 条来源记录中导入 {{ importResult.imported.length }} 项。
         </p>
         <p v-if="importResult.skippedExisting.length > 0" class="text-muted text-sm">
-          Skipped existing: {{ importResult.skippedExisting.join(', ') }}
+          已跳过已存在的项：{{ importResult.skippedExisting.join(', ') }}
         </p>
         <p v-if="importResult.skippedInvalid.length > 0" class="text-muted text-sm">
-          Skipped invalid: {{ importResult.skippedInvalid.join(', ') }}
+          已跳过无效项：{{ importResult.skippedInvalid.join(', ') }}
         </p>
       </template>
     </div>
@@ -436,7 +435,7 @@ async function handleDeleteCustomProvider(providerId: string) {
   gap: var(--space-md);
   padding: var(--space-md);
   margin-top: var(--space-md);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
@@ -460,7 +459,7 @@ async function handleDeleteCustomProvider(providerId: string) {
 
 .import-auth-result {
   padding: var(--space-md);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: var(--bg-tertiary);
 }
@@ -479,7 +478,7 @@ async function handleDeleteCustomProvider(providerId: string) {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
 }
 
@@ -535,7 +534,7 @@ async function handleDeleteCustomProvider(providerId: string) {
 }
 
 .custom-provider-card {
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   background: var(--bg-tertiary);
@@ -565,7 +564,7 @@ async function handleDeleteCustomProvider(providerId: string) {
   display: flex;
   justify-content: space-between;
   gap: var(--space-sm);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: var(--space-sm);
   background: var(--bg-primary);
@@ -626,7 +625,7 @@ async function handleDeleteCustomProvider(providerId: string) {
   width: 100%;
   margin-top: var(--space-md);
   padding-top: var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .form-actions {

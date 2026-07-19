@@ -16,7 +16,7 @@ describe('webhook send test controls', () => {
     expect(source).toContain('v-for="run in runPageItems"')
     expect(source).toContain('@click="previousRunPage"')
     expect(source).toContain('@click="nextRunPage"')
-    expect(source).toContain('Page {{ runPage }}')
+    expect(source).toContain('第 {{ runPage }} 页')
     expect(source).not.toContain('v-for="run in selectedRuns"')
   })
 })

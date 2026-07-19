@@ -53,17 +53,17 @@ const emit = defineEmits<{
 const DEFAULT_PRESET = webhookPresetById('generic')
 const RUN_PAGE_SIZE = 10
 const helpText = {
-  guards: 'Guards reject noisy, duplicate, or stale webhook requests before they create an agent session.',
-  rateLimit: 'Limits how many requests this source accepts within one time window.',
-  cooldown: 'After a request is accepted, this source waits before accepting another one.',
-  dedupe: 'Rejects requests that render the same dedupe key during the TTL.',
-  dedupeKey: 'Build a stable key from mapped fields, body, headers, query, source, or project values.',
-  replayProtection: 'Requires a timestamp header and rejects requests outside the allowed time skew.',
-  timestampHeader: 'The external service must send this header with a Unix seconds, Unix milliseconds, or ISO timestamp.',
-  requestMapping: 'Map JSON paths from body, headers, or query into fields. These fields are available as {{fields.name}} in templates.',
-  promptTemplate: 'This becomes the first user message sent to the agent when a webhook event is accepted.',
-  samplePayload: 'Paste an example JSON payload to preview fields, prompt rendering, and dedupe key without creating a run.',
-  preview: 'Preview updates locally in the browser. It does not call the webhook endpoint or start an agent.',
+  guards: '防护规则会在创建 Agent 会话前，拦截噪声、重复或过期的 Webhook 请求。',
+  rateLimit: '限制此来源在一个时间窗口内可接受的请求数量。',
+  cooldown: '接受一次请求后，此来源会等待一段时间再接受下一个请求。',
+  dedupe: '拒绝在 TTL 内渲染出相同去重键的请求。',
+  dedupeKey: '从映射字段、body、headers、query、来源或项目值构建一个稳定的键。',
+  replayProtection: '要求携带时间戳 header，并拒绝超出允许时间偏差的请求。',
+  timestampHeader: '外部服务必须携带此 header，值为 Unix 秒、Unix 毫秒或 ISO 时间戳。',
+  requestMapping: '将 body、headers 或 query 中的 JSON 路径映射为字段，这些字段可在模板中以 {{fields.name}} 使用。',
+  promptTemplate: 'Webhook 事件被接受后，此内容将作为发送给 Agent 的第一条用户消息。',
+  samplePayload: '粘贴一个示例 JSON 负载，即可在不产生运行记录的情况下预览字段、Prompt 渲染和去重键。',
+  preview: '预览仅在浏览器本地更新，不会调用 Webhook 端点或启动 Agent。',
 }
 
 const status = ref<WebhookStatus | null>(null)
@@ -83,7 +83,7 @@ const revealedSecretSourceId = ref('')
 const showMcpPicker = ref(false)
 const pendingMcpServers = ref<string[]>([])
 const fullPermissionConfirmed = ref(false)
-const defaultModelLabel = ref('Default model from user config')
+const defaultModelLabel = ref('使用用户配置中的默认模型')
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const selectedRunId = ref('')
 const runPage = ref(1)
@@ -113,9 +113,9 @@ const effectiveMcpServers = computed(() => {
 })
 const mcpModeDescription = computed(() => {
   if (form.value.resourcesMode === 'default') {
-    return 'Webhook sessions inherit only the default MCP configuration.'
+    return 'Webhook 会话仅继承默认 MCP 配置。'
   }
-  return 'Webhook sessions inherit default MCP and add the selected MCP servers.'
+  return 'Webhook 会话继承默认 MCP，并额外添加所选的 MCP 服务器。'
 })
 const selectedPreset = computed(() => webhookPresetById(form.value.presetID))
 const configPreview = computed(() => previewWebhookConfig({
@@ -268,7 +268,7 @@ async function loadAll() {
 function friendlyError(err: unknown) {
   const message = err instanceof Error ? err.message : String(err)
   if (/signal is aborted|aborterror|aborted/i.test(message)) {
-    return 'Request was cancelled or timed out. Refresh to retry.'
+    return '请求已取消或超时，请刷新重试。'
   }
   return message
 }
@@ -280,7 +280,7 @@ function defaultModelFromConfig(model: string | undefined, providerData: { provi
   }
   const providerID = providerData.connected[0] || providerData.providers[0]?.id
   const modelID = providerID ? providerData.defaults[providerID] || providerData.providers.find((provider) => provider.id === providerID)?.models[0]?.id : undefined
-  return modelLabelFromList(providerData.providers, providerID, modelID) || 'Default model from user config'
+  return modelLabelFromList(providerData.providers, providerID, modelID) || '使用用户配置中的默认模型'
 }
 
 function modelLabelFromList(list: Provider[], providerID?: string, modelID?: string) {
@@ -327,10 +327,10 @@ function sourceInput() {
 }
 
 function validateForm() {
-  if (!form.value.name.trim()) throw new Error('Source name is required')
-  if (!form.value.projectID) throw new Error('Project is required')
+  if (!form.value.name.trim()) throw new Error('请填写来源名称')
+  if (!form.value.projectID) throw new Error('请选择项目')
   if (form.value.modelMode === 'custom' && (!form.value.modelProviderID || !form.value.modelID)) {
-    throw new Error('Custom model requires a provider and model.')
+    throw new Error('自定义模型需要选择服务商和模型。')
   }
 }
 
@@ -352,7 +352,7 @@ async function createSource() {
     revealedSecretSourceId.value = created.source.id
     revealedSecret.value = created.secret
     resetRunPagination()
-    notice.value = 'Webhook source created. Copy the full URL now; the secret is shown only once.'
+    notice.value = 'Webhook 来源已创建。请立即复制完整 URL，secret 仅显示一次。'
     await refreshRuns()
     await nextTick()
     scrollEndpointIntoView()
@@ -381,7 +381,7 @@ async function saveSource() {
     if (index >= 0) {
       sources.value[index] = updated
     }
-    notice.value = 'Webhook source saved.'
+    notice.value = 'Webhook 来源已保存。'
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -404,7 +404,7 @@ async function sendTest() {
   isSendingTest.value = true
   try {
     const result = await webhookApi.sendTest(source.id, payload)
-    notice.value = `Test sent. HTTP ${result.status}.`
+    notice.value = `测试已发送，HTTP 状态 ${result.status}。`
     resetRunPagination()
     await refreshRuns()
     if (result.body && typeof result.body === 'object' && 'runId' in result.body) {
@@ -433,7 +433,7 @@ async function refreshSecret() {
     }
     revealedSecretSourceId.value = refreshed.source.id
     revealedSecret.value = refreshed.secret
-    notice.value = 'Webhook secret refreshed. Copy the new full URL now; the old URL is invalid.'
+    notice.value = 'Webhook secret 已刷新。请立即复制新的完整 URL，旧 URL 已失效。'
     await nextTick()
     scrollEndpointIntoView()
   } catch (err) {
@@ -446,7 +446,7 @@ async function refreshSecret() {
 async function deleteSource() {
   const source = selectedSource.value
   if (!source) return
-  if (!confirm(`Delete webhook source "${source.name}"? Historical runs will be kept.`)) return
+  if (!confirm(`确定删除 Webhook 来源「${source.name}」吗？历史运行记录将保留。`)) return
   error.value = ''
   notice.value = ''
   isSaving.value = true
@@ -459,7 +459,7 @@ async function deleteSource() {
       showCreateForm.value = true
       resetCreateForm()
     }
-    notice.value = 'Webhook source deleted.'
+    notice.value = 'Webhook 来源已删除。'
     await refreshRuns()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -541,14 +541,14 @@ async function copyText(text: string) {
   error.value = ''
   notice.value = ''
   if (!navigator.clipboard?.writeText) {
-    error.value = 'Clipboard is not available in this browser.'
+    error.value = '当前浏览器不支持剪贴板。'
     return
   }
   try {
     await navigator.clipboard.writeText(text)
-    notice.value = 'Copied.'
+    notice.value = '已复制。'
   } catch {
-    error.value = 'Unable to copy to clipboard.'
+    error.value = '无法复制到剪贴板。'
   }
 }
 
@@ -559,7 +559,7 @@ async function openRunSession(run: WebhookRun) {
     const sessions = await projectApi.sessions(run.projectID, { roots: true, limit: 300 })
     const session = sessions.find((item) => item.id === run.sessionID)
     if (!session) {
-      throw new Error('Session no longer exists')
+      throw new Error('会话已不存在')
     }
     emit('selectSession', session)
   } catch (err) {
@@ -628,7 +628,7 @@ function handlePermissionModeChange() {
     fullPermissionConfirmed.value = false
     return
   }
-  const ok = confirm('Full permission mode will automatically allow permission requests for webhook sessions. Continue?')
+  const ok = confirm('完全权限模式将自动允许 Webhook 会话的所有权限请求，确定继续吗？')
   if (!ok) {
     form.value.permissionMode = 'default'
     fullPermissionConfirmed.value = false
@@ -654,6 +654,42 @@ function statusClass(run: WebhookRun) {
 
 function runSummary(run: WebhookRun) {
   return run.guardReason || run.error || run.renderedPromptPreview || ''
+}
+
+function runStatusLabel(status: WebhookRun['status']) {
+  const labels: Record<WebhookRun['status'], string> = {
+    received: '已接收',
+    accepted: '已接受',
+    running: '运行中',
+    succeeded: '成功',
+    failed: '失败',
+    rejected: '已拦截',
+  }
+  return labels[status] || status
+}
+
+function guardTypeLabel(guardType?: WebhookRun['guardType']) {
+  if (!guardType) return ''
+  const labels: Record<NonNullable<WebhookRun['guardType']>, string> = {
+    dedupe: '去重',
+    rateLimit: '速率限制',
+    cooldown: '冷却时间',
+    replayProtection: '重放检查',
+  }
+  return labels[guardType] || guardType
+}
+
+function permissionModeLabel(mode: string) {
+  return mode === 'full' ? '完全' : '默认'
+}
+
+function tunnelStatusLabel(status?: string) {
+  const labels: Record<string, string> = {
+    active: '已启用',
+    disabled: '已禁用',
+    error: '错误',
+  }
+  return labels[status || ''] || status || '已禁用'
 }
 
 function currentSecretFor(source: WebhookSource | null) {
@@ -684,19 +720,19 @@ onUnmounted(() => {
       <div>
         <h1>Webhooks</h1>
         <div class="header-meta">
-          <span class="pill ok">{{ enabledCount }} enabled</span>
-          <span class="pill warn">{{ rejectedTodayCount }} guarded today</span>
-          <span>Project-bound external triggers</span>
+          <span class="pill ok">已启用 {{ enabledCount }}</span>
+          <span class="pill warn">今日拦截 {{ rejectedTodayCount }}</span>
+          <span>绑定项目的外部触发器</span>
         </div>
       </div>
       <div class="header-actions">
         <button class="btn" @click="loadAll" :disabled="isLoading">
           <RefreshCw :size="16" :class="{ spin: isLoading }" />
-          Refresh
+          刷新
         </button>
         <button class="btn primary" @click="beginCreate">
           <Plus :size="16" />
-          New source
+          新建来源
         </button>
       </div>
     </header>
@@ -704,21 +740,21 @@ onUnmounted(() => {
     <section class="status-band">
       <div class="address-card">
         <div class="address-heading">
-          <span>Local address</span>
-          <span class="pill ok">{{ status?.listening ? 'Listening' : 'Stopped' }}</span>
+          <span>本地地址</span>
+          <span class="pill ok">{{ status?.listening ? '监听中' : '已停止' }}</span>
         </div>
-        <code>{{ status?.localWebhookUrl || 'Loading...' }}</code>
+        <code>{{ status?.localWebhookUrl || '加载中...' }}</code>
       </div>
       <div class="address-card">
         <div class="address-heading">
-          <span>Tunnel address</span>
-          <span class="pill" :class="status?.tunnel.enabled ? 'ok' : 'muted'">{{ status?.tunnel.status || 'disabled' }}</span>
+          <span>隧道地址</span>
+          <span class="pill" :class="status?.tunnel.enabled ? 'ok' : 'muted'">{{ tunnelStatusLabel(status?.tunnel.status) }}</span>
         </div>
-        <code>{{ status?.publicWebhookUrl || 'No tunnel URL available' }}</code>
+        <code>{{ status?.publicWebhookUrl || '暂无隧道 URL' }}</code>
       </div>
       <button class="btn copy-base" @click="copyText(status?.localWebhookUrl || '')">
         <Copy :size="16" />
-        Copy URL
+        复制 URL
       </button>
     </section>
 
@@ -734,8 +770,8 @@ onUnmounted(() => {
     <section class="webhooks-workspace">
       <aside class="sources-column">
         <div class="column-header">
-          <h2>Sources</h2>
-          <span class="pill blue">{{ sources.length }} total</span>
+          <h2>来源</h2>
+          <span class="pill blue">共 {{ sources.length }} 个</span>
         </div>
         <button
           v-for="source in sources"
@@ -747,44 +783,44 @@ onUnmounted(() => {
           <span class="source-icon"><Activity :size="16" /></span>
           <span class="source-copy">
             <strong>{{ source.name }}</strong>
-            <span>{{ projectLabel(source.projectID) }} · {{ source.permissionPolicy.mode }} permissions</span>
+            <span>{{ projectLabel(source.projectID) }} · {{ permissionModeLabel(source.permissionPolicy.mode) }}权限</span>
           </span>
-          <span class="source-runs">{{ runs.filter((run) => run.sourceID === source.id).length }} runs</span>
+          <span class="source-runs">{{ runs.filter((run) => run.sourceID === source.id).length }} 次运行</span>
         </button>
         <div v-if="sources.length === 0" class="empty-note">
-          No webhook sources yet.
+          暂无 Webhook 来源。
         </div>
       </aside>
 
       <main class="detail-column">
         <div class="detail-header">
           <div>
-            <h2>{{ showCreateForm ? 'New webhook source' : selectedSource?.name || 'Webhook source' }}</h2>
-            <p>{{ showCreateForm ? 'Create a generic JSON webhook entry point.' : projectLabel(selectedSource?.projectID || '') }}</p>
+            <h2>{{ showCreateForm ? '新建 Webhook 来源' : selectedSource?.name || 'Webhook 来源' }}</h2>
+            <p>{{ showCreateForm ? '创建一个通用 JSON Webhook 入口。' : projectLabel(selectedSource?.projectID || '') }}</p>
           </div>
           <div v-if="selectedSource && !showCreateForm" class="detail-actions">
             <button class="btn" @click="copyText(endpointUrl(selectedSource, currentSecretFor(selectedSource)))">
               <Copy :size="16" />
-              Copy
+              复制
             </button>
             <button class="btn" @click="sendTest" :disabled="isSaving || isSendingTest">
               <Send :size="16" />
-              Send test
+              发送测试
             </button>
             <button class="btn" @click="refreshSecret" :disabled="isSaving">
               <RotateCw :size="16" />
-              Refresh secret
+              刷新 secret
             </button>
             <button class="btn danger" @click="deleteSource" :disabled="isSaving">
               <Trash2 :size="16" />
-              Delete
+              删除
             </button>
           </div>
         </div>
 
         <div class="detail-grid">
           <section v-if="showCreateForm" class="panel wide">
-            <h3>Preset</h3>
+            <h3>预设</h3>
             <div class="preset-grid">
               <button
                 v-for="preset in WEBHOOK_PRESETS"
@@ -800,19 +836,19 @@ onUnmounted(() => {
           </section>
 
           <section ref="endpointPanel" class="panel wide">
-            <h3>Endpoint</h3>
+            <h3>端点</h3>
             <div class="field-grid">
               <label>
-                <span>Local URL</span>
+                <span>本地 URL</span>
                 <div class="endpoint-row">
-                  <code>{{ endpointUrl(selectedSource, currentSecretFor(selectedSource)) || 'Create a source to get URL' }}</code>
+                  <code>{{ endpointUrl(selectedSource, currentSecretFor(selectedSource)) || '创建来源后获取 URL' }}</code>
                   <button class="icon-btn" @click="copyText(endpointUrl(selectedSource, currentSecretFor(selectedSource)))">
                     <Copy :size="15" />
                   </button>
                 </div>
               </label>
               <label v-if="status?.publicWebhookUrl">
-                <span>Public URL</span>
+                <span>公网 URL</span>
                 <div class="endpoint-row">
                   <code>{{ endpointUrl(selectedSource, currentSecretFor(selectedSource), true) }}</code>
                   <button class="icon-btn" @click="copyText(endpointUrl(selectedSource, currentSecretFor(selectedSource), true))">
@@ -821,22 +857,22 @@ onUnmounted(() => {
                 </div>
               </label>
               <p v-if="revealedSecretSourceId === selectedSource?.id && revealedSecret" class="hint success">
-                Full URL is shown once. Copy it before leaving this source.
+                完整 URL 仅显示一次，请在离开此来源前复制。
               </p>
             </div>
           </section>
 
           <section class="panel">
-            <h3>Source</h3>
+            <h3>来源</h3>
             <div class="field-grid">
               <label>
-                <span>Name</span>
-                <input v-model="form.name" placeholder="Uptime Kuma Production" />
+                <span>名称</span>
+                <input v-model="form.name" placeholder="Uptime Kuma 生产环境" />
               </label>
               <label>
-                <span>Project</span>
+                <span>项目</span>
                 <select v-model="form.projectID">
-                  <option value="" disabled>Select project</option>
+                  <option value="" disabled>选择项目</option>
                   <option v-for="project in sortedProjects" :key="project.id" :value="project.id">
                     {{ projectLabel(project.id) }}
                   </option>
@@ -844,33 +880,33 @@ onUnmounted(() => {
               </label>
               <label class="check">
                 <input v-model="form.enabled" type="checkbox" />
-                Enabled
+                已启用
               </label>
             </div>
           </section>
 
           <section class="panel">
-            <h3>Permissions</h3>
+            <h3>权限</h3>
             <div class="segmented">
-              <label><input v-model="form.permissionMode" type="radio" value="default" @change="handlePermissionModeChange" /> default</label>
-              <label><input v-model="form.permissionMode" type="radio" value="full" @change="handlePermissionModeChange" /> full</label>
+              <label><input v-model="form.permissionMode" type="radio" value="default" @change="handlePermissionModeChange" /> 默认</label>
+              <label><input v-model="form.permissionMode" type="radio" value="full" @change="handlePermissionModeChange" /> 完全</label>
             </div>
             <p class="hint" :class="{ danger: form.permissionMode === 'full' }">
-              {{ form.permissionMode === 'full' ? 'Permission requests are automatically allowed for webhook sessions.' : 'Permission and question asks are automatically denied.' }}
+              {{ form.permissionMode === 'full' ? 'Webhook 会话的权限请求将被自动允许。' : '权限与提问请求将被自动拒绝。' }}
             </p>
             <p v-if="form.permissionMode === 'full' && fullPermissionConfirmed" class="hint danger">
-              Full permission mode confirmed.
+              已确认完全权限模式。
             </p>
           </section>
 
           <section class="panel wide">
-            <h3>Runtime</h3>
+            <h3>运行时</h3>
             <div class="runtime-grid">
               <div class="runtime-card">
-                <div class="section-title">Model</div>
+                <div class="section-title">模型</div>
                 <div class="segmented">
-                  <label><input v-model="form.modelMode" type="radio" value="default" /> default</label>
-                  <label><input v-model="form.modelMode" type="radio" value="custom" /> custom</label>
+                  <label><input v-model="form.modelMode" type="radio" value="default" /> 默认</label>
+                  <label><input v-model="form.modelMode" type="radio" value="custom" /> 自定义</label>
                 </div>
                 <div v-if="form.modelMode === 'default'" class="summary-line">{{ defaultModelLabel }}</div>
                 <div v-else class="model-selectors">
@@ -884,43 +920,43 @@ onUnmounted(() => {
               </div>
 
               <div class="runtime-card">
-                <div class="section-title">MCP Servers</div>
+                <div class="section-title">MCP 服务器</div>
                 <div class="mode-options">
                   <label class="mode-option" :class="{ active: form.resourcesMode === 'default' }">
                     <input v-model="form.resourcesMode" type="radio" value="default" />
                     <span>
-                      <strong>default</strong>
-                      <small>Use only default MCP</small>
+                      <strong>默认</strong>
+                      <small>仅使用默认 MCP</small>
                     </span>
                   </label>
                   <label class="mode-option" :class="{ active: form.resourcesMode === 'default-plus-selected' }">
                     <input v-model="form.resourcesMode" type="radio" value="default-plus-selected" />
                     <span>
-                      <strong>add</strong>
-                      <small>Default MCP plus selected MCP</small>
+                      <strong>添加</strong>
+                      <small>默认 MCP 加所选 MCP</small>
                     </span>
                   </label>
                 </div>
                 <p class="hint">{{ mcpModeDescription }}</p>
 
                 <div class="mcp-group current">
-                  <span>Current MCP available to agent</span>
+                  <span>Agent 当前可用的 MCP</span>
                   <div class="chips">
                     <span v-for="server in effectiveMcpServers" :key="server" class="chip strong">{{ server }}</span>
-                    <span v-if="effectiveMcpServers.length === 0" class="chip muted">No MCP available</span>
+                    <span v-if="effectiveMcpServers.length === 0" class="chip muted">暂无可用 MCP</span>
                   </div>
                 </div>
 
                 <div class="mcp-group">
-                  <span>Default MCP</span>
+                  <span>默认 MCP</span>
                   <div class="chips">
                     <span v-for="server in defaultMcpServers" :key="server" class="chip">{{ server }}</span>
-                    <span v-if="defaultMcpServers.length === 0" class="chip muted">No default MCP</span>
+                    <span v-if="defaultMcpServers.length === 0" class="chip muted">暂无默认 MCP</span>
                   </div>
                 </div>
 
                 <div class="mcp-group">
-                  <span>{{ form.resourcesMode === 'default' ? 'Added MCP not used in default mode' : 'Added MCP' }}</span>
+                  <span>{{ form.resourcesMode === 'default' ? '已添加 MCP（默认模式下不使用）' : '已添加 MCP' }}</span>
                   <div class="chips">
                     <button
                       v-for="server in addedMcpServers"
@@ -931,16 +967,16 @@ onUnmounted(() => {
                     >
                       {{ server }}
                     </button>
-                    <span v-if="addedMcpServers.length === 0" class="chip muted">No additional MCP</span>
+                    <span v-if="addedMcpServers.length === 0" class="chip muted">暂无额外 MCP</span>
                   </div>
                 </div>
                 <button
                   class="btn"
                   @click="openMcpPicker"
                   :disabled="form.resourcesMode === 'default'"
-                  :title="form.resourcesMode === 'default' ? 'Switch to add mode before selecting MCP servers.' : 'Add MCP servers'"
+                  :title="form.resourcesMode === 'default' ? '请先切换到添加模式再选择 MCP 服务器。' : '添加 MCP 服务器'"
                 >
-                  Add MCP
+                  添加 MCP
                 </button>
                 <div v-if="showMcpPicker && form.resourcesMode === 'default-plus-selected'" class="picker">
                   <label v-for="server in availableMcpServers" :key="server.name" class="check">
@@ -948,8 +984,8 @@ onUnmounted(() => {
                     {{ server.name }}
                   </label>
                   <div class="picker-actions">
-                    <button class="btn" @click="showMcpPicker = false">Cancel</button>
-                    <button class="btn primary" @click="confirmMcpPicker">Confirm</button>
+                    <button class="btn" @click="showMcpPicker = false">取消</button>
+                    <button class="btn primary" @click="confirmMcpPicker">确认</button>
                   </div>
                 </div>
               </div>
@@ -958,19 +994,19 @@ onUnmounted(() => {
 
           <section class="panel wide">
             <div class="section-heading">
-              <h3>Guards</h3>
+              <h3>防护规则</h3>
               <span class="help-tip" tabindex="0" :aria-label="helpText.guards">
                 <CircleQuestionMark :size="15" />
                 <span class="tooltip">{{ helpText.guards }}</span>
               </span>
             </div>
-            <p class="section-description">Keep this source from creating too many sessions or replaying stale events.</p>
+            <p class="section-description">防止此来源创建过多会话或重放过期事件。</p>
             <div class="guard-cards">
               <section class="guard-card" :class="{ enabled: form.guards.rateLimit.enabled }">
                 <div class="guard-card-head">
                   <label class="check">
                     <input v-model="form.guards.rateLimit.enabled" type="checkbox" />
-                    <strong>Rate limit</strong>
+                    <strong>速率限制</strong>
                   </label>
                   <span class="help-tip" tabindex="0" :aria-label="helpText.rateLimit">
                     <CircleQuestionMark :size="14" />
@@ -978,16 +1014,16 @@ onUnmounted(() => {
                   </span>
                 </div>
                 <p class="setting-help">
-                  Accept up to {{ form.guards.rateLimit.maxRequests || 0 }} requests every
-                  {{ form.guards.rateLimit.windowSeconds || 0 }} seconds.
+                  每 {{ form.guards.rateLimit.windowSeconds || 0 }} 秒最多接受
+                  {{ form.guards.rateLimit.maxRequests || 0 }} 个请求。
                 </p>
                 <div class="guard-fields">
                   <label>
-                    <span>Max requests</span>
+                    <span>最大请求数</span>
                     <input v-model.number="form.guards.rateLimit.maxRequests" type="number" min="1" />
                   </label>
                   <label>
-                    <span>Window seconds</span>
+                    <span>窗口秒数</span>
                     <input v-model.number="form.guards.rateLimit.windowSeconds" type="number" min="1" />
                   </label>
                 </div>
@@ -997,17 +1033,17 @@ onUnmounted(() => {
                 <div class="guard-card-head">
                   <label class="check">
                     <input v-model="form.guards.cooldown.enabled" type="checkbox" />
-                    <strong>Cooldown</strong>
+                    <strong>冷却时间</strong>
                   </label>
                   <span class="help-tip" tabindex="0" :aria-label="helpText.cooldown">
                     <CircleQuestionMark :size="14" />
                     <span class="tooltip">{{ helpText.cooldown }}</span>
                   </span>
                 </div>
-                <p class="setting-help">Useful when one incident can send repeated notifications in a short burst.</p>
+                <p class="setting-help">适用于一次故障可能在短时间内发送大量重复通知的场景。</p>
                 <div class="guard-fields single">
                   <label>
-                    <span>Cooldown seconds</span>
+                    <span>冷却秒数</span>
                     <input v-model.number="form.guards.cooldown.seconds" type="number" min="0" />
                   </label>
                 </div>
@@ -1017,18 +1053,18 @@ onUnmounted(() => {
                 <div class="guard-card-head">
                   <label class="check">
                     <input v-model="form.guards.dedupe.enabled" type="checkbox" />
-                    <strong>Dedupe</strong>
+                    <strong>去重</strong>
                   </label>
                   <span class="help-tip" tabindex="0" :aria-label="helpText.dedupe">
                     <CircleQuestionMark :size="14" />
                     <span class="tooltip">{{ helpText.dedupe }}</span>
                   </span>
                 </div>
-                <p class="setting-help">Reject events with the same rendered key until the TTL expires.</p>
+                <p class="setting-help">在 TTL 过期前，拒绝渲染出相同键的事件。</p>
                 <div class="guard-fields">
                   <label>
                     <span class="field-label-row">
-                      Key template
+                      键模板
                       <span class="help-tip" tabindex="0" :aria-label="helpText.dedupeKey">
                         <CircleQuestionMark :size="13" />
                         <span class="tooltip">{{ helpText.dedupeKey }}</span>
@@ -1037,7 +1073,7 @@ onUnmounted(() => {
                     <input v-model="form.guards.dedupe.keyTemplate" placeholder="{{fields.service}}:{{fields.status}}" />
                   </label>
                   <label>
-                    <span>TTL seconds</span>
+                    <span>TTL 秒数</span>
                     <input v-model.number="form.guards.dedupe.ttlSeconds" type="number" min="1" />
                   </label>
                 </div>
@@ -1047,18 +1083,18 @@ onUnmounted(() => {
                 <div class="guard-card-head">
                   <label class="check">
                     <input v-model="form.guards.replayProtection.enabled" type="checkbox" />
-                    <strong>Timestamp replay check</strong>
+                    <strong>时间戳重放检查</strong>
                   </label>
                   <span class="help-tip" tabindex="0" :aria-label="helpText.replayProtection">
                     <CircleQuestionMark :size="14" />
                     <span class="tooltip">{{ helpText.replayProtection }}</span>
                   </span>
                 </div>
-                <p class="setting-help">Use when the external service can send a request timestamp header.</p>
+                <p class="setting-help">当外部服务可以发送请求时间戳 header 时使用。</p>
                 <div class="guard-fields">
                   <label>
                     <span class="field-label-row">
-                      Timestamp header
+                      时间戳 header
                       <span class="help-tip" tabindex="0" :aria-label="helpText.timestampHeader">
                         <CircleQuestionMark :size="13" />
                         <span class="tooltip">{{ helpText.timestampHeader }}</span>
@@ -1067,7 +1103,7 @@ onUnmounted(() => {
                     <input v-model="form.guards.replayProtection.timestampHeader" placeholder="x-nine1bot-timestamp" />
                   </label>
                   <label>
-                    <span>Max skew seconds</span>
+                    <span>最大偏差秒数</span>
                     <input v-model.number="form.guards.replayProtection.maxSkewSeconds" type="number" min="1" />
                   </label>
                 </div>
@@ -1077,40 +1113,40 @@ onUnmounted(() => {
 
           <section class="panel wide">
             <div class="section-heading">
-              <h3>Request Mapping</h3>
+              <h3>请求映射</h3>
               <span class="help-tip" tabindex="0" :aria-label="helpText.requestMapping">
                 <CircleQuestionMark :size="15" />
                 <span class="tooltip">{{ helpText.requestMapping }}</span>
               </span>
             </div>
-            <p class="section-description">Pick the important values out of the incoming webhook JSON.</p>
+            <p class="section-description">从传入的 Webhook JSON 中提取需要的值。</p>
             <textarea v-model="form.requestMappingText" spellcheck="false" />
           </section>
 
           <section class="panel wide">
             <div class="section-heading">
-              <h3>Prompt Template</h3>
+              <h3>Prompt 模板</h3>
               <span class="help-tip" tabindex="0" :aria-label="helpText.promptTemplate">
                 <CircleQuestionMark :size="15" />
                 <span class="tooltip">{{ helpText.promptTemplate }}</span>
               </span>
             </div>
-            <p class="section-description">Describe what the agent should do with the mapped event data.</p>
+            <p class="section-description">描述 Agent 应如何处理映射后的事件数据。</p>
             <textarea v-model="form.promptTemplate" class="prompt-template" spellcheck="false" />
           </section>
 
           <section class="panel wide">
             <div class="section-heading">
-              <h3>Sample Payload</h3>
+              <h3>示例负载</h3>
               <span class="help-tip" tabindex="0" :aria-label="helpText.samplePayload">
                 <CircleQuestionMark :size="15" />
                 <span class="tooltip">{{ helpText.samplePayload }}</span>
               </span>
             </div>
-            <p class="section-description">Use a real-looking event here so the preview matches production requests.</p>
+            <p class="section-description">请使用接近真实的事件，以便预览与线上请求一致。</p>
             <textarea v-model="form.samplePayloadText" class="sample-payload" spellcheck="false" />
             <div class="preview-heading">
-              <span>Preview</span>
+              <span>预览</span>
               <span class="help-tip" tabindex="0" :aria-label="helpText.preview">
                 <CircleQuestionMark :size="14" />
                 <span class="tooltip">{{ helpText.preview }}</span>
@@ -1118,16 +1154,16 @@ onUnmounted(() => {
             </div>
             <div class="preview-grid">
               <div class="preview-card" :class="{ danger: !configPreview.ok }">
-                <span>Fields</span>
+                <span>字段</span>
                 <pre>{{ configPreview.ok ? formatJson(configPreview.fields) : configPreview.error }}</pre>
               </div>
               <div class="preview-card">
-                <span>Rendered prompt</span>
-                <pre>{{ configPreview.renderedPrompt || 'Preview unavailable' }}</pre>
+                <span>渲染后的 Prompt</span>
+                <pre>{{ configPreview.renderedPrompt || '预览不可用' }}</pre>
               </div>
               <div class="preview-card">
-                <span>Dedupe key</span>
-                <pre>{{ configPreview.dedupeKey || 'No dedupe key preview' }}</pre>
+                <span>去重键</span>
+                <pre>{{ configPreview.dedupeKey || '暂无法预览去重键' }}</pre>
               </div>
             </div>
           </section>
@@ -1135,16 +1171,16 @@ onUnmounted(() => {
           <div class="form-actions">
             <button v-if="showCreateForm" class="btn primary" @click="createSource" :disabled="isSaving">
               <Send :size="16" />
-              Create source
+              创建来源
             </button>
             <button v-else class="btn primary" @click="saveSource" :disabled="!selectedSource || isSaving">
               <Save :size="16" />
-              Save source
+              保存来源
             </button>
           </div>
 
           <section v-if="!showCreateForm" class="panel wide">
-            <h3>Recent Runs</h3>
+            <h3>最近运行</h3>
             <div class="run-list">
               <div
                 v-for="run in runPageItems"
@@ -1153,58 +1189,58 @@ onUnmounted(() => {
                 :class="{ active: selectedRunId === run.id }"
                 @click="selectRun(run)"
               >
-                <span class="pill" :class="statusClass(run)">{{ run.status }}</span>
+                <span class="pill" :class="statusClass(run)">{{ runStatusLabel(run.status) }}</span>
                 <span>{{ formatTime(run.time.received) }}</span>
                 <span>{{ run.httpStatus || '-' }}</span>
                 <span class="run-error">{{ runSummary(run) }}</span>
-                <button v-if="run.sessionID" class="link-btn" @click.stop="openRunSession(run)">Open session</button>
-                <span v-else class="muted-text">{{ run.guardType || 'No session' }}</span>
+                <button v-if="run.sessionID" class="link-btn" @click.stop="openRunSession(run)">打开会话</button>
+                <span v-else class="muted-text">{{ guardTypeLabel(run.guardType) || '无会话' }}</span>
               </div>
               <div v-if="isRunPageLoading && runPageItems.length === 0" class="empty-note">
-                Loading runs...
+                正在加载运行记录...
               </div>
               <div v-else-if="runPageItems.length === 0" class="empty-note">
-                No runs for this source yet.
+                暂无运行记录。
               </div>
             </div>
             <div v-if="runPageItems.length > 0 || runPage > 1" class="run-pagination">
               <button class="btn" @click="previousRunPage" :disabled="runPage <= 1 || isRunPageLoading">
-                Previous
+                上一页
               </button>
-              <span>Page {{ runPage }}</span>
+              <span>第 {{ runPage }} 页</span>
               <button class="btn" @click="nextRunPage" :disabled="!runPageHasNext || isRunPageLoading">
-                Next
+                下一页
               </button>
             </div>
             <div v-if="selectedRun" class="run-detail">
               <div class="run-detail-head">
                 <strong>{{ selectedRun.id }}</strong>
-                <span class="pill" :class="statusClass(selectedRun)">{{ selectedRun.status }}</span>
-                <button v-if="selectedRun.sessionID" class="link-btn" @click="openRunSession(selectedRun)">Open session</button>
+                <span class="pill" :class="statusClass(selectedRun)">{{ runStatusLabel(selectedRun.status) }}</span>
+                <button v-if="selectedRun.sessionID" class="link-btn" @click="openRunSession(selectedRun)">打开会话</button>
               </div>
               <div class="run-detail-grid">
                 <label>
-                  <span>HTTP response</span>
+                  <span>HTTP 响应</span>
                   <pre>{{ selectedRun.httpStatus || '-' }}</pre>
                 </label>
                 <label>
-                  <span>Guard</span>
-                  <pre>{{ selectedRun.guardType ? `${selectedRun.guardType}: ${selectedRun.guardReason || ''}` : 'No guard triggered' }}</pre>
+                  <span>防护</span>
+                  <pre>{{ selectedRun.guardType ? `${guardTypeLabel(selectedRun.guardType)}: ${selectedRun.guardReason || ''}` : '未触发防护' }}</pre>
                 </label>
                 <label>
-                  <span>Dedupe key</span>
+                  <span>去重键</span>
                   <pre>{{ selectedRun.dedupeKey || '-' }}</pre>
                 </label>
                 <label>
-                  <span>Request summary</span>
+                  <span>请求摘要</span>
                   <pre>{{ formatJson(selectedRun.requestSummary || {}) }}</pre>
                 </label>
                 <label>
-                  <span>Rendered prompt preview</span>
+                  <span>渲染 Prompt 预览</span>
                   <pre>{{ selectedRun.renderedPromptPreview || '-' }}</pre>
                 </label>
                 <label>
-                  <span>Response body</span>
+                  <span>响应体</span>
                   <pre>{{ formatJson(selectedRun.responseBody || {}) }}</pre>
                 </label>
               </div>
@@ -1224,7 +1260,6 @@ onUnmounted(() => {
   padding: var(--space-lg);
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: var(--font-sans);
   line-height: 1.45;
   overflow: auto;
 }
@@ -1257,17 +1292,16 @@ onUnmounted(() => {
 .webhooks-header h1,
 .detail-header h2 {
   margin: 0;
-  font-family: var(--font-sans);
   font-weight: 650;
   line-height: 1.2;
 }
 
 .webhooks-header h1 {
-  font-size: 30px;
+  font-size: var(--text-3xl);
 }
 
 .detail-header h2 {
-  font-size: 22px;
+  font-size: var(--text-2xl);
 }
 
 .header-meta {
@@ -1289,7 +1323,7 @@ onUnmounted(() => {
 
 .btn,
 .icon-btn {
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   background: var(--bg-elevated);
   color: var(--text-primary);
   border-radius: var(--radius-md);
@@ -1299,7 +1333,7 @@ onUnmounted(() => {
   gap: var(--space-xs);
   cursor: pointer;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
@@ -1348,7 +1382,7 @@ onUnmounted(() => {
   gap: var(--space-md);
   padding: var(--space-md);
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   margin-bottom: var(--space-lg);
   box-shadow: var(--shadow-sm);
@@ -1359,7 +1393,7 @@ onUnmounted(() => {
 .sources-column,
 .detail-column {
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
 }
 
@@ -1373,7 +1407,7 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: var(--space-sm);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   text-transform: uppercase;
   margin-bottom: var(--space-sm);
@@ -1382,7 +1416,7 @@ onUnmounted(() => {
 code {
   font-family: var(--font-mono);
   word-break: break-all;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.45;
 }
@@ -1411,14 +1445,13 @@ code {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-md);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .column-header h2,
 .panel h3 {
   margin: 0;
-  font-size: 15px;
-  font-family: var(--font-sans);
+  font-size: var(--text-md);
   font-weight: 650;
   line-height: 1.2;
 }
@@ -1474,7 +1507,7 @@ code {
 .source-copy span,
 .source-runs {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .detail-header p,
@@ -1484,14 +1517,14 @@ code {
 .mcp-group span,
 .summary-line {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .detail-header {
   justify-content: space-between;
   gap: var(--space-md);
   padding: var(--space-md);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .detail-header p {
@@ -1524,7 +1557,7 @@ code {
 .section-description {
   margin: 0 0 var(--space-md);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.45;
 }
 
@@ -1534,7 +1567,7 @@ code {
   gap: var(--space-xs);
   margin: var(--space-md) 0 var(--space-sm);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
@@ -1560,18 +1593,18 @@ code {
 
 .help-tip .tooltip {
   position: absolute;
-  z-index: 20;
+  z-index: var(--z-raised);
   left: 50%;
   bottom: calc(100% + 8px);
   width: 260px;
   transform: translateX(-50%);
   padding: 8px 10px;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-md);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.45;
   opacity: 0;
@@ -1587,8 +1620,8 @@ code {
   height: 9px;
   content: '';
   transform: translateX(-50%) rotate(45deg);
-  border-right: 0.5px solid var(--border-default);
-  border-bottom: 0.5px solid var(--border-default);
+  border-right: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   background: var(--bg-elevated);
 }
 
@@ -1615,14 +1648,14 @@ label {
   display: grid;
   gap: var(--space-xs);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
 label span,
 .section-title {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
@@ -1632,12 +1665,12 @@ textarea,
 .endpoint-row {
   width: 100%;
   min-width: 0;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 input:focus,
@@ -1711,7 +1744,7 @@ textarea {
   display: grid;
   gap: var(--space-sm);
   min-width: 0;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   background: var(--bg-primary);
@@ -1739,13 +1772,13 @@ textarea {
 
 .guard-card-head strong {
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .setting-help {
   margin: 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -1768,7 +1801,7 @@ textarea {
 .preset-card,
 .preview-card,
 .run-detail {
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-md);
 }
@@ -1784,7 +1817,7 @@ textarea {
   align-items: start;
   gap: var(--space-sm);
   padding: var(--space-sm);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   cursor: pointer;
@@ -1808,20 +1841,20 @@ textarea {
 }
 
 .mode-option strong {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 650;
   color: var(--text-primary);
 }
 
 .mode-option small {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   line-height: 1.35;
 }
 
 .mcp-group.current {
   padding: var(--space-sm);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
@@ -1843,7 +1876,7 @@ textarea {
 .preset-card span,
 .preview-card span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .sample-payload {
@@ -1867,7 +1900,7 @@ textarea {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -1885,7 +1918,7 @@ textarea {
   padding: 0 8px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .chip.muted {
@@ -1920,8 +1953,8 @@ textarea {
   gap: var(--space-sm);
   align-items: center;
   min-height: 42px;
-  border-bottom: 0.5px solid var(--border-default);
-  font-size: 13px;
+  border-bottom: 1px solid var(--border-default);
+  font-size: var(--text-13);
   cursor: pointer;
 }
 
@@ -1947,7 +1980,7 @@ textarea {
   gap: var(--space-sm);
   margin-top: var(--space-md);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .run-pagination .btn {
@@ -1989,7 +2022,7 @@ textarea {
   padding: 0 8px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   white-space: nowrap;
 }
@@ -2024,7 +2057,7 @@ textarea {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   margin-bottom: var(--space-md);
   color: var(--success);
@@ -2041,12 +2074,6 @@ textarea {
 
 .spin {
   animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 @media (max-width: 1100px) {

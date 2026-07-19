@@ -79,7 +79,7 @@ function rotate() {
   gap: var(--space-sm);
   padding: var(--space-sm);
   background: var(--bg-secondary);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
@@ -106,7 +106,7 @@ function rotate() {
 .zoom-level {
   min-width: 50px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-muted);
 }

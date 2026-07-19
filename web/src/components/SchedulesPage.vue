@@ -259,13 +259,13 @@ function scheduleFromForm(): ScheduleRule {
 }
 
 function taskInput(): ScheduleTaskInput {
-  if (!form.value.name.trim()) throw new Error('Name is required')
-  if (!form.value.projectID) throw new Error('Project is required')
+  if (!form.value.name.trim()) throw new Error('请填写名称')
+  if (!form.value.projectID) throw new Error('请选择项目')
   if (form.value.modelMode === 'custom' && (!form.value.modelProviderID || !form.value.modelID)) {
-    throw new Error('Choose a provider and model for custom model mode')
+    throw new Error('自定义模型模式下请选择服务商和模型')
   }
   if (form.value.permissionMode === 'full' && !fullPermissionConfirmed.value) {
-    throw new Error('Confirm full permission mode before saving')
+    throw new Error('保存前请确认完全权限模式')
   }
   return {
     name: form.value.name.trim(),
@@ -304,12 +304,12 @@ async function saveTask() {
       selectedTaskId.value = created.id
       showCreateForm.value = false
       loadFormFromTask(created)
-      notice.value = 'Scheduled task created.'
+      notice.value = '定时任务已创建。'
     } else if (selectedTask.value) {
       const updated = await scheduleApi.updateTask(selectedTask.value.id, payload)
       tasks.value = tasks.value.map((task) => task.id === updated.id ? updated : task)
       loadFormFromTask(updated)
-      notice.value = 'Scheduled task saved.'
+      notice.value = '定时任务已保存。'
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -320,7 +320,7 @@ async function saveTask() {
 
 async function deleteTask() {
   if (!selectedTask.value) return
-  const ok = confirm(`Delete scheduled task "${selectedTask.value.name}"?`)
+  const ok = confirm(`确定要删除定时任务 "${selectedTask.value.name}" 吗？`)
   if (!ok) return
   isSaving.value = true
   error.value = ''
@@ -331,7 +331,7 @@ async function deleteTask() {
     selectedTaskId.value = tasks.value[0]?.id || ''
     selectedRunId.value = ''
     loadFormFromTask(selectedTask.value)
-    notice.value = 'Scheduled task deleted.'
+    notice.value = '定时任务已删除。'
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -348,7 +348,7 @@ async function runTaskNow() {
     const result = await scheduleApi.runTask(selectedTask.value.id)
     await refreshTasksAndRuns()
     selectedRunId.value = result.run.id
-    notice.value = result.accepted ? 'Scheduled task run started.' : (result.error || 'Scheduled task run was skipped.')
+    notice.value = result.accepted ? '定时任务已开始运行。' : (result.error || '本次运行已跳过。')
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -362,7 +362,7 @@ async function openRunSession(run: ScheduleRun) {
   try {
     const sessions = await projectApi.sessions(run.projectID, { roots: true, limit: 300 })
     const session = sessions.find((item) => item.id === run.sessionID)
-    if (!session) throw new Error('Session no longer exists')
+    if (!session) throw new Error('会话已不存在')
     emit('selectSession', session)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -374,14 +374,14 @@ async function copyText(text: string) {
   error.value = ''
   notice.value = ''
   if (!navigator.clipboard?.writeText) {
-    error.value = 'Clipboard is not available in this browser.'
+    error.value = '当前浏览器不支持剪贴板。'
     return
   }
   try {
     await navigator.clipboard.writeText(text)
-    notice.value = 'Copied.'
+    notice.value = '已复制。'
   } catch {
-    error.value = 'Unable to copy to clipboard.'
+    error.value = '无法复制到剪贴板。'
   }
 }
 
@@ -427,7 +427,7 @@ function handlePermissionModeChange() {
     fullPermissionConfirmed.value = false
     return
   }
-  const ok = confirm('Full permission mode will automatically allow permission requests for scheduled runs in this session.')
+  const ok = confirm('完全权限模式将自动允许该任务运行时的所有权限请求。')
   if (ok) {
     fullPermissionConfirmed.value = true
   } else {
@@ -439,12 +439,13 @@ function handlePermissionModeChange() {
 function describeRule(task: ScheduleTask) {
   if (task.schedule.type === 'once-after') {
     const hours = Math.round(task.schedule.delayMs / 3_600_000)
-    return `Once after ${hours}h`
+    return `${hours} 小时后执行一次`
   }
   if (task.schedule.type === 'daily') {
-    return `Daily at ${task.schedule.timeOfDay}`
+    return `每天 ${task.schedule.timeOfDay}`
   }
-  return `Every ${task.schedule.every} ${task.schedule.unit}${task.schedule.every === 1 ? '' : 's'}`
+  const unit = task.schedule.unit === 'hour' ? '小时' : '天'
+  return `每 ${task.schedule.every} ${unit}`
 }
 
 function latestRunFor(taskID: string) {
@@ -459,12 +460,35 @@ function statusClass(status?: ScheduleRun['status']) {
   return 'muted'
 }
 
+function runStatusText(status?: ScheduleRun['status']) {
+  if (!status) return '暂无运行'
+  switch (status) {
+    case 'accepted': return '已接受'
+    case 'running': return '运行中'
+    case 'succeeded': return '成功'
+    case 'failed': return '失败'
+    case 'skipped': return '已跳过'
+    default: return status
+  }
+}
+
+function mcpStatusText(status: string) {
+  switch (status) {
+    case 'connected': return '已连接'
+    case 'connecting': return '连接中'
+    case 'auth_in_progress': return '认证中'
+    case 'disabled': return '已禁用'
+    case 'failed': return '连接失败'
+    default: return status
+  }
+}
+
 function runSummary(run: ScheduleRun) {
-  return run.error || run.promptPreview || run.reason || 'Scheduled run'
+  return run.error || run.promptPreview || run.reason || '定时运行'
 }
 
 function formatDate(value?: number) {
-  if (!value) return 'Never'
+  if (!value) return '从未'
   return new Date(value).toLocaleString()
 }
 
@@ -480,8 +504,8 @@ function formatJson(value: unknown) {
 function renderPreview() {
   const projectName = projectLabel(form.value.projectID)
   return (form.value.promptTemplate || DEFAULT_PROMPT)
-    .replace(/{{\s*task\.name\s*}}/g, form.value.name || 'Scheduled task')
-    .replace(/{{\s*project\.name\s*}}/g, projectName || 'Project')
+    .replace(/{{\s*task\.name\s*}}/g, form.value.name || '定时任务')
+    .replace(/{{\s*project\.name\s*}}/g, projectName || '项目')
     .replace(/{{\s*schedule\.scheduledAt\s*}}/g, '2026-01-01T09:00:00.000Z')
     .replace(/{{\s*schedule\.triggeredAt\s*}}/g, '2026-01-01T09:00:02.000Z')
 }
@@ -503,20 +527,20 @@ onUnmounted(() => {
     <header class="schedules-toolbar">
       <div class="metric">
         <CalendarClock :size="16" />
-        <span>{{ enabledCount }} enabled</span>
+        <span>{{ enabledCount }} 个已启用</span>
       </div>
       <div class="metric">
         <Activity :size="16" />
-        <span>{{ activeRunCount }} active</span>
+        <span>{{ activeRunCount }} 个进行中</span>
       </div>
       <div class="toolbar-actions">
         <button class="btn" @click="loadAll" :disabled="isLoading">
           <RefreshCw :size="16" :class="{ spin: isLoading }" />
-          Refresh
+          刷新
         </button>
         <button class="btn primary" @click="beginCreate">
           <Plus :size="16" />
-          New task
+          新建任务
         </button>
       </div>
     </header>
@@ -533,8 +557,8 @@ onUnmounted(() => {
     <section class="schedules-workspace">
       <aside class="tasks-column">
         <div class="column-header">
-          <h2>Tasks</h2>
-          <span class="pill blue">{{ tasks.length }} total</span>
+          <h2>任务</h2>
+          <span class="pill blue">共 {{ tasks.length }} 个</span>
         </div>
         <button
           v-for="task in tasks"
@@ -549,43 +573,43 @@ onUnmounted(() => {
             <span>{{ projectLabel(task.projectID) }} · {{ describeRule(task) }}</span>
           </span>
           <span class="task-badges">
-            <span class="pill" :class="task.enabled ? 'ok' : 'muted'">{{ task.enabled ? 'on' : 'off' }}</span>
-            <span class="pill" :class="statusClass(latestRunFor(task.id)?.status)">{{ latestRunFor(task.id)?.status || 'no runs' }}</span>
+            <span class="pill" :class="task.enabled ? 'ok' : 'muted'">{{ task.enabled ? '已启用' : '已禁用' }}</span>
+            <span class="pill" :class="statusClass(latestRunFor(task.id)?.status)">{{ runStatusText(latestRunFor(task.id)?.status) }}</span>
           </span>
         </button>
         <div v-if="tasks.length === 0" class="empty-note">
-          No scheduled tasks yet.
+          暂无定时任务。
         </div>
       </aside>
 
       <main class="detail-column">
         <div class="detail-header">
           <div>
-            <h2>{{ showCreateForm ? 'New scheduled task' : selectedTask?.name || 'Scheduled task' }}</h2>
-            <p>{{ showCreateForm ? 'Create a project-bound recurring entry point.' : projectLabel(selectedTask?.projectID || '') }}</p>
+            <h2>{{ showCreateForm ? '新建定时任务' : selectedTask?.name || '定时任务' }}</h2>
+            <p>{{ showCreateForm ? '创建绑定到项目的周期性执行入口。' : projectLabel(selectedTask?.projectID || '') }}</p>
           </div>
           <div v-if="selectedTask && !showCreateForm" class="detail-actions">
             <button class="btn" @click="runTaskNow" :disabled="isSaving || isRunning">
               <Play :size="16" />
-              Run now
+              立即运行
             </button>
             <button class="btn danger" @click="deleteTask" :disabled="isSaving || isRunning">
               <Trash2 :size="16" />
-              Delete
+              删除
             </button>
           </div>
         </div>
 
         <div class="detail-grid">
           <section class="panel wide">
-            <h3>Task</h3>
+            <h3>任务</h3>
             <div class="form-grid two">
               <label>
-                <span>Name</span>
-                <input v-model="form.name" placeholder="Daily project check" />
+                <span>名称</span>
+                <input v-model="form.name" placeholder="每日项目检查" />
               </label>
               <label>
-                <span>Project</span>
+                <span>项目</span>
                 <select v-model="form.projectID">
                   <option v-for="project in sortedProjects" :key="project.id" :value="project.id">
                     {{ projectLabel(project.id) }}
@@ -595,38 +619,38 @@ onUnmounted(() => {
             </div>
             <label class="toggle-row">
               <input v-model="form.enabled" type="checkbox" />
-              <span>Enabled</span>
+              <span>已启用</span>
             </label>
           </section>
 
           <section class="panel wide">
-            <h3>Schedule</h3>
+            <h3>执行计划</h3>
             <div class="segmented">
-              <label><input v-model="form.ruleType" type="radio" value="once-after" /> Once later</label>
-              <label><input v-model="form.ruleType" type="radio" value="daily" /> Daily</label>
-              <label><input v-model="form.ruleType" type="radio" value="interval" /> Interval</label>
+              <label><input v-model="form.ruleType" type="radio" value="once-after" /> 延时一次</label>
+              <label><input v-model="form.ruleType" type="radio" value="daily" /> 每天</label>
+              <label><input v-model="form.ruleType" type="radio" value="interval" /> 间隔</label>
             </div>
             <div class="form-grid two">
               <template v-if="form.ruleType === 'once-after'">
                 <label>
-                  <span>Delay</span>
+                  <span>延迟</span>
                   <input v-model.number="form.onceAmount" type="number" min="1" />
                 </label>
                 <label>
-                  <span>Unit</span>
+                  <span>单位</span>
                   <select v-model="form.onceUnit">
-                    <option value="hour">Hours</option>
-                    <option value="day">Days</option>
+                    <option value="hour">小时</option>
+                    <option value="day">天</option>
                   </select>
                 </label>
               </template>
               <template v-else-if="form.ruleType === 'daily'">
                 <label>
-                  <span>Time</span>
+                  <span>时间</span>
                   <input v-model="form.dailyTime" type="time" />
                 </label>
                 <label>
-                  <span>Timezone</span>
+                  <span>时区</span>
                   <select v-model="form.timezone">
                     <option v-for="timezone in timezoneOptions" :key="timezone" :value="timezone">
                       {{ timezone }}
@@ -636,45 +660,45 @@ onUnmounted(() => {
               </template>
               <template v-else>
                 <label>
-                  <span>Every</span>
+                  <span>每隔</span>
                   <input v-model.number="form.intervalEvery" type="number" min="1" />
                 </label>
                 <label>
-                  <span>Unit</span>
+                  <span>单位</span>
                   <select v-model="form.intervalUnit">
-                    <option value="hour">Hours</option>
-                    <option value="day">Days</option>
+                    <option value="hour">小时</option>
+                    <option value="day">天</option>
                   </select>
                 </label>
               </template>
             </div>
             <div v-if="selectedTask && !showCreateForm" class="schedule-meta">
-              <span>Next: {{ formatDate(selectedTask.nextRunAt) }}</span>
-              <span>Last: {{ formatDate(selectedTask.lastRunAt) }}</span>
+              <span>下次：{{ formatDate(selectedTask.nextRunAt) }}</span>
+              <span>上次：{{ formatDate(selectedTask.lastRunAt) }}</span>
             </div>
           </section>
 
           <section class="panel wide">
-            <h3>Runtime</h3>
+            <h3>运行时</h3>
             <div class="form-grid two">
               <label>
-                <span>Permission</span>
+                <span>权限</span>
                 <select v-model="form.permissionMode" @change="handlePermissionModeChange">
-                  <option value="default">Default</option>
-                  <option value="full">Full session</option>
+                  <option value="default">默认</option>
+                  <option value="full">完全权限</option>
                 </select>
               </label>
               <label>
-                <span>Model</span>
+                <span>模型</span>
                 <select v-model="form.modelMode">
-                  <option value="default">Default model</option>
-                  <option value="custom">Custom model</option>
+                  <option value="default">默认模型</option>
+                  <option value="custom">自定义模型</option>
                 </select>
               </label>
             </div>
             <div v-if="form.modelMode === 'custom'" class="form-grid two">
               <label>
-                <span>Provider</span>
+                <span>服务商</span>
                 <select v-model="form.modelProviderID">
                   <option v-for="provider in providers" :key="provider.id" :value="provider.id">
                     {{ provider.name || provider.id }}
@@ -682,7 +706,7 @@ onUnmounted(() => {
                 </select>
               </label>
               <label>
-                <span>Model</span>
+                <span>模型</span>
                 <select v-model="form.modelID">
                   <option v-for="model in selectedProviderModels" :key="model.id" :value="model.id">
                     {{ model.name || model.id }}
@@ -692,39 +716,39 @@ onUnmounted(() => {
             </div>
             <div class="mcp-row">
               <div>
-                <strong>MCP resources</strong>
-                <p>{{ form.resourcesMode === 'default' ? 'Default MCP configuration' : 'Default MCP plus selected servers' }}</p>
+                <strong>MCP 资源</strong>
+                <p>{{ form.resourcesMode === 'default' ? '默认 MCP 配置' : '默认 MCP 加所选服务器' }}</p>
               </div>
               <button class="btn" @click="openMcpPicker" type="button">
                 <Settings2 :size="16" />
-                Pick MCP
+                选择 MCP
               </button>
             </div>
             <div class="chips">
               <span v-for="server in effectiveMcpServers" :key="server" class="chip">
                 {{ server }}
-                <button v-if="addedMcpServers.includes(server)" @click="removeMcpServer(server)" type="button">x</button>
+                <button v-if="addedMcpServers.includes(server)" @click="removeMcpServer(server)" type="button">×</button>
               </span>
-              <span v-if="effectiveMcpServers.length === 0" class="muted-text">No active MCP servers.</span>
+              <span v-if="effectiveMcpServers.length === 0" class="muted-text">暂无活跃的 MCP 服务器。</span>
             </div>
             <div v-if="showMcpPicker" class="picker-panel">
               <label v-for="server in availableMcpServers" :key="server.name" class="checkbox-row">
                 <input v-model="pendingMcpServers" type="checkbox" :value="server.name" />
                 <span>{{ server.name }}</span>
-                <small>{{ server.status }}</small>
+                <small>{{ mcpStatusText(server.status) }}</small>
               </label>
               <div class="form-actions">
-                <button class="btn" @click="showMcpPicker = false" type="button">Cancel</button>
-                <button class="btn primary" @click="applyMcpPicker" type="button">Apply</button>
+                <button class="btn" @click="showMcpPicker = false" type="button">取消</button>
+                <button class="btn primary" @click="applyMcpPicker" type="button">应用</button>
               </div>
             </div>
           </section>
 
           <section class="panel wide">
-            <h3>Prompt</h3>
+            <h3>提示词</h3>
             <textarea v-model="form.promptTemplate" rows="9" />
             <div class="preview-box">
-              <span>Preview</span>
+              <span>预览</span>
               <pre>{{ renderPreview() }}</pre>
             </div>
           </section>
@@ -733,17 +757,17 @@ onUnmounted(() => {
             <div class="form-actions">
               <button class="btn primary" @click="saveTask" :disabled="isSaving">
                 <Save :size="16" />
-                {{ showCreateForm ? 'Create task' : 'Save task' }}
+                {{ showCreateForm ? '创建任务' : '保存任务' }}
               </button>
             </div>
           </section>
 
           <section class="panel wide runs-panel">
             <div class="runs-heading">
-              <h3>Runs</h3>
+              <h3>运行记录</h3>
               <button class="btn" @click="refreshRuns">
                 <RefreshCw :size="16" />
-                Refresh
+                刷新
               </button>
             </div>
             <button
@@ -753,38 +777,38 @@ onUnmounted(() => {
               :class="{ active: selectedRunId === run.id }"
               @click="selectRun(run)"
             >
-              <span class="pill" :class="statusClass(run.status)">{{ run.status }}</span>
+              <span class="pill" :class="statusClass(run.status)">{{ runStatusText(run.status) }}</span>
               <span>{{ formatDate(run.time.created) }}</span>
-              <span>{{ run.reason || 'run' }}</span>
+              <span>{{ run.reason || '运行' }}</span>
               <strong>{{ runSummary(run) }}</strong>
             </button>
-            <div v-if="selectedRuns.length === 0" class="empty-note">No runs recorded.</div>
+            <div v-if="selectedRuns.length === 0" class="empty-note">暂无运行记录。</div>
             <div v-if="selectedRun" class="run-detail">
               <div class="run-detail-actions">
                 <button class="btn" @click="copyText(selectedRun.id)">
                   <Copy :size="16" />
-                  Copy ID
+                  复制 ID
                 </button>
                 <button class="btn" @click="openRunSession(selectedRun)" :disabled="!selectedRun.sessionID">
                   <Activity :size="16" />
-                  Open session
+                  打开会话
                 </button>
               </div>
               <dl>
-                <dt>Scheduled</dt><dd>{{ formatDate(selectedRun.scheduledAt) }}</dd>
-                <dt>Triggered</dt><dd>{{ formatDate(selectedRun.triggeredAt) }}</dd>
-                <dt>Started</dt><dd>{{ formatDate(selectedRun.time.started) }}</dd>
-                <dt>Finished</dt><dd>{{ formatDate(selectedRun.time.finished) }}</dd>
-                <dt>Session</dt><dd>{{ selectedRun.sessionID || 'None' }}</dd>
-                <dt>Turn</dt><dd>{{ selectedRun.turnSnapshotId || 'None' }}</dd>
+                <dt>计划时间</dt><dd>{{ formatDate(selectedRun.scheduledAt) }}</dd>
+                <dt>触发时间</dt><dd>{{ formatDate(selectedRun.triggeredAt) }}</dd>
+                <dt>开始时间</dt><dd>{{ formatDate(selectedRun.time.started) }}</dd>
+                <dt>结束时间</dt><dd>{{ formatDate(selectedRun.time.finished) }}</dd>
+                <dt>会话</dt><dd>{{ selectedRun.sessionID || '无' }}</dd>
+                <dt>轮次</dt><dd>{{ selectedRun.turnSnapshotId || '无' }}</dd>
               </dl>
               <div v-if="selectedRun.error" class="error-box">{{ selectedRun.error }}</div>
               <div v-if="selectedRun.promptPreview" class="preview-box">
-                <span>Prompt preview</span>
+                <span>提示词预览</span>
                 <pre>{{ selectedRun.promptPreview }}</pre>
               </div>
               <div v-if="selectedRun.responseBody" class="preview-box">
-                <span>Controller response</span>
+                <span>控制器响应</span>
                 <pre>{{ formatJson(selectedRun.responseBody) }}</pre>
               </div>
             </div>
@@ -825,7 +849,7 @@ onUnmounted(() => {
 .metric {
   gap: var(--space-xs);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 600;
 }
 
@@ -840,7 +864,7 @@ onUnmounted(() => {
 .btn {
   height: 36px;
   padding: 0 var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   color: var(--text-primary);
@@ -849,7 +873,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: var(--space-xs);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
 }
 
@@ -885,7 +909,7 @@ onUnmounted(() => {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   color: var(--success);
 }
@@ -903,7 +927,7 @@ onUnmounted(() => {
 .panel {
   min-width: 0;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
 }
@@ -927,7 +951,7 @@ onUnmounted(() => {
 }
 
 .column-header {
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .column-header h2,
@@ -942,11 +966,11 @@ onUnmounted(() => {
 .column-header h2,
 .panel h3,
 .runs-heading h3 {
-  font-size: 15px;
+  font-size: var(--text-md);
 }
 
 .detail-header h2 {
-  font-size: 22px;
+  font-size: var(--text-2xl);
 }
 
 .detail-header p,
@@ -954,7 +978,7 @@ onUnmounted(() => {
 .muted-text {
   margin: 2px 0 0;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .task-item {
@@ -1004,7 +1028,7 @@ onUnmounted(() => {
 
 .task-copy span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .task-badges {
@@ -1022,7 +1046,7 @@ onUnmounted(() => {
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
   white-space: nowrap;
 }
@@ -1071,7 +1095,7 @@ label {
   display: grid;
   gap: var(--space-xs);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
@@ -1080,12 +1104,12 @@ select,
 textarea {
   width: 100%;
   min-width: 0;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 input,
@@ -1124,7 +1148,7 @@ textarea {
   gap: var(--space-xs);
   min-height: 34px;
   padding: 0 var(--space-sm);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
   cursor: pointer;
@@ -1140,7 +1164,7 @@ textarea {
   flex-wrap: wrap;
   gap: var(--space-md);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .mcp-row {
@@ -1163,7 +1187,7 @@ textarea {
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .chip button {
@@ -1192,7 +1216,7 @@ textarea {
 
 .preview-box span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
@@ -1205,10 +1229,10 @@ pre {
   padding: var(--space-sm);
   border-radius: var(--radius-md);
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -1219,7 +1243,7 @@ pre {
   gap: var(--space-sm);
   align-items: center;
   padding: var(--space-sm);
-  border: 0.5px solid transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
@@ -1240,7 +1264,7 @@ pre {
   gap: var(--space-md);
   margin-top: var(--space-md);
   padding-top: var(--space-md);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .run-detail dl {
@@ -1252,7 +1276,7 @@ pre {
 
 .run-detail dt {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .run-detail dd {
@@ -1272,17 +1296,11 @@ pre {
 .empty-note {
   padding: var(--space-md);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .spin {
   animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 @media (max-width: 980px) {

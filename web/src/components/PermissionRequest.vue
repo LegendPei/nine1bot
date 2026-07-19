@@ -18,17 +18,17 @@ const errorMessage = ref('')
 
 const permissionLabel = computed(() => {
   const labels: Record<string, string> = {
-    bash: 'Execute Command',
-    edit: 'Edit File',
-    read: 'Read File',
-    glob: 'Search Files',
-    grep: 'Search Content',
-    list: 'List Directory',
-    webfetch: 'Fetch URL',
-    websearch: 'Web Search',
-    task: 'Run Task',
-    external_directory: 'Access External Directory',
-    doom_loop: 'Repeat Tool Call',
+    bash: '执行命令',
+    edit: '编辑文件',
+    read: '读取文件',
+    glob: '搜索文件',
+    grep: '搜索内容',
+    list: '列出目录',
+    webfetch: '访问 URL',
+    websearch: '网页搜索',
+    task: '运行任务',
+    external_directory: '访问外部目录',
+    doom_loop: '重复工具调用',
   }
   return labels[props.request.permission] || props.request.permission
 })
@@ -61,7 +61,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
     emit('responded', reply)
   } catch (error) {
     console.error('Failed to respond to permission:', error)
-    errorMessage.value = error instanceof Error ? error.message : 'Operation failed, please retry'
+    errorMessage.value = error instanceof Error ? error.message : '操作失败，请重试'
     responseType.value = null
   } finally {
     isSubmitting.value = false
@@ -93,7 +93,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
           <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         </svg>
       </div>
-      <span class="permission-label">Permission Request</span>
+      <span class="permission-label">权限请求</span>
     </div>
 
     <div class="permission-content">
@@ -113,7 +113,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
         @click="respond('reject')"
       >
         <span v-if="isSubmitting && responseType === 'reject'" class="loading-spinner small"></span>
-        <span v-else>Reject</span>
+        <span v-else>拒绝</span>
       </button>
       <button
         class="btn btn-ghost"
@@ -121,7 +121,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
         @click="respond('once')"
       >
         <span v-if="isSubmitting && responseType === 'once'" class="loading-spinner small"></span>
-        <span v-else>Allow Once</span>
+        <span v-else>允许一次</span>
       </button>
       <button
         class="btn btn-primary"
@@ -129,7 +129,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
         @click="respond('always')"
       >
         <span v-if="isSubmitting && responseType === 'always'" class="loading-spinner small"></span>
-        <span v-else>Always Allow</span>
+        <span v-else>始终允许</span>
       </button>
     </div>
 
@@ -147,19 +147,19 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M20 6L9 17l-5-5"/>
         </svg>
-        <span>Always Allowed</span>
+        <span>已始终允许</span>
       </template>
       <template v-else-if="responseType === 'once'">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M20 6L9 17l-5-5"/>
         </svg>
-        <span>Allowed Once</span>
+        <span>已允许一次</span>
       </template>
       <template v-else>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 6L6 18M6 6l12 12"/>
         </svg>
-        <span>Rejected</span>
+        <span>已拒绝</span>
       </template>
     </div>
   </div>
@@ -168,7 +168,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
 <style scoped>
 .permission-request {
   background: var(--glass-bg);
-  border: 0.5px solid var(--warning, #f59e0b);
+  border: 1px solid var(--warning);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   margin: var(--space-sm) 0;
@@ -187,7 +187,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
 }
 
 .permission-icon {
-  color: var(--warning, #f59e0b);
+  color: var(--warning);
   display: flex;
   align-items: center;
 }
@@ -195,7 +195,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
 .permission-label {
   font-size: 0.75rem;
   font-weight: 600;
-  color: var(--warning, #f59e0b);
+  color: var(--warning);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -245,13 +245,13 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
   justify-content: flex-end;
   gap: var(--space-sm);
   padding-top: var(--space-sm);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .btn-danger {
   background: transparent;
   color: var(--error);
-  border: 0.5px solid var(--error);
+  border: 1px solid var(--error);
 }
 
 .btn-danger:hover:not(:disabled) {
@@ -266,7 +266,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
   font-size: 0.75rem;
   font-weight: 500;
   padding-top: var(--space-sm);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .permission-responded svg {
@@ -295,7 +295,7 @@ const respond = async (reply: 'once' | 'always' | 'reject') => {
   margin-top: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: rgba(239, 68, 68, 0.1);
-  border: 0.5px solid var(--error);
+  border: 1px solid var(--error);
   border-radius: var(--radius-sm);
   color: var(--error);
   font-size: 0.8125rem;

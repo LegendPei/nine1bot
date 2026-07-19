@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { Search, X, MessageSquare, Clock } from 'lucide-vue-next'
 import type { Session } from '../api/client'
+import { highlightMatch } from '../utils/highlight'
 
 const props = defineProps<{
   recentSessions?: Session[]
@@ -15,6 +16,16 @@ const emit = defineEmits<{
 const query = ref('')
 const selectedIndex = ref(0)
 const inputRef = ref<HTMLInputElement>()
+const resultsRef = ref<HTMLElement>()
+
+// 键盘导航后确保选中项滚入可视区域
+function scrollSelectedIntoView() {
+  void nextTick(() => {
+    resultsRef.value
+      ?.querySelector('.search-result-item.selected')
+      ?.scrollIntoView({ block: 'nearest' })
+  })
+}
 
 // Display list: recent sessions when no query, search results when query exists
 const displayList = computed(() => {
@@ -27,7 +38,7 @@ const displayList = computed(() => {
 })
 
 const displayLabel = computed(() => {
-  return query.value.trim() ? `${displayList.value.length} results` : 'Recent'
+  return query.value.trim() ? `${displayList.value.length} 个结果` : '最近会话'
 })
 
 watch([query, () => props.recentSessions], () => {
@@ -43,16 +54,19 @@ function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowDown') {
     e.preventDefault()
     selectedIndex.value = Math.min(selectedIndex.value + 1, displayList.value.length - 1)
+    scrollSelectedIntoView()
     return
   }
 
   if (e.key === 'ArrowUp') {
     e.preventDefault()
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0)
+    scrollSelectedIntoView()
     return
   }
 
   if (e.key === 'Enter') {
+    if (e.isComposing || e.keyCode === 229) return
     e.preventDefault()
     const session = displayList.value[selectedIndex.value]
     if (session) {
@@ -79,22 +93,15 @@ function formatTime(timestamp: number): string {
   const hours = Math.floor(diff / 3600000)
   const days = Math.floor(diff / 86400000)
 
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
-  if (hours < 24) return `${hours}h ago`
-  if (days < 7) return `${days}d ago`
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  if (hours < 24) return `${hours} 小时前`
+  if (days < 7) return `${days} 天前`
   return new Date(timestamp).toLocaleDateString()
 }
 
 function getSessionTitle(session: Session): string {
   return session.title || `会话 ${session.id.slice(0, 6)}`
-}
-
-// Highlight matching text
-function highlightMatch(text: string, search: string): string {
-  if (!search.trim()) return text
-  const regex = new RegExp(`(${search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
-  return text.replace(regex, '<mark>$1</mark>')
 }
 
 onMounted(async () => {
@@ -119,7 +126,7 @@ onUnmounted(() => {
           v-model="query"
           type="text"
           class="search-input"
-          placeholder="Search sessions..."
+          placeholder="搜索会话..."
           autocomplete="off"
         />
         <button class="search-close-btn" @click="emit('close')">
@@ -130,7 +137,7 @@ onUnmounted(() => {
       <!-- Results -->
       <div class="search-results">
         <div class="search-results-label">{{ displayLabel }}</div>
-        <div class="search-results-list">
+        <div class="search-results-list" ref="resultsRef">
           <button
             v-for="(session, index) in displayList"
             :key="session.id"
@@ -142,7 +149,7 @@ onUnmounted(() => {
             <MessageSquare :size="14" class="result-icon" />
             <span
               class="result-title"
-              v-html="query.trim() ? highlightMatch(getSessionTitle(session), query) : getSessionTitle(session)"
+              v-html="highlightMatch(getSessionTitle(session), query)"
             ></span>
             <span class="result-time">
               <Clock :size="12" />
@@ -151,7 +158,7 @@ onUnmounted(() => {
           </button>
 
           <div v-if="displayList.length === 0" class="search-empty">
-            {{ query.trim() ? 'No sessions found' : 'No recent sessions' }}
+            {{ query.trim() ? '未找到匹配的会话' : '暂无最近会话' }}
           </div>
         </div>
       </div>
@@ -159,9 +166,9 @@ onUnmounted(() => {
       <!-- Footer hint -->
       <div class="search-footer">
         <span class="search-hint">
-          <kbd>↑</kbd><kbd>↓</kbd> navigate
-          <kbd>↵</kbd> select
-          <kbd>esc</kbd> close
+          <kbd>↑</kbd><kbd>↓</kbd> 切换
+          <kbd>↵</kbd> 选择
+          <kbd>esc</kbd> 关闭
         </span>
       </div>
     </div>
@@ -172,7 +179,7 @@ onUnmounted(() => {
 .search-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-overlay);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -191,7 +198,7 @@ onUnmounted(() => {
   width: 100%;
   max-width: 600px;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
@@ -215,7 +222,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   padding: 14px 16px;
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .search-input-icon {
@@ -229,7 +236,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: var(--text-md);
   font-weight: 400;
   outline: none;
 }
@@ -267,15 +274,15 @@ onUnmounted(() => {
 .search-results-label {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-base);
   padding: 10px 16px 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   background: var(--bg-elevated);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .search-results-list {
@@ -292,7 +299,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   text-align: left;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -342,7 +349,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -350,13 +357,13 @@ onUnmounted(() => {
   padding: 24px 16px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 /* Footer */
 .search-footer {
   padding: 8px 16px;
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   justify-content: center;
   background: var(--bg-elevated);
@@ -366,7 +373,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -378,10 +385,10 @@ onUnmounted(() => {
   height: 18px;
   padding: 0 4px;
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: 3px;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 500;
   color: var(--text-secondary);
 }

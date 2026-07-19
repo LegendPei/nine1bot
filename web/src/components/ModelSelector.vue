@@ -64,12 +64,12 @@ function isDefault(providerId: string, modelId: string) {
             v-for="model in provider.models"
             :key="model.id"
             class="model-card"
-            :class="{ active: currentModel === model.id, disabled: !provider.authenticated }"
+            :class="{ active: currentProvider === provider.id && currentModel === model.id, disabled: !provider.authenticated }"
             @click="provider.authenticated && emit('select', provider.id, model.id)"
           >
             <div class="model-radio">
               <div class="radio-outer">
-                <div v-if="currentModel === model.id" class="radio-inner"></div>
+                <div v-if="currentProvider === provider.id && currentModel === model.id" class="radio-inner"></div>
               </div>
             </div>
             <div class="model-info">
@@ -175,7 +175,7 @@ function isDefault(providerId: string, modelId: string) {
   gap: var(--space-sm);
   padding: var(--space-md);
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -240,10 +240,10 @@ function isDefault(providerId: string, modelId: string) {
 }
 
 .badge-default {
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 1px 6px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border-radius: var(--radius-sm);
   font-weight: 500;
   line-height: 1.4;
@@ -257,7 +257,7 @@ function isDefault(providerId: string, modelId: string) {
 }
 
 .set-default-btn {
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 0 4px;
   background: none;
   border: none;

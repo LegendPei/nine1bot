@@ -95,10 +95,6 @@ const renderedHtml = computed(() => {
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .markdown-body {
   padding: var(--space-lg);
   max-width: 800px;
@@ -120,8 +116,8 @@ const renderedHtml = computed(() => {
   line-height: 1.3;
 }
 
-.markdown-body :deep(h1) { font-size: 2em; border-bottom: 0.5px solid var(--border-default); padding-bottom: 0.3em; }
-.markdown-body :deep(h2) { font-size: 1.5em; border-bottom: 0.5px solid var(--border-default); padding-bottom: 0.3em; }
+.markdown-body :deep(h1) { font-size: 2em; border-bottom: 1px solid var(--border-default); padding-bottom: 0.3em; }
+.markdown-body :deep(h2) { font-size: 1.5em; border-bottom: 1px solid var(--border-default); padding-bottom: 0.3em; }
 .markdown-body :deep(h3) { font-size: 1.25em; }
 .markdown-body :deep(h4) { font-size: 1em; }
 
@@ -185,7 +181,7 @@ const renderedHtml = computed(() => {
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
   padding: 0.5em 1em;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   text-align: left;
 }
 
@@ -202,6 +198,6 @@ const renderedHtml = computed(() => {
 .markdown-body :deep(hr) {
   margin: 2em 0;
   border: none;
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 </style>

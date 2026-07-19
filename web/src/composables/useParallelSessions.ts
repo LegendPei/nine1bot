@@ -77,9 +77,13 @@ export function useParallelSessions() {
     return runningStates[sessionId] ?? false
   }
 
-  // Set session running state
+  // Set session running state（false 直接删除条目，避免状态表只增不减）
   function setSessionRunning(sessionId: string, running: boolean) {
-    runningStates[sessionId] = running
+    if (running) {
+      runningStates[sessionId] = true
+    } else {
+      delete runningStates[sessionId]
+    }
   }
 
   // Get list of running session IDs

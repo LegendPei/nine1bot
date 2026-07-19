@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { X, FileText, Copy, Check } from 'lucide-vue-next'
-import { ref, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import type { FileContent } from '../api/client'
+import { getFileName } from '../utils/path'
 
 const props = defineProps<{
   file: FileContent | null
   isLoading: boolean
   error: string | null
+  truncated?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -31,17 +33,25 @@ async function copyContent() {
   }
 }
 
-// 组件销毁时清理定时器
+// Escape 关闭查看器
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    emit('close')
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('keydown', handleKeydown)
+})
+
+// 组件销毁时清理定时器和监听器
 onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown)
   if (copyTimer) {
     clearTimeout(copyTimer)
     copyTimer = null
   }
 })
-
-function getFileName(path: string): string {
-  return path.split('/').pop() || path.split('\\').pop() || path
-}
 </script>
 
 <template>
@@ -64,6 +74,9 @@ function getFileName(path: string): string {
       </div>
 
       <div class="viewer-body custom-scrollbar">
+        <div v-if="truncated && !isLoading && !error" class="viewer-truncated-banner">
+          文件过大，仅显示前 500KB 内容
+        </div>
         <div v-if="isLoading" class="viewer-loading">
           <div class="loading-spinner"></div>
           <span>加载中...</span>
@@ -93,14 +106,14 @@ function getFileName(path: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-overlay);
   backdrop-filter: blur(4px);
   padding: var(--space-lg);
 }
 
 .file-viewer {
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   width: 100%;
   max-width: 900px;
@@ -115,7 +128,7 @@ function getFileName(path: string): string {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-md);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .viewer-title {
@@ -163,6 +176,15 @@ function getFileName(path: string): string {
   flex-direction: column;
 }
 
+.viewer-truncated-banner {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--warning-subtle, var(--accent-subtle));
+  color: var(--warning, var(--accent));
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-13);
+  flex-shrink: 0;
+}
+
 .viewer-loading,
 .viewer-error,
 .viewer-empty {
@@ -176,7 +198,7 @@ function getFileName(path: string): string {
 }
 
 .viewer-error {
-  color: var(--error, #ef4444);
+  color: var(--error);
 }
 
 .loading-spinner {
@@ -188,16 +210,12 @@ function getFileName(path: string): string {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 .viewer-content {
   margin: 0;
   padding: var(--space-md);
   background: var(--bg-secondary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.6;
   color: var(--text-primary);
   white-space: pre;
@@ -219,9 +237,9 @@ function getFileName(path: string): string {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-sm) var(--space-md);
-  border-top: 0.5px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
   background: var(--bg-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 

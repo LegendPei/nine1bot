@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Component } from 'vue'
+import { File, FileCode, FileText, FileImage, Folder, FolderOpen } from 'lucide-vue-next'
 import type { FileTreeNode } from '../composables/useFiles'
 
 defineProps<{
@@ -12,34 +14,35 @@ const emit = defineEmits<{
   select: [node: FileTreeNode]
 }>()
 
-function getIcon(node: FileTreeNode): string {
+function getIcon(node: FileTreeNode): Component {
   if (node.type === 'directory') {
-    return node.isExpanded ? '📂' : '📁'
+    return node.isExpanded ? FolderOpen : Folder
   }
 
   const ext = node.name.split('.').pop()?.toLowerCase()
   switch (ext) {
     case 'ts':
     case 'tsx':
-      return '🔷'
     case 'js':
     case 'jsx':
-      return '🟨'
     case 'vue':
-      return '💚'
     case 'json':
-      return '📋'
-    case 'md':
-      return '📝'
     case 'css':
     case 'scss':
-      return '🎨'
     case 'html':
-      return '🌐'
+      return FileCode
+    case 'md':
+    case 'txt':
+      return FileText
     case 'svg':
-      return '🖼️'
+    case 'png':
+    case 'jpg':
+    case 'jpeg':
+    case 'gif':
+    case 'webp':
+      return FileImage
     default:
-      return '📄'
+      return File
   }
 }
 
@@ -53,7 +56,7 @@ function handleClick(node: FileTreeNode) {
 </script>
 
 <template>
-  <div class="file-tree" :style="{ '--depth': depth || 0 }">
+  <div class="file-tree">
     <div v-if="isLoading && (!files || files.length === 0)" class="loading">
       加载中...
     </div>
@@ -75,7 +78,12 @@ function handleClick(node: FileTreeNode) {
           </svg>
         </span>
         <span v-else class="chevron-placeholder"></span>
-        <span class="icon">{{ getIcon(node) }}</span>
+        <component
+          :is="getIcon(node)"
+          :size="14"
+          class="icon"
+          :class="{ 'icon-directory': node.type === 'directory' }"
+        />
         <span class="name mono">{{ node.name }}</span>
         <span v-if="node.isLoading" class="loading-spinner"></span>
       </div>
@@ -101,7 +109,7 @@ function handleClick(node: FileTreeNode) {
 
 .loading {
   padding: 12px 16px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -147,13 +155,17 @@ function handleClick(node: FileTreeNode) {
 }
 
 .icon {
-  font-size: 14px;
   margin-right: 6px;
   flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.icon-directory {
+  color: var(--accent);
 }
 
 .name {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -168,9 +180,5 @@ function handleClick(node: FileTreeNode) {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   margin-left: auto;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 </style>

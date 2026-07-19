@@ -279,16 +279,16 @@ function handleOverlayClick(e: MouseEvent) {
               <code>{{ provenance.license }} / {{ provenance.spdxLicenseIdentifier }}</code>
             </div>
             <div class="about-row">
-              <span>Provenance ID</span>
+              <span>溯源 ID</span>
               <code>{{ provenance.provenanceId }}</code>
             </div>
             <div class="about-row">
               <span>构建提交</span>
-              <code>{{ provenance.build.commit || 'development' }}</code>
+              <code>{{ provenance.build.commit || '开发版' }}</code>
             </div>
             <div class="about-row">
               <span>构建时间</span>
-              <code>{{ provenance.build.date || 'development' }}</code>
+              <code>{{ provenance.build.date || '开发版' }}</code>
             </div>
           </div>
 
@@ -312,7 +312,7 @@ function handleOverlayClick(e: MouseEvent) {
             <h3 class="profile-section-title">头像</h3>
             <div class="avatar-section">
               <div class="avatar-preview">
-                <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="Avatar" class="avatar-preview-img" />
+                <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="头像" class="avatar-preview-img" />
                 <User v-else :size="32" />
               </div>
               <div class="avatar-actions">
@@ -335,7 +335,7 @@ function handleOverlayClick(e: MouseEvent) {
             <p class="profile-section-desc">自定义对话中 AI 助手的头像</p>
             <div class="avatar-section">
               <div class="avatar-preview bot-avatar-preview">
-                <img v-if="botAvatar.botAvatarUrl" :src="botAvatar.botAvatarUrl" alt="Bot Avatar" class="avatar-preview-img" />
+                <img v-if="botAvatar.botAvatarUrl" :src="botAvatar.botAvatarUrl" alt="Bot 头像" class="avatar-preview-img" />
                 <svg v-else width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M12 8V4H8"/>
                   <rect width="16" height="12" x="4" y="8" rx="2"/>
@@ -393,7 +393,7 @@ function handleOverlayClick(e: MouseEvent) {
             <p class="profile-section-desc">自定义侧边栏顶部的 Nine1Bot logo</p>
             <div class="avatar-section">
               <div class="logo-preview">
-                <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="Logo" class="logo-preview-img" />
+                <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="品牌 Logo" class="logo-preview-img" />
                 <span v-else class="logo-preview-text">N</span>
               </div>
               <div class="avatar-actions">
@@ -424,7 +424,7 @@ function handleOverlayClick(e: MouseEvent) {
 
 .settings-tabs {
   padding: 0 var(--space-lg);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .settings-tabs .tabs {
@@ -451,7 +451,7 @@ function handleOverlayClick(e: MouseEvent) {
 
 .settings-tabs .tab:hover {
   color: var(--text-primary);
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--hover-overlay);
 }
 
 .settings-tabs .tab.active {
@@ -474,14 +474,14 @@ function handleOverlayClick(e: MouseEvent) {
 }
 
 .profile-section-title {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
 }
 
 .profile-section-desc {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   margin: 0;
 }
@@ -513,7 +513,7 @@ function handleOverlayClick(e: MouseEvent) {
 
 .bot-avatar-preview {
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border-radius: var(--radius-sm);
 }
 
@@ -536,11 +536,11 @@ function handleOverlayClick(e: MouseEvent) {
   width: 100%;
   padding: 8px 12px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   outline: none;
   transition: border-color 0.2s;
 }
@@ -555,12 +555,12 @@ function handleOverlayClick(e: MouseEvent) {
   justify-content: space-between;
   padding: 8px 12px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
 }
 
 .theme-label {
-  font-size: 14px;
+  font-size: var(--text-base);
   color: var(--text-secondary);
 }
 
@@ -573,7 +573,7 @@ function handleOverlayClick(e: MouseEvent) {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
@@ -603,7 +603,7 @@ function handleOverlayClick(e: MouseEvent) {
 }
 
 .logo-preview-text {
-  font-size: 24px;
+  font-size: var(--text-2xl);
   font-weight: 600;
   color: var(--text-muted);
 }
@@ -638,14 +638,14 @@ function handleOverlayClick(e: MouseEvent) {
 
 .about-title h3 {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .about-title p {
   margin: 4px 0 0;
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   overflow-wrap: anywhere;
 }
@@ -661,11 +661,11 @@ function handleOverlayClick(e: MouseEvent) {
   gap: var(--space-md);
   align-items: center;
   padding: 10px 0;
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .about-row span {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
 }
 
@@ -673,7 +673,7 @@ function handleOverlayClick(e: MouseEvent) {
   min-width: 0;
   padding: 3px 6px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   background: var(--bg-tertiary);
   border-radius: var(--radius-sm);

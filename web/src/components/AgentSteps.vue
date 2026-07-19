@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { ChevronRight, ChevronDown, Check } from 'lucide-vue-next'
 import type { MessagePart } from '../api/client'
 import ToolCall from './ToolCall.vue'
+import { getToolDisplayName } from '../utils/tool-names'
 
 interface Step {
   parts: MessagePart[]
@@ -34,22 +35,16 @@ const stepSummary = computed(() => {
     const count = allParts.value.filter(p => p.type === 'tool').length
     return count > 0 ? `${count} 个操作` : `${props.steps.length} 个步骤`
   }
-  const name = getToolDisplayName(lastTool)
+  const name = getToolName(lastTool)
   const target = getToolTarget(lastTool)
   if (target) return `${name} · ${target}`
   return name
 })
 
-function getToolDisplayName(part: MessagePart): string {
+function getToolName(part: MessagePart): string {
   const title = part.state?.title
   if (title) return title
-  const names: Record<string, string> = {
-    read: 'Read', write: 'Write', edit: 'Edit', bash: 'Bash',
-    grep: 'Grep', glob: 'Glob', list: 'List', webfetch: 'Fetch',
-    task: 'Task', todowrite: 'Todo', todoread: 'Todo'
-  }
-  const toolName = (part.tool || '').toLowerCase()
-  return names[toolName] || part.tool || 'Tool'
+  return getToolDisplayName((part.tool || '').toLowerCase(), part.tool || '工具')
 }
 
 function getToolTarget(part: MessagePart): string {
@@ -164,13 +159,8 @@ function needsExpandButton(text: string): boolean {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--success, #16a34a) 15%, transparent);
-  color: var(--success, #16a34a);
-}
-
-:root[data-theme='dark'] .steps-icon {
-  background: color-mix(in srgb, #22c55e 15%, transparent);
-  color: #22c55e;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
 }
 
 .steps-summary {
@@ -178,7 +168,7 @@ function needsExpandButton(text: string): boolean {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: var(--font-mono);
   color: var(--text-muted);
 }
@@ -217,7 +207,7 @@ function needsExpandButton(text: string): boolean {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: var(--font-mono);
   color: var(--text-muted);
 }
@@ -229,7 +219,7 @@ function needsExpandButton(text: string): boolean {
 }
 
 .step-divider {
-  height: 0.5px;
+  height: 1px;
   background: var(--border-subtle);
   margin: 8px 0;
 }
@@ -240,7 +230,7 @@ function needsExpandButton(text: string): boolean {
 }
 
 .reasoning-text {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   font-style: italic;
   white-space: pre-wrap;
@@ -256,7 +246,7 @@ function needsExpandButton(text: string): boolean {
 }
 
 .reasoning-toggle {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--accent);
   cursor: pointer;
   background: none;
@@ -275,7 +265,7 @@ function needsExpandButton(text: string): boolean {
   animation: wave 1.2s infinite ease-in-out;
   display: inline-block;
   margin: 0 1px;
-  font-size: 18px;
+  font-size: var(--text-lg);
   line-height: 10px;
   color: var(--text-muted);
 }

@@ -7,6 +7,13 @@ const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matc
 
 const theme = ref<Theme>(storedTheme || (systemPrefersDark ? 'dark' : 'light'))
 
+// 模块级单例：模块加载（App 启动）即应用主题并持久化，
+// 不依赖任何组件挂载，也不随组件卸载而停止
+watchEffect(() => {
+  document.documentElement.setAttribute('data-theme', theme.value)
+  localStorage.setItem('nine1bot-theme', theme.value)
+})
+
 export function useTheme() {
   const toggleTheme = () => {
     theme.value = theme.value === 'dark' ? 'light' : 'dark'
@@ -15,11 +22,6 @@ export function useTheme() {
   const setTheme = (newTheme: Theme) => {
     theme.value = newTheme
   }
-
-  watchEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme.value)
-    localStorage.setItem('nine1bot-theme', theme.value)
-  })
 
   return {
     theme,

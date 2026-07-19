@@ -2,7 +2,7 @@
 import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { Send, Square, Paperclip, X, FileText, ClipboardList, Plus, ChevronDown, Check, Server, Zap, Minimize2, ListTodo } from 'lucide-vue-next'
 import { useFileUpload } from '../composables/useFileUpload'
-import type { Provider, Message } from '../api/client'
+import type { Provider } from '../api/client'
 
 const props = defineProps<{
   disabled: boolean
@@ -13,11 +13,10 @@ const props = defineProps<{
   currentProvider?: string
   currentModel?: string
   mode?: 'chat' | 'agent'
-  messages?: Message[]
 }>()
 
 const emit = defineEmits<{
-  send: [content: string, files: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode: boolean]
+  send: [content: string, files: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode: boolean, onResult?: (success: boolean) => void]
   abort: []
   'select-model': [providerId: string, modelId: string]
   'open-mcp': []
@@ -83,8 +82,8 @@ function handleSend() {
 
   const content = input.value.trim()
   const fileParts = toMessageParts()
+  const planMode = isPlanMode.value
 
-  emit('send', content, fileParts, isPlanMode.value)
   input.value = ''
   clearAll()
   isPlanMode.value = false
@@ -92,6 +91,13 @@ function handleSend() {
   if (textareaRef.value) {
     textareaRef.value.style.height = 'auto'
   }
+
+  // 发送失败时由父级回调恢复草稿文本
+  emit('send', content, fileParts, planMode, (success: boolean) => {
+    if (!success) {
+      input.value = content
+    }
+  })
 }
 
 function togglePlanMode() {
@@ -101,6 +107,7 @@ function togglePlanMode() {
 
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.isComposing || e.keyCode === 229) return
     e.preventDefault()
     if (props.isStreaming) {
       emit('abort')
@@ -217,7 +224,7 @@ function formatSize(bytes: number): string {
     <div v-if="isDragging" class="drag-overlay">
       <div class="drag-content">
         <Paperclip :size="32" />
-        <span>Drop files here</span>
+        <span>将文件拖放到此处</span>
       </div>
     </div>
 
@@ -241,7 +248,7 @@ function formatSize(bytes: number): string {
           <span v-if="file.status === 'selected'" class="attachment-status processing">队列中</span>
           <span v-else-if="file.status === 'uploading'" class="attachment-status processing">{{ file.progress }}%</span>
           <span v-else-if="file.status === 'error'" class="attachment-status error">!</span>
-          <button @click.stop="removeFile(file.id)" class="attachment-remove" title="Remove">
+          <button @click.stop="removeFile(file.id)" class="attachment-remove" title="移除">
             <X :size="14" />
           </button>
         </div>
@@ -278,7 +285,7 @@ function formatSize(bytes: number): string {
           ref="textareaRef"
           v-model="input"
           :disabled="disabled && !isStreaming"
-          :placeholder="isStreaming ? '按 Enter 停止响应...' : 'How can I help you today?'"
+          :placeholder="isStreaming ? '按 Enter 停止响应...' : '有什么可以帮你的？'"
           rows="1"
           @keydown="handleKeydown"
           @paste="handlePaste"
@@ -295,7 +302,7 @@ function formatSize(bytes: number): string {
               class="toolbar-btn plus-btn"
               @click.stop="showPlusMenu = !showPlusMenu"
               :disabled="disabled && !isStreaming"
-              title="Add files, connectors, and more"
+              title="添加文件和更多功能"
             >
               <Plus :size="18" />
             </button>
@@ -303,27 +310,27 @@ function formatSize(bytes: number): string {
             <div v-if="showPlusMenu" class="plus-dropdown">
               <button class="plus-menu-item" @click="handleFileSelect">
                 <Paperclip :size="16" />
-                <span>Add files or photos</span>
+                <span>添加文件或图片</span>
               </button>
               <div class="plus-menu-divider"></div>
               <button class="plus-menu-item" @click="showPlusMenu = false; emit('toggle-mcp-panel')">
                 <Server :size="16" />
-                <span>MCP Servers</span>
+                <span>MCP 服务器</span>
               </button>
               <button class="plus-menu-item" @click="showPlusMenu = false; emit('open-skills')">
                 <Zap :size="16" />
-                <span>Skills</span>
+                <span>技能</span>
               </button>
               <div class="plus-menu-divider"></div>
               <button class="plus-menu-item" @click="showPlusMenu = false; emit('compress-session')">
                 <Minimize2 :size="16" />
-                <span>Compress session</span>
+                <span>压缩会话</span>
               </button>
               <template v-if="mode === 'agent'">
                 <div class="plus-menu-divider"></div>
                 <button class="plus-menu-item" :class="{ active: isPlanMode }" @click="togglePlanMode">
                   <ClipboardList :size="16" />
-                  <span>Plan mode</span>
+                  <span>Plan 模式</span>
                   <span v-if="isPlanMode" class="plus-menu-check">
                     <Check :size="14" />
                   </span>
@@ -336,7 +343,7 @@ function formatSize(bytes: number): string {
           <button
             class="toolbar-btn icon-btn"
             @click="emit('toggle-plan')"
-            title="View plan"
+            title="查看计划"
           >
             <ClipboardList :size="18" />
           </button>
@@ -345,7 +352,7 @@ function formatSize(bytes: number): string {
           <button
             class="toolbar-btn icon-btn"
             @click="emit('toggle-todo')"
-            title="Todo list"
+            title="待办列表"
           >
             <ListTodo :size="18" />
           </button>
@@ -379,6 +386,16 @@ function formatSize(bytes: number): string {
               </template>
             </div>
           </div>
+          <!-- 无可用 provider 时保留一个禁用入口，避免模型选择能力静默消失 -->
+          <div v-else class="model-selector-inline">
+            <button
+              class="model-trigger-inline model-trigger-disabled"
+              disabled
+              title="尚未配置模型提供商，请在设置中添加"
+            >
+              <span class="model-name-inline">未配置模型</span>
+            </button>
+          </div>
 
           <!-- Send/Abort Button -->
           <button
@@ -397,7 +414,7 @@ function formatSize(bytes: number): string {
 
     <div class="input-footer">
       <div class="input-hint text-xs text-muted">
-        Nine1Bot may display inaccurate info, including about people, so double-check its responses.
+        Nine1Bot 可能显示不准确的信息（包括与人相关的内容），请核对后再采用。
       </div>
     </div>
   </div>
@@ -426,7 +443,7 @@ function formatSize(bytes: number): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  z-index: var(--z-sticky);
   pointer-events: none;
 }
 
@@ -447,11 +464,11 @@ function formatSize(bytes: number): string {
 .upload-error {
   margin-bottom: 8px;
   padding: 8px 12px;
-  border: 0.5px solid var(--error);
+  border: 1px solid var(--error);
   border-radius: var(--radius-md);
   background: var(--error-subtle);
   color: var(--error);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -467,9 +484,9 @@ function formatSize(bytes: number): string {
   gap: 8px;
   padding: 6px 10px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: var(--text-sm);
   max-width: 200px;
 }
 
@@ -512,11 +529,11 @@ function formatSize(bytes: number): string {
 
 .attachment-size {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .attachment-status {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: bold;
 }
 
@@ -586,7 +603,7 @@ function formatSize(bytes: number): string {
   resize: none;
   color: var(--text-primary);
   font-family: var(--font-serif);
-  font-size: 16px;
+  font-size: var(--text-md);
   font-weight: 400;
   line-height: 1.5;
   max-height: 200px;
@@ -663,6 +680,15 @@ function formatSize(bytes: number): string {
   color: var(--text-primary);
 }
 
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Plus Menu Dropdown */
 .plus-menu-container {
   position: relative;
@@ -674,10 +700,10 @@ function formatSize(bytes: number): string {
   left: 0;
   min-width: 220px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   overflow: hidden;
   animation: dropdownIn 0.15s var(--ease-smooth);
 }
@@ -703,7 +729,7 @@ function formatSize(bytes: number): string {
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-base);
   cursor: pointer;
   transition: background var(--transition-fast);
   text-align: left;
@@ -724,7 +750,7 @@ function formatSize(bytes: number): string {
 }
 
 .plus-menu-divider {
-  height: 0.5px;
+  height: 1px;
   background: var(--border-subtle);
   margin: 4px 0;
 }
@@ -737,9 +763,9 @@ function formatSize(bytes: number): string {
   padding: 8px 14px;
   margin-bottom: 8px;
   background: var(--accent-subtle);
-  border: 0.5px solid var(--accent);
+  border: 1px solid var(--accent);
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--accent);
 }
 
@@ -779,7 +805,7 @@ function formatSize(bytes: number): string {
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -790,6 +816,14 @@ function formatSize(bytes: number): string {
 .model-trigger-inline:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
+}
+
+.model-trigger-disabled,
+.model-trigger-disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .model-name-inline {
@@ -815,10 +849,10 @@ function formatSize(bytes: number): string {
   right: 0;
   min-width: 240px;
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   padding: 6px;
   max-height: 400px;
   overflow-y: auto;
@@ -827,7 +861,7 @@ function formatSize(bytes: number): string {
 
 .model-dropdown-label {
   padding: 8px 12px 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -836,7 +870,7 @@ function formatSize(bytes: number): string {
 
 .model-dropdown-label:not(:first-child) {
   margin-top: 4px;
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   padding-top: 8px;
 }
 
@@ -849,7 +883,7 @@ function formatSize(bytes: number): string {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background var(--transition-fast);
@@ -873,7 +907,7 @@ function formatSize(bytes: number): string {
 /* Send / Abort buttons */
 .send-btn {
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border-radius: var(--radius-lg);
 }
 
@@ -914,9 +948,7 @@ function formatSize(bytes: number): string {
 }
 
 .input-hint {
-  font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
-  opacity: 0.6;
 }
 </style>

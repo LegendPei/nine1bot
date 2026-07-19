@@ -246,6 +246,40 @@ function statusIcon(status: string) {
   return CircleAlert
 }
 
+function runStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    accepted: '已接受',
+    rejected: '已忽略',
+    blocked: '已拦截',
+    running: '运行中',
+    succeeded: '成功',
+    failed: '失败',
+  }
+  return labels[status] || status
+}
+
+function eventLevelLabel(level: string) {
+  const labels: Record<string, string> = {
+    info: '信息',
+    success: '成功',
+    warning: '警告',
+    warn: '警告',
+    error: '错误',
+    debug: '调试',
+  }
+  return labels[level] || level
+}
+
+function actionResultStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    ok: '成功',
+    failed: '失败',
+    pending: '处理中',
+    'requires-user-action': '需要用户操作',
+  }
+  return labels[status] || status
+}
+
 function capabilityLabels(platform: PlatformDetail) {
   const caps = platform.capabilities
   const labels: string[] = []
@@ -499,7 +533,7 @@ async function searchGitLabProjects() {
       }))
       .filter((item: GitLabProjectRef) => typeof item.id === 'string' || typeof item.id === 'number')
   } catch (error: any) {
-    gitLabProjectSearchError.value = error?.message || 'GitLab project search failed'
+    gitLabProjectSearchError.value = error?.message || 'GitLab 项目搜索失败'
   } finally {
     searchingGitLabProjects.value = false
   }
@@ -523,7 +557,7 @@ async function searchGitLabGroups() {
       }))
       .filter((item: GitLabGroupRef) => typeof item.id === 'string' || typeof item.id === 'number')
   } catch (error: any) {
-    gitLabGroupSearchError.value = error?.message || 'GitLab group search failed'
+    gitLabGroupSearchError.value = error?.message || 'GitLab 群组搜索失败'
   } finally {
     searchingGitLabGroups.value = false
   }
@@ -685,7 +719,7 @@ async function loadGitLabReviewRuns() {
   try {
     gitLabReviewRuns.value = await gitLabReviewApi.runs({ limit: 50 })
   } catch (error: any) {
-    gitLabRunsError.value = error?.message || 'Failed to load GitLab review runs'
+    gitLabRunsError.value = error?.message || '加载 GitLab review 运行记录失败'
   } finally {
     loadingGitLabRuns.value = false
   }
@@ -703,7 +737,7 @@ async function retryGitLabReviewRun(run: GitLabReviewRun) {
     await gitLabReviewApi.retry(run.id)
     await loadGitLabReviewRuns()
   } catch (error: any) {
-    gitLabRunsError.value = error?.message || 'Failed to retry GitLab review run'
+    gitLabRunsError.value = error?.message || '重试 GitLab review 失败'
   } finally {
     const next = new Set(retryingGitLabRunIds.value)
     next.delete(run.id)
@@ -712,34 +746,34 @@ async function retryGitLabReviewRun(run: GitLabReviewRun) {
 }
 
 function formatRunTime(timestamp?: number) {
-  if (!timestamp) return 'n/a'
+  if (!timestamp) return '—'
   return new Date(timestamp).toLocaleString()
 }
 
 function reviewRunObject(run: GitLabReviewRun) {
   const trigger = run.trigger || {}
   if (trigger.objectType === 'mr') return `MR ${String(trigger.objectIid ?? '')}`.trim()
-  if (trigger.objectType === 'commit') return `Commit ${String(trigger.commitSha ?? '').slice(0, 8)}`
+  if (trigger.objectType === 'commit') return `提交 ${String(trigger.commitSha ?? '').slice(0, 8)}`
   return run.id
 }
 
 function reviewRunDetail(run: GitLabReviewRun) {
   const parts = [
-    run.sessionId ? `session ${run.sessionId}` : '',
-    run.turnSnapshotId ? `turn ${run.turnSnapshotId}` : '',
-    run.retryCount ? `retry ${run.retryCount}` : '',
-    run.lastRetryAt ? `last retry ${formatRunTime(run.lastRetryAt)}` : '',
-    run.failureNotifiedAt ? `failure noted ${formatRunTime(run.failureNotifiedAt)}` : '',
-    run.error ? `error ${run.error}` : '',
-    run.warnings?.length ? `${run.warnings.length} warning(s)` : '',
+    run.sessionId ? `会话 ${run.sessionId}` : '',
+    run.turnSnapshotId ? `轮次 ${run.turnSnapshotId}` : '',
+    run.retryCount ? `重试 ${run.retryCount} 次` : '',
+    run.lastRetryAt ? `上次重试 ${formatRunTime(run.lastRetryAt)}` : '',
+    run.failureNotifiedAt ? `失败通知 ${formatRunTime(run.failureNotifiedAt)}` : '',
+    run.error ? `错误 ${run.error}` : '',
+    run.warnings?.length ? `${run.warnings.length} 条警告` : '',
   ].filter(Boolean)
-  return parts.length ? parts.join(' · ') : run.idempotencyKey || 'No details'
+  return parts.length ? parts.join(' · ') : run.idempotencyKey || '暂无详情'
 }
 
 function gitLabIgnoredEventTitle(run: GitLabReviewRun) {
   const trigger = run.trigger || {}
-  const project = trigger.projectPath || trigger.projectId || 'unknown project'
-  const event = trigger.eventName || 'event'
+  const project = trigger.projectPath || trigger.projectId || '未知项目'
+  const event = trigger.eventName || '未知事件'
   const target = reviewRunObject(run)
   return `${String(project)} · ${String(event)} · ${target}`
 }
@@ -747,10 +781,10 @@ function gitLabIgnoredEventTitle(run: GitLabReviewRun) {
 function gitLabIgnoredEventDetail(run: GitLabReviewRun) {
   const trigger = run.trigger || {}
   const parts = [
-    trigger.host ? `host ${String(trigger.host)}` : '',
-    trigger.noteId ? `note ${String(trigger.noteId)}` : '',
-    trigger.headSha ? `head ${String(trigger.headSha).slice(0, 8)}` : '',
-    run.idempotencyKey ? `key ${run.idempotencyKey}` : '',
+    trigger.host ? `主机 ${String(trigger.host)}` : '',
+    trigger.noteId ? `评论 ${String(trigger.noteId)}` : '',
+    trigger.headSha ? `提交 ${String(trigger.headSha).slice(0, 8)}` : '',
+    run.idempotencyKey ? `幂等键 ${run.idempotencyKey}` : '',
   ].filter(Boolean)
   return parts.length ? parts.join(' · ') : run.id
 }
@@ -758,13 +792,14 @@ function gitLabIgnoredEventDetail(run: GitLabReviewRun) {
 function gitLabIgnoredReasonLabel(run: GitLabReviewRun) {
   const reason = run.error || String(run.trigger?.reason || 'ignored')
   const labels: Record<string, string> = {
-    'project-not-allowed': 'Project excluded by review scope',
-    'webhook-auto-review-disabled': 'Auto review disabled',
-    'manual-trigger-disabled': 'Manual mention disabled',
-    'mention-not-found': 'No bot mention',
-    'mention-from-bot': 'Bot-authored note ignored',
-    'mention-out-of-scope': 'Mention is not a review request',
-    'mention-sensitive-request': 'Sensitive request rejected',
+    'ignored': '已忽略',
+    'project-not-allowed': '项目不在 review 范围内',
+    'webhook-auto-review-disabled': '自动审查已关闭',
+    'manual-trigger-disabled': '手动 mention 已关闭',
+    'mention-not-found': '未找到 bot mention',
+    'mention-from-bot': '已忽略 bot 自己的评论',
+    'mention-out-of-scope': 'mention 不是 review 请求',
+    'mention-sensitive-request': '敏感请求已拒绝',
   }
   return labels[reason] || reason
 }
@@ -968,7 +1003,7 @@ function actionResultDetails(result: PlatformActionResult) {
                     class="input platform-input"
                     @change="setGitLabReviewModel"
                   >
-                    <option value="">Use default chat model</option>
+                    <option value="">使用默认对话模型</option>
                     <optgroup
                       v-for="provider in providers.filter((item) => item.authenticated)"
                       :key="provider.id"
@@ -1044,15 +1079,15 @@ function actionResultDetails(result: PlatformActionResult) {
             </form>
             <div v-if="gitLabAdvancedConfig" class="gitlab-hook-mode-grid">
               <div class="gitlab-hook-mode-card">
-                <span class="gitlab-guide-label">Project Hook</span>
+                <span class="gitlab-guide-label">项目 Hook</span>
                 <span class="gitlab-guide-text">适合少量项目测试。每个项目单独配置，边界最清楚。</span>
               </div>
               <div class="gitlab-hook-mode-card recommended">
-                <span class="gitlab-guide-label">Group Hook</span>
+                <span class="gitlab-guide-label">群组 Hook</span>
                 <span class="gitlab-guide-text">推荐团队使用。一个 group 配一次，组内项目共用同一个 URL。</span>
               </div>
               <div class="gitlab-hook-mode-card">
-                <span class="gitlab-guide-label">System Hook</span>
+                <span class="gitlab-guide-label">系统 Hook</span>
                 <span class="gitlab-guide-text">适合自托管管理员统一接入。事件范围最大，必须配合允许项目列表。</span>
               </div>
             </div>
@@ -1062,8 +1097,8 @@ function actionResultDetails(result: PlatformActionResult) {
                 <span class="gitlab-guide-text">勾选 Comments / Note events 用于 @Nine1bot review。需要自动审查时，再勾选 Merge request events。</span>
               </div>
               <div class="gitlab-guide-item">
-                <span class="gitlab-guide-label">Secret token</span>
-                <span class="gitlab-guide-text">使用上面的 path secret URL 时，GitLab 的 Secret token 字段留空。若改用 /webhooks/gitlab，则 Secret token 填同一个 webhook secret。</span>
+                <span class="gitlab-guide-label">密钥 Token</span>
+                <span class="gitlab-guide-text">使用上面的 path secret URL 时，GitLab 的密钥 Token 字段留空。若改用 /webhooks/gitlab，则密钥 Token 填同一个 webhook secret。</span>
               </div>
               <div class="gitlab-guide-item">
                 <span class="gitlab-guide-label">项目范围</span>
@@ -1188,12 +1223,12 @@ function actionResultDetails(result: PlatformActionResult) {
                     <span class="text-muted text-sm">ID {{ group.id }}</span>
                   </div>
                   <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabGroup(gitLabHookGroupsFieldKey, group)">
-                    加入 Hook Groups
+                    加入 Hook 群组
                   </button>
                 </div>
               </div>
               <div class="gitlab-selected-project-box">
-                <span class="gitlab-guide-label">Hook Groups</span>
+                <span class="gitlab-guide-label">Hook 群组</span>
                 <p class="gitlab-guide-text">Nine1Bot 会为这些 group 创建或更新 group hook；System Hook 仍需在 GitLab 管理后台手动配置。</p>
                 <div v-if="gitLabHookGroups.length" class="gitlab-project-chip-list">
                   <button
@@ -1231,10 +1266,10 @@ function actionResultDetails(result: PlatformActionResult) {
 
           <div v-if="isGitLabPlatform" class="platform-section">
             <div class="platform-section-heading-row">
-              <h5 class="platform-section-title">GitLab Review Runs</h5>
+              <h5 class="platform-section-title">GitLab Review 运行记录</h5>
               <button class="btn btn-ghost btn-sm" :disabled="loadingGitLabRuns" @click="loadGitLabReviewRuns">
                 <RefreshCw :size="13" />
-                <span>{{ loadingGitLabRuns ? 'Loading' : 'Refresh' }}</span>
+                <span>{{ loadingGitLabRuns ? '加载中' : '刷新' }}</span>
               </button>
             </div>
             <p class="text-muted text-sm">
@@ -1254,18 +1289,18 @@ function actionResultDetails(result: PlatformActionResult) {
                   v-if="run.error || run.warnings?.length || run.idempotencyKey"
                   class="gitlab-run-details"
                 >
-                  <summary>Details</summary>
+                  <summary>详情</summary>
                   <div class="gitlab-run-detail-body">
                     <div v-if="run.error" class="gitlab-run-detail-line">
-                      <span>Error</span>
+                      <span>错误</span>
                       <code>{{ run.error }}</code>
                     </div>
                     <div v-if="run.idempotencyKey" class="gitlab-run-detail-line">
-                      <span>Idempotency</span>
+                      <span>幂等键</span>
                       <code>{{ run.idempotencyKey }}</code>
                     </div>
                     <div v-if="run.warnings?.length" class="gitlab-run-detail-line">
-                      <span>Warnings</span>
+                      <span>警告</span>
                       <ul>
                         <li v-for="warning in run.warnings" :key="warning">{{ warning }}</li>
                       </ul>
@@ -1280,17 +1315,17 @@ function actionResultDetails(result: PlatformActionResult) {
                     @click="retryGitLabReviewRun(run)"
                   >
                     <RefreshCw :size="13" />
-                    <span>{{ retryingGitLabRunIds.has(run.id) ? 'Retrying' : 'Retry' }}</span>
+                    <span>{{ retryingGitLabRunIds.has(run.id) ? '重试中' : '重试' }}</span>
                   </button>
                   <span class="platform-status-pill" :class="statusClass(run.status === 'succeeded' ? 'available' : run.status === 'failed' ? 'error' : 'degraded')">
-                    {{ run.status }}
+                    {{ runStatusLabel(run.status) }}
                   </span>
-                  <span v-if="run.publishedAt" class="gitlab-run-published">published</span>
+                  <span v-if="run.publishedAt" class="gitlab-run-published">已发布</span>
                 </div>
               </div>
             </div>
             <p v-else class="text-muted text-sm">
-              No GitLab review runs yet.
+              暂无 GitLab review 运行记录。
             </p>
           </div>
 
@@ -1305,10 +1340,10 @@ function actionResultDetails(result: PlatformActionResult) {
 
           <div v-if="isGitLabPlatform && gitLabAdvancedConfig" class="platform-section">
             <div class="platform-section-heading-row">
-              <h5 class="platform-section-title">Ignored GitLab Events</h5>
+              <h5 class="platform-section-title">已忽略的 GitLab 事件</h5>
               <button class="btn btn-ghost btn-sm" :disabled="loadingGitLabRuns" @click="loadGitLabReviewRuns">
                 <RefreshCw :size="13" />
-                <span>{{ loadingGitLabRuns ? 'Loading' : 'Refresh' }}</span>
+                <span>{{ loadingGitLabRuns ? '加载中' : '刷新' }}</span>
               </button>
             </div>
             <p class="text-muted text-sm">
@@ -1327,7 +1362,7 @@ function actionResultDetails(result: PlatformActionResult) {
               </div>
             </div>
             <p v-else class="text-muted text-sm">
-              No ignored GitLab events yet.
+              暂无被忽略的 GitLab 事件。
             </p>
           </div>
 
@@ -1354,7 +1389,7 @@ function actionResultDetails(result: PlatformActionResult) {
                   class="input platform-input"
                   @change="setGitLabReviewModel"
                 >
-                  <option value="">Use default chat model</option>
+                  <option value="">使用默认对话模型</option>
                   <optgroup
                     v-for="provider in providers.filter((item) => item.authenticated)"
                     :key="provider.id"
@@ -1370,7 +1405,7 @@ function actionResultDetails(result: PlatformActionResult) {
                   </optgroup>
                 </select>
                 <span v-else-if="isGitLabReviewModelField(field)" class="platform-field-desc text-muted text-sm">
-                  Models come from the same configured providers used by Chat.
+                  模型来自与对话共用的已配置服务商。
                 </span>
 
                 <select
@@ -1508,7 +1543,7 @@ function actionResultDetails(result: PlatformActionResult) {
               </form>
             </div>
             <div v-if="actionResult" class="platform-alert" :class="actionResult.status === 'ok' ? 'success' : 'warning'">
-              {{ actionResult.message || actionResult.status }}
+              {{ actionResult.message || actionResultStatusLabel(actionResult.status) }}
               <pre v-if="actionResultDetails(actionResult)" class="platform-action-result-data">{{ actionResultDetails(actionResult) }}</pre>
             </div>
           </div>
@@ -1517,7 +1552,7 @@ function actionResultDetails(result: PlatformActionResult) {
             <h5 class="platform-section-title">最近事件</h5>
             <div v-if="selectedPlatform.runtimeStatus.recentEvents?.length" class="platform-event-list">
               <div v-for="event in selectedPlatform.runtimeStatus.recentEvents" :key="event.id" class="platform-event">
-                <span class="platform-event-level">{{ event.level }}</span>
+                <span class="platform-event-level">{{ eventLevelLabel(event.level) }}</span>
                 <span class="platform-event-message">{{ event.message }}</span>
                 <span class="platform-event-time text-muted">{{ event.at }}</span>
               </div>
@@ -1569,7 +1604,7 @@ function actionResultDetails(result: PlatformActionResult) {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
-  border-right: 0.5px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
   padding-right: var(--space-md);
 }
 
@@ -1580,7 +1615,7 @@ function actionResultDetails(result: PlatformActionResult) {
   width: 100%;
   min-height: 48px;
   padding: 8px 10px;
-  border: 0.5px solid transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-primary);
@@ -1601,12 +1636,12 @@ function actionResultDetails(result: PlatformActionResult) {
 }
 
 .platform-list-title {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
 .platform-list-meta {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -1637,7 +1672,7 @@ function actionResultDetails(result: PlatformActionResult) {
 }
 
 .platform-title {
-  font-size: 18px;
+  font-size: var(--text-lg);
   line-height: 1.2;
   margin: 0 0 2px;
 }
@@ -1650,7 +1685,7 @@ function actionResultDetails(result: PlatformActionResult) {
   justify-content: space-between;
   padding: 10px 12px;
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 
@@ -1661,7 +1696,7 @@ function actionResultDetails(result: PlatformActionResult) {
 }
 
 .platform-section-title {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   margin: 0;
 }
@@ -1681,18 +1716,18 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .gitlab-review-guide {
   padding: 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
 }
 
 .gitlab-webhook-path {
   padding: 2px 6px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gitlab-guide-grid {
@@ -1710,7 +1745,7 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -1719,11 +1754,11 @@ function actionResultDetails(result: PlatformActionResult) {
   display: block;
   width: 100%;
   padding: 8px 10px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -1738,7 +1773,7 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: var(--space-sm);
   padding: 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -1748,16 +1783,16 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
-  border: 0.5px solid color-mix(in srgb, var(--accent) 24%, var(--border-subtle));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border-subtle));
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--accent) 8%, var(--bg-primary));
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .gitlab-mvp-callout strong {
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .gitlab-mvp-form {
@@ -1765,7 +1800,7 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: var(--space-md);
   padding: var(--space-md);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -1806,7 +1841,7 @@ function actionResultDetails(result: PlatformActionResult) {
 .gitlab-project-row {
   justify-content: space-between;
   padding: 8px 10px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
 }
@@ -1822,14 +1857,14 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: var(--space-xs);
   padding: 10px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 
 .gitlab-project-chip {
   text-align: left;
   padding: 6px 8px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-primary);
@@ -1848,7 +1883,7 @@ function actionResultDetails(result: PlatformActionResult) {
   gap: 3px;
   min-height: 76px;
   padding: 10px 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -1866,19 +1901,19 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .gitlab-guide-label {
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .gitlab-guide-text {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.4;
 }
 
 .platform-status-card {
   padding: 10px 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -1890,12 +1925,12 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .platform-status-label {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .platform-status-value {
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   margin-top: 2px;
 }
@@ -1915,7 +1950,7 @@ function actionResultDetails(result: PlatformActionResult) {
   border-radius: var(--radius-full);
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gitlab-run-list {
@@ -1931,14 +1966,14 @@ function actionResultDetails(result: PlatformActionResult) {
   gap: var(--space-md);
   min-height: 44px;
   padding: 8px 10px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
 
 .gitlab-run-row.ignored {
-  background: color-mix(in srgb, var(--warning, #f59e0b) 8%, var(--bg-primary));
-  border-color: color-mix(in srgb, var(--warning, #f59e0b) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-primary));
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border-subtle));
 }
 
 .gitlab-run-row:has(.gitlab-run-details[open]) {
@@ -1963,21 +1998,21 @@ function actionResultDetails(result: PlatformActionResult) {
 }
 
 .gitlab-run-title {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 600;
 }
 
 .gitlab-run-meta,
 .gitlab-run-published {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gitlab-run-details {
   flex-basis: 100%;
   order: 3;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .gitlab-run-details summary {
@@ -2013,7 +2048,7 @@ function actionResultDetails(result: PlatformActionResult) {
   flex-direction: column;
   gap: var(--space-sm);
   padding: 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
 }
@@ -2059,7 +2094,7 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .platform-action-item {
   padding: 10px 12px;
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
   align-items: stretch;
@@ -2082,7 +2117,7 @@ function actionResultDetails(result: PlatformActionResult) {
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .platform-form-section.compact {
@@ -2094,7 +2129,7 @@ function actionResultDetails(result: PlatformActionResult) {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .platform-event-level {
@@ -2112,7 +2147,7 @@ function actionResultDetails(result: PlatformActionResult) {
   border-radius: var(--radius-sm);
   background: var(--warning-subtle);
   color: var(--warning);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .platform-alert.error {
@@ -2130,7 +2165,7 @@ function actionResultDetails(result: PlatformActionResult) {
   align-items: center;
   gap: var(--space-sm);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .platform-switch.inline {
@@ -2139,7 +2174,7 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .platform-field-error {
   color: var(--error);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .platform-status-ok,
@@ -2178,7 +2213,7 @@ function actionResultDetails(result: PlatformActionResult) {
 
   .platform-list {
     border-right: none;
-    border-bottom: 0.5px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
     padding-right: 0;
     padding-bottom: var(--space-md);
   }

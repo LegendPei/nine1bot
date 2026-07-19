@@ -29,6 +29,8 @@ type SidebarSession = Session & {
 
 const props = defineProps<{
   collapsed: boolean
+  // 移动端（≤768px）抽屉式展开状态，由 App.vue 持有
+  mobileOpen?: boolean
   sessions: SidebarSession[]
   currentSession: Session | null
   isDraftSession: boolean
@@ -85,9 +87,6 @@ const deletingSession = ref<SidebarSession | null>(null)
 
 // Right-click context menu
 const contextMenu = ref<{ x: number; y: number; session: SidebarSession } | null>(null)
-// Toast notification for errors
-const toastMessage = ref('')
-
 // Sessions filtered by current mode
 const filteredSessions = computed(() => {
   // Show sessions matching current mode, or untagged (legacy) sessions
@@ -174,11 +173,11 @@ function contextMenuDelete() {
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ collapsed }">
+  <aside class="sidebar" :class="{ collapsed, open: mobileOpen }">
     <!-- Header: Brand + Collapse -->
     <div class="sidebar-header">
       <div class="brand-area" v-if="!collapsed">
-        <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="Logo" class="brand-logo" />
+        <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="Nine1Bot" class="brand-logo" />
         <span class="brand-text">Nine1Bot</span>
       </div>
       <button class="collapse-btn" @click="emit('toggle-collapse')" :title="collapsed ? '展开' : '折叠'">
@@ -191,41 +190,41 @@ function contextMenuDelete() {
     <nav class="sidebar-nav" v-if="!collapsed">
       <button class="nav-item new-chat" @click="emit('new-session')">
         <Plus :size="18" />
-        <span>New chat</span>
+        <span>新会话</span>
       </button>
       <button class="nav-item" @click="emit('open-search')">
         <Search :size="18" />
-        <span>Search</span>
+        <span>搜索</span>
       </button>
       <button class="nav-item" :class="{ active: activePage === 'projects' }" @click="emit('open-projects')">
         <FolderOpen :size="18" />
-        <span>Projects</span>
+        <span>项目</span>
       </button>
       <button class="nav-item" :class="{ active: activePage === 'metrics' }" @click="emit('open-metrics')">
         <BarChart3 :size="18" />
-        <span>Metrics</span>
+        <span>统计</span>
       </button>
       <button class="nav-item" :class="{ active: activePage === 'automations' }" @click="emit('open-automations')">
         <Webhook :size="18" />
-        <span>Automations</span>
+        <span>自动化</span>
       </button>
     </nav>
 
     <!-- Top Navigation (collapsed) -->
     <nav class="sidebar-nav sidebar-nav-collapsed" v-if="collapsed">
-      <button class="nav-item-icon" @click="emit('new-session')" title="New chat">
+      <button class="nav-item-icon" @click="emit('new-session')" title="新会话">
         <Plus :size="18" />
       </button>
-      <button class="nav-item-icon" @click="emit('open-search')" title="Search">
+      <button class="nav-item-icon" @click="emit('open-search')" title="搜索">
         <Search :size="18" />
       </button>
-      <button class="nav-item-icon" :class="{ active: activePage === 'projects' }" @click="emit('open-projects')" title="Projects">
+      <button class="nav-item-icon" :class="{ active: activePage === 'projects' }" @click="emit('open-projects')" title="项目">
         <FolderOpen :size="18" />
       </button>
-      <button class="nav-item-icon" :class="{ active: activePage === 'metrics' }" @click="emit('open-metrics')" title="Metrics">
+      <button class="nav-item-icon" :class="{ active: activePage === 'metrics' }" @click="emit('open-metrics')" title="统计">
         <BarChart3 :size="18" />
       </button>
-      <button class="nav-item-icon" :class="{ active: activePage === 'automations' }" @click="emit('open-automations')" title="Automations">
+      <button class="nav-item-icon" :class="{ active: activePage === 'automations' }" @click="emit('open-automations')" title="自动化">
         <Webhook :size="18" />
       </button>
     </nav>
@@ -233,7 +232,7 @@ function contextMenuDelete() {
     <!-- Recents Section -->
     <div class="sidebar-section" v-if="!collapsed">
       <div class="section-header" @click="showRecents = !showRecents">
-        <span class="section-label">Recents</span>
+        <span class="section-label">最近会话</span>
         <ChevronRight :size="14" class="section-chevron" :class="{ expanded: showRecents }" />
       </div>
 
@@ -262,7 +261,7 @@ function contextMenuDelete() {
           <Loader2 v-if="isSessionRunning(session.id)" :size="14" class="session-icon spin" />
           <MessageSquare v-else :size="14" class="session-icon" />
           <span class="session-title">{{ getSessionTitle(session) }}</span>
-          <span v-if="isBrowserExtensionSession(session)" class="session-source-badge">Browser</span>
+          <span v-if="isBrowserExtensionSession(session)" class="session-source-badge">浏览器</span>
           <span v-if="mode === 'agent'" class="session-project-label" :title="getSessionProjectTitle(session)">
             {{ getSessionProjectLabel(session) }}
           </span>
@@ -284,8 +283,8 @@ function contextMenuDelete() {
         </div>
 
         <!-- Empty state when no sessions match current mode -->
-        <div v-if="filteredSessions.length === 0 && !isDraftSession" class="section-empty">
-          No conversations yet
+        <div v-if="filteredSessions.length === 0 && !isDraftSession" class="empty-state section-empty">
+          暂无会话
         </div>
       </div>
     </div>
@@ -319,7 +318,7 @@ function contextMenuDelete() {
         class="nav-item-icon"
         :class="{ active: mode === 'chat' }"
         @click="emit('switch-mode', 'chat')"
-        title="Chat mode"
+        title="Chat 模式"
       >
         <MessageCircle :size="18" />
       </button>
@@ -327,7 +326,7 @@ function contextMenuDelete() {
         class="nav-item-icon"
         :class="{ active: mode === 'agent' }"
         @click="emit('switch-mode', 'agent')"
-        title="Agent mode"
+        title="Agent 模式"
       >
         <Code2 :size="18" />
       </button>
@@ -337,7 +336,7 @@ function contextMenuDelete() {
     <div class="sidebar-footer" v-if="!collapsed">
       <div class="user-profile" @click="emit('open-settings')">
         <div class="user-avatar">
-          <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="Avatar" class="avatar-img" />
+          <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="头像" class="avatar-img" />
           <User v-else :size="16" />
         </div>
         <div class="user-info">
@@ -434,33 +433,11 @@ function contextMenuDelete() {
       </div>
     </div>
 
-    <!-- Toast notification -->
-    <Transition name="toast">
-      <div v-if="toastMessage" class="sidebar-toast">
-        {{ toastMessage }}
-      </div>
-    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
-/* === Sidebar === */
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  font-family: var(--font-sans);
-  background: var(--bg-primary);
-  border-right: 0.5px solid var(--border-default);
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-md) var(--space-md) var(--space-sm);
-}
-
+/* === Sidebar (base layout lives in global style.css) === */
 .brand-area {
   display: flex;
   align-items: center;
@@ -474,7 +451,7 @@ function contextMenuDelete() {
 }
 
 .brand-text {
-  font-size: 16px;
+  font-size: var(--text-md);
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.3px;
@@ -515,7 +492,7 @@ function contextMenuDelete() {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: var(--font-weight-normal);
   text-align: left;
   cursor: pointer;
@@ -525,8 +502,12 @@ function contextMenuDelete() {
 }
 
 .nav-item:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--hover-overlay);
   color: var(--text-primary);
+}
+
+.nav-item:active {
+  background: var(--active-overlay);
 }
 
 .nav-item.active {
@@ -567,7 +548,7 @@ function contextMenuDelete() {
 }
 
 .section-label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -588,36 +569,13 @@ function contextMenuDelete() {
   padding: var(--space-xs) var(--space-sm);
 }
 
+/* Compact variant of the global .empty-state for the session list */
 .section-empty {
-  padding: 6px var(--space-sm);
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
+  padding: var(--space-md) var(--space-sm);
+  font-size: var(--text-sm);
 }
 
-/* === Session Items === */
-.session-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 6px var(--space-sm);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background-color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
-  position: relative;
-}
-
-.session-item:hover {
-  background: rgba(0, 0, 0, 0.035);
-  border-color: var(--border-subtle);
-}
-
-.session-item.active {
-  background: var(--accent-subtle);
-  border-color: rgba(0, 0, 0, 0.05);
-}
-
+/* === Session Items (base .session-item lives in global style.css) === */
 .session-icon {
   flex-shrink: 0;
   color: var(--text-muted);
@@ -629,7 +587,7 @@ function contextMenuDelete() {
 
 .session-title {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -642,10 +600,10 @@ function contextMenuDelete() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   padding: 0 8px;
   line-height: 18px;
@@ -663,10 +621,10 @@ function contextMenuDelete() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
-  color: #175cd3;
-  background: #e8f0ff;
-  border: 0.5px solid rgba(23, 92, 211, 0.18);
+  font-size: var(--text-xs);
+  color: var(--info);
+  background: var(--info-subtle);
+  border: 1px solid color-mix(in srgb, var(--info) 18%, transparent);
   border-radius: var(--radius-full);
   padding: 0 7px;
   line-height: 17px;
@@ -699,6 +657,14 @@ function contextMenuDelete() {
 .session-item:hover .session-actions {
   opacity: 1;
   transform: translateX(0);
+}
+
+/* 触屏设备没有 hover，会话操作按钮始终可见 */
+@media (hover: none) {
+  .session-actions {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .mini-btn {
@@ -756,7 +722,7 @@ function contextMenuDelete() {
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -781,12 +747,7 @@ function contextMenuDelete() {
   padding: var(--space-xs) 0;
 }
 
-/* === User Profile Footer === */
-.sidebar-footer {
-  padding: var(--space-sm) var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
-}
-
+/* === User Profile Footer (base .sidebar-footer lives in global style.css) === */
 .user-profile {
   display: flex;
   align-items: center;
@@ -798,7 +759,7 @@ function contextMenuDelete() {
 }
 
 .user-profile:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--hover-overlay);
 }
 
 .user-avatar {
@@ -826,13 +787,13 @@ function contextMenuDelete() {
 }
 
 .user-name {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
 }
 
 .user-plan {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -841,24 +802,7 @@ function contextMenuDelete() {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-/* === Collapsed State === */
-.sidebar.collapsed {
-  width: 0px;
-  min-width: 0px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.sidebar.collapsed .sidebar-header {
-  justify-content: center;
-  padding: var(--space-sm);
-}
-
+/* === Collapsed State (base rules live in global style.css) === */
 /* === Collapsed Nav Icons === */
 .sidebar-nav-collapsed {
   align-items: center;
@@ -880,7 +824,7 @@ function contextMenuDelete() {
 }
 
 .nav-item-icon:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--hover-overlay);
   color: var(--text-primary);
 }
 
@@ -894,138 +838,29 @@ function contextMenuDelete() {
   display: flex;
   justify-content: center;
   padding: var(--space-sm) 0;
-  border-top: 0.5px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
 }
 
 </style>
 
 <!-- 非 scoped 样式，用于 Teleport 的对话框 -->
 <style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  backdrop-filter: blur(2px);
-}
-
-.dialog {
-  background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  width: 320px;
-  max-width: 90vw;
-  box-shadow: var(--shadow-lg);
-}
-
-.dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
-  font-weight: 600;
-}
-
-.dialog-header .action-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.dialog-header .action-btn:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-.dialog-body {
-  padding: var(--space-md);
-}
-
-.dialog-input {
-  width: 100%;
-  padding: var(--space-sm) var(--space-md);
-  background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: var(--font-weight-normal);
-}
-
-.dialog-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.dialog-message {
-  color: var(--text-primary);
-  margin-bottom: var(--space-sm);
-}
-
-.dialog-warning {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
-}
-
-.dialog-footer .btn-sm {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 13px;
-  height: 32px;
-}
-
-.dialog-footer .btn-danger {
-  background: var(--error);
-  color: white;
-  border: none;
-}
-
-.dialog-footer .btn-danger:hover {
-  background: #dc2626;
-}
-
-.dialog-footer .mr-1 {
-  margin-right: 4px;
-}
-
 /* === Context Menu === */
 .context-menu-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1100;
+  z-index: var(--z-context-overlay);
 }
 
 .context-menu {
   position: fixed;
   min-width: 180px;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   padding: 4px;
-  z-index: 1101;
+  z-index: var(--z-context-menu);
   animation: contextIn 0.1s ease-out;
 }
 
@@ -1048,7 +883,7 @@ function contextMenuDelete() {
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background var(--transition-fast);
@@ -1074,7 +909,7 @@ function contextMenuDelete() {
 }
 
 .context-menu-divider {
-  height: 0.5px;
+  height: 1px;
   background: var(--border-subtle);
   margin: 4px 0;
 }
@@ -1085,16 +920,16 @@ function contextMenuDelete() {
   top: 0;
   min-width: 160px;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   padding: 4px;
-  z-index: 1102;
+  z-index: var(--z-context-submenu);
 }
 
 .context-menu-empty {
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   text-align: center;
 }
@@ -1102,7 +937,7 @@ function contextMenuDelete() {
 /* Context menu label */
 .context-menu-label {
   padding: 4px 12px 2px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -1115,7 +950,7 @@ function contextMenuDelete() {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -1147,32 +982,4 @@ function contextMenuDelete() {
   opacity: 1;
 }
 
-/* Toast notification */
-.sidebar-toast {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 8px 16px;
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 0.5px solid var(--border-default);
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  box-shadow: var(--shadow-lg);
-  z-index: 9999;
-  white-space: nowrap;
-}
-
-.toast-enter-active {
-  transition: all 0.25s ease;
-}
-.toast-leave-active {
-  transition: all 0.2s ease;
-}
-.toast-enter-from,
-.toast-leave-to {
-  opacity: 0;
-  transform: translateX(-50%) translateY(8px);
-}
 </style>

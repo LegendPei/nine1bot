@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Square, PanelLeftOpen, Folder, BarChart3, MessageSquare } from 'lucide-vue-next'
+import { Square, PanelLeftOpen, Folder, BarChart3, MessageSquare, Menu } from 'lucide-vue-next'
 import type { Session } from '../api/client'
 
 defineProps<{
@@ -13,6 +13,7 @@ defineProps<{
 
 const emit = defineEmits<{
   'toggle-sidebar': []
+  'toggle-mobile-sidebar': []
   'abort': []
   'toggle-metrics': []
 }>()
@@ -21,6 +22,15 @@ const emit = defineEmits<{
 <template>
   <header class="header glass-header">
     <div class="header-left">
+      <!-- 移动端菜单按钮（仅 ≤768px 显示） -->
+      <button
+        class="btn btn-ghost btn-icon mobile-menu-btn"
+        @click="emit('toggle-mobile-sidebar')"
+        title="打开侧边栏"
+      >
+        <Menu :size="20" />
+      </button>
+
       <button
         v-if="sidebarCollapsed"
         class="btn btn-ghost btn-icon"
@@ -58,7 +68,7 @@ const emit = defineEmits<{
       >
         <BarChart3 v-if="!showMetrics" :size="14" />
         <MessageSquare v-else :size="14" />
-        <span>{{ showMetrics ? 'Chat' : 'Metrics' }}</span>
+        <span>{{ showMetrics ? '对话' : '统计' }}</span>
       </button>
 
       <!-- Abort Button -->
@@ -78,8 +88,17 @@ const emit = defineEmits<{
 .glass-header {
   background: transparent;
   border-bottom: none;
-  z-index: 10;
-  font-family: var(--font-sans);
+}
+
+/* 移动端菜单按钮默认隐藏，仅 ≤768px 显示 */
+.mobile-menu-btn {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-menu-btn {
+    display: flex;
+  }
 }
 
 .session-info {
@@ -90,14 +109,14 @@ const emit = defineEmits<{
 
 .session-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .session-dir {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   max-width: 300px;
   overflow: hidden;
@@ -112,7 +131,7 @@ const emit = defineEmits<{
   padding: 6px 12px;
   background: var(--accent-subtle);
   border-radius: var(--radius-full);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   color: var(--accent);
 }
@@ -122,23 +141,23 @@ const emit = defineEmits<{
   height: 8px;
   background: var(--accent);
   border-radius: 50%;
-  animation: pulse 1.5s infinite;
+  animation: dot-pulse 1.5s infinite;
 }
 
 .retry-badge .streaming-text {
-  color: var(--warning, #f59e0b);
+  color: var(--warning);
 }
 
 .retry-dot {
   width: 8px;
   height: 8px;
-  background: var(--warning, #f59e0b);
+  background: var(--warning);
   border-radius: 50%;
-  animation: pulse 1.5s infinite;
-  box-shadow: 0 0 8px var(--warning, #f59e0b);
+  animation: dot-pulse 1.5s infinite;
+  box-shadow: 0 0 8px var(--warning);
 }
 
-@keyframes pulse {
+@keyframes dot-pulse {
   0% { transform: scale(0.95); opacity: 0.8; }
   50% { transform: scale(1.05); opacity: 1; }
   100% { transform: scale(0.95); opacity: 0.8; }
@@ -146,13 +165,13 @@ const emit = defineEmits<{
 
 .abort-btn {
   color: var(--error);
-  font-size: 13px;
+  font-size: var(--text-13);
   gap: 6px;
 }
 
 .metrics-btn {
   margin-right: 10px;
-  font-size: 13px;
+  font-size: var(--text-13);
   gap: 6px;
 }
 

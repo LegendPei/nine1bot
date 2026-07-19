@@ -11,8 +11,23 @@ export function createFrameDeltaBuffer(input: {
   cancel?: (handle: number) => void
 }) {
   const pending = new Map<string, FrameDelta>()
-  const schedule = input.schedule ?? ((callback) => requestAnimationFrame(callback))
-  const cancel = input.cancel ?? ((handle) => cancelAnimationFrame(handle))
+  // 后台标签页 rAF 停发，会造成 delta 一直积压；隐藏时改用 setTimeout 兜底
+  let scheduledWithTimeout = false
+  const schedule = input.schedule ?? ((callback: () => void) => {
+    if (typeof document !== 'undefined' && document.hidden) {
+      scheduledWithTimeout = true
+      return setTimeout(callback, 100) as unknown as number
+    }
+    scheduledWithTimeout = false
+    return requestAnimationFrame(callback)
+  })
+  const cancel = input.cancel ?? ((handle: number) => {
+    if (scheduledWithTimeout) {
+      clearTimeout(handle)
+    } else {
+      cancelAnimationFrame(handle)
+    }
+  })
   let frame: number | undefined
 
   const keyFor = (delta: Pick<FrameDelta, 'messageID' | 'partID' | 'field'>) =>

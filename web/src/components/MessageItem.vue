@@ -1,17 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { Bot, User, Pencil, Trash2, X, Check } from 'lucide-vue-next'
+import { User, Pencil, Trash2, X, Check, File } from 'lucide-vue-next'
 import type { Message, MessagePart } from '../api/client'
-import AgentSteps from './AgentSteps.vue'
 import { useUserProfile } from '../composables/useUserProfile'
 
-const { profile, botAvatar } = useUserProfile()
+const { profile } = useUserProfile()
 
 const props = defineProps<{
   message: Message
-  isStreaming?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -24,8 +22,11 @@ const editingPartId = ref<string | null>(null)
 const editText = ref('')
 const deleteConfirmPartId = ref<string | null>(null)
 
-function startEdit(part: MessagePart) {
-  if (part.type !== 'text' || !part.text) return
+// 用户消息的第一个文本 part（纯附件消息没有，编辑/删除按钮据此隐藏）
+const firstTextPart = computed(() => props.message.parts.find(p => p.type === 'text'))
+
+function startEdit(part?: MessagePart) {
+  if (!part || part.type !== 'text' || !part.text) return
   editingPartId.value = part.id
   editText.value = part.text
 }
@@ -42,7 +43,8 @@ function confirmEdit(partId: string) {
   cancelEdit()
 }
 
-function startDelete(part: MessagePart) {
+function startDelete(part?: MessagePart) {
+  if (!part || part.type !== 'text') return
   deleteConfirmPartId.value = part.id
 }
 
@@ -71,53 +73,6 @@ const userParts = computed(() => {
     .map((part, index) => ({ part, index }))
 })
 
-// Agent message: group step parts into one foldable unit
-interface Step { parts: MessagePart[]; isComplete: boolean }
-type GroupedItem =
-  | { type: 'steps'; steps: Step[] }
-  | { type: 'text'; part: MessagePart }
-  | { type: 'file'; part: MessagePart }
-
-const groupedContent = computed<GroupedItem[]>(() => {
-  const result: GroupedItem[] = []
-  let stepsGroup: Extract<GroupedItem, { type: 'steps' }> | null = null
-  let currentStep: Step | null = null
-
-  for (const part of props.message.parts) {
-    if (part.type === 'step-start') {
-      if (!stepsGroup) {
-        stepsGroup = { type: 'steps', steps: [] }
-        result.push(stepsGroup)
-      }
-      currentStep = { parts: [], isComplete: false }
-      stepsGroup.steps.push(currentStep)
-    } else if (part.type === 'step-finish') {
-      if (currentStep) currentStep.isComplete = true
-      currentStep = null
-    } else if (part.type === 'tool' || part.type === 'reasoning') {
-      if (currentStep) {
-        currentStep.parts.push(part)
-      } else {
-        // tool/reasoning outside explicit steps — create implicit step group
-        if (!stepsGroup) {
-          stepsGroup = { type: 'steps', steps: [] }
-          result.push(stepsGroup)
-        }
-        if (stepsGroup.steps.length === 0) {
-          const implicit: Step = { parts: [], isComplete: true }
-          stepsGroup.steps.push(implicit)
-        }
-        stepsGroup.steps[stepsGroup.steps.length - 1].parts.push(part)
-      }
-    } else if (part.type === 'text' && !(part as any).synthetic && part.text) {
-      result.push({ type: 'text', part })
-    } else if (part.type === 'file') {
-      result.push({ type: 'file', part })
-    }
-  }
-  return result
-})
-
 // Check if a file part is an image
 function isImageFile(part: MessagePart): boolean {
   const mime = (part as any).mime || ''
@@ -143,33 +98,54 @@ function closeImagePreview() {
   previewImageUrl.value = null
 }
 
+// user 消息文本渲染后不再变化，按文本缓存 marked+DOMPurify 结果
+const formatCache = new Map<string, string>()
+
 // Format text with marked and sanitize with DOMPurify
 function formatText(text: string): string {
+  const cached = formatCache.get(text)
+  if (cached !== undefined) return cached
+
+  let rendered: string
   try {
-    const html = marked.parse(text) as string
-    return DOMPurify.sanitize(html)
+    rendered = DOMPurify.sanitize(marked.parse(text) as string)
   } catch (e) {
     console.error('Markdown parse error:', e)
-    return DOMPurify.sanitize(text)
+    rendered = DOMPurify.sanitize(text)
+  }
+  formatCache.set(text, rendered)
+  return rendered
+}
+
+// Escape 关闭图片预览 / 删除确认框
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  if (previewImageUrl.value) {
+    closeImagePreview()
+  } else if (deleteConfirmPartId.value) {
+    cancelDelete()
   }
 }
+
+onMounted(() => {
+  document.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown)
+})
 </script>
 
 <template>
-  <div class="message-row" :class="{ 'user-row': message.info.role === 'user', 'agent-row': message.info.role !== 'user' }">
+  <!-- ChatPanel 只传入 user 消息，agent 消息由 AgentMessageGroup 渲染 -->
+  <div class="message-row user-row">
     <div class="avatar shadow-sm">
-      <template v-if="message.info.role === 'user'">
-        <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="Avatar" class="avatar-img" />
-        <User v-else :size="18" />
-      </template>
-      <template v-else>
-        <img v-if="botAvatar.botAvatarUrl" :src="botAvatar.botAvatarUrl" alt="Bot" class="avatar-img" />
-        <Bot v-else :size="18" />
-      </template>
+      <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="头像" class="avatar-img" />
+      <User v-else :size="18" />
     </div>
 
     <!-- User message -->
-    <div v-if="message.info.role === 'user'" class="message-wrapper user-wrapper">
+    <div class="message-wrapper user-wrapper">
       <div class="message-bubble user-bubble">
         <div class="message-sender-name" v-if="profile.name">{{ profile.name }}</div>
         <div class="message-content">
@@ -179,13 +155,13 @@ function formatText(text: string): string {
               <img
                 v-if="isImageFile(item.part)"
                 :src="resolveFileUrl((item.part as any).url)"
-                :alt="(item.part as any).filename || 'Uploaded image'"
+                :alt="(item.part as any).filename || '上传的图片'"
                 class="uploaded-image"
                 @click="openImagePreview(resolveFileUrl((item.part as any).url))"
               />
               <a v-else :href="resolveFileUrl((item.part as any).url)" target="_blank" class="file-badge">
-                <span class="file-icon">📄</span>
-                <span class="file-name">{{ (item.part as any).filename || 'File' }}</span>
+                <span class="file-icon"><File :size="18" /></span>
+                <span class="file-name">{{ (item.part as any).filename || '文件' }}</span>
               </a>
             </div>
             <!-- Text -->
@@ -204,41 +180,10 @@ function formatText(text: string): string {
           </template>
         </div>
       </div>
-      <!-- 用户消息操作按钮 -->
-      <div class="message-actions" v-if="!editingPartId">
-        <button class="action-btn" @click="startEdit(message.parts.find(p => p.type === 'text')!)" title="编辑"><Pencil :size="14" /></button>
-        <button class="action-btn danger" @click="startDelete(message.parts.find(p => p.type === 'text')!)" title="删除"><Trash2 :size="14" /></button>
-      </div>
-    </div>
-
-    <!-- Agent message (no bubble) -->
-    <div v-else class="message-wrapper agent-wrapper">
-      <div class="message-sender-name">{{ message.info.model?.modelID || 'Nine1Bot' }}</div>
-      <div class="agent-content">
-        <template v-for="(item, idx) in groupedContent" :key="idx">
-          <!-- All agentic steps collapsed into one unit -->
-          <AgentSteps
-            v-if="item.type === 'steps'"
-            :steps="item.steps"
-            :isStreaming="isStreaming ?? false"
-          />
-          <!-- File Attachment -->
-          <div v-else-if="item.type === 'file'" class="file-attachment">
-            <img
-              v-if="isImageFile(item.part)"
-              :src="resolveFileUrl((item.part as any).url)"
-              :alt="(item.part as any).filename || 'Uploaded image'"
-              class="uploaded-image"
-              @click="openImagePreview(resolveFileUrl((item.part as any).url))"
-            />
-            <a v-else :href="resolveFileUrl((item.part as any).url)" target="_blank" class="file-badge">
-              <span class="file-icon">📄</span>
-              <span class="file-name">{{ (item.part as any).filename || 'File' }}</span>
-            </a>
-          </div>
-          <!-- Direct text output (always visible) -->
-          <div v-else-if="item.type === 'text'" class="markdown-content" v-html="formatText(item.part.text || '')"></div>
-        </template>
+      <!-- 用户消息操作按钮（纯附件消息没有文本 part，不渲染编辑/删除） -->
+      <div class="message-actions" v-if="!editingPartId && firstTextPart">
+        <button class="action-btn" @click="startEdit(firstTextPart)" title="编辑"><Pencil :size="14" /></button>
+        <button class="action-btn danger" @click="startDelete(firstTextPart)" title="删除"><Trash2 :size="14" /></button>
       </div>
     </div>
   </div>
@@ -288,11 +233,6 @@ function formatText(text: string): string {
   animation: fade-up 0.3s var(--ease-smooth) forwards;
 }
 
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 .user-row {
   flex-direction: row-reverse;
 }
@@ -310,11 +250,6 @@ function formatText(text: string): string {
 .user-row .avatar {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-}
-
-.agent-row .avatar {
-  background: var(--accent);
-  color: white;
 }
 
 .avatar-img {
@@ -347,21 +282,12 @@ function formatText(text: string): string {
 }
 
 .user-bubble {
-  background: var(--bg-tertiary);
+  background: var(--user-bubble);
   color: var(--text-primary);
 }
 
-.agent-wrapper {
-  max-width: 720px;
-  padding-top: 2px;
-}
-
-.agent-content {
-  width: 100%;
-}
-
 .message-sender-name {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-muted);
   margin-bottom: 6px;
@@ -370,88 +296,7 @@ function formatText(text: string): string {
 }
 
 
-/* Prose / Markdown Styling */
-.markdown-content {
-  font-size: 15px;
-  line-height: 1.7;
-  color: var(--text-primary);
-  font-weight: var(--font-weight-normal);
-}
-
-.markdown-content :deep(p) {
-  margin-bottom: 1em;
-}
-.markdown-content :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-.markdown-content :deep(h1),
-.markdown-content :deep(h2),
-.markdown-content :deep(h3) {
-  margin-top: 1.5em;
-  margin-bottom: 0.75em;
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--text-primary);
-}
-
-.markdown-content :deep(code) {
-  background: var(--bg-tertiary);
-  padding: 2px 5px;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: 0.9em;
-  color: var(--accent);
-}
-
-.markdown-content :deep(pre) {
-  background: var(--bg-secondary);
-  padding: 16px;
-  border-radius: var(--radius-md);
-  margin: 1em 0;
-  overflow-x: auto;
-  border: 0.5px solid var(--border-default);
-}
-
-:root[data-theme='dark'] .markdown-content :deep(pre) {
-  background: #1a1a1e;
-}
-
-.markdown-content :deep(pre code) {
-  background: transparent;
-  padding: 0;
-  color: inherit;
-  font-size: 13px;
-  border: none;
-}
-
-.markdown-content :deep(ul),
-.markdown-content :deep(ol) {
-  margin-bottom: 1em;
-  padding-left: 1.5em;
-}
-
-.markdown-content :deep(li) {
-  margin-bottom: 0.25em;
-}
-
-.markdown-content :deep(a) {
-  color: var(--accent);
-  text-decoration: underline;
-  text-decoration-color: rgba(204, 77, 40, 0.3);
-  text-underline-offset: 2px;
-}
-.markdown-content :deep(a:hover) {
-  text-decoration-color: var(--accent);
-}
-
-.markdown-content :deep(blockquote) {
-  border-left: 2px solid var(--accent);
-  margin: 1em 0;
-  padding-left: 1em;
-  font-style: italic;
-  color: var(--text-muted);
-}
+/* Prose / Markdown styling lives in global style.css (.markdown-content) */
 
 /* Text Part */
 .text-part {
@@ -509,10 +354,10 @@ function formatText(text: string): string {
   min-width: 300px;
   padding: var(--space-sm);
   background: var(--bg-primary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-family: inherit;
   resize: vertical;
 }
@@ -528,25 +373,6 @@ function formatText(text: string): string {
   gap: var(--space-sm);
 }
 
-.btn-sm {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 13px;
-  height: 32px;
-}
-
-.btn-danger {
-  background: var(--error);
-  color: white;
-  border: none;
-}
-
-.btn-danger:hover {
-  background: #dc2626;
-}
-
 /* File Attachment */
 .file-attachment {
   margin: 8px 0;
@@ -558,7 +384,7 @@ function formatText(text: string): string {
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: transform var(--transition-fast);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
 }
 
 .uploaded-image:hover {
@@ -571,9 +397,9 @@ function formatText(text: string): string {
   gap: 8px;
   padding: 8px 12px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--text-13);
   text-decoration: none;
   color: inherit;
   cursor: pointer;
@@ -585,7 +411,7 @@ function formatText(text: string): string {
 }
 
 .file-icon {
-  font-size: 18px;
+  font-size: var(--text-lg);
 }
 
 .file-name {
@@ -598,150 +424,4 @@ function formatText(text: string): string {
 
 </style>
 
-<!-- Non-scoped styles for Teleported dialog -->
-<style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  backdrop-filter: blur(2px);
-}
-
-.dialog {
-  background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  width: 320px;
-  max-width: 90vw;
-  box-shadow: var(--shadow-lg);
-}
-
-.dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
-  font-weight: 600;
-}
-
-.dialog-header .action-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.dialog-header .action-btn:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-.dialog-body {
-  padding: var(--space-md);
-}
-
-.dialog-message {
-  color: var(--text-primary);
-  margin-bottom: var(--space-sm);
-}
-
-.dialog-warning {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border-top: 0.5px solid var(--border-subtle);
-}
-
-.dialog-footer .btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 13px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.dialog-footer .btn-ghost {
-  background: transparent;
-  border: 0.5px solid var(--border-default);
-  color: var(--text-secondary);
-}
-
-.dialog-footer .btn-ghost:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-.dialog-footer .btn-danger {
-  background: var(--error);
-  color: white;
-  border: none;
-}
-
-.dialog-footer .btn-danger:hover {
-  background: #dc2626;
-}
-
-/* Image Preview Modal */
-.image-preview-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.9);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1001;
-  cursor: pointer;
-}
-
-.preview-image {
-  max-width: 90vw;
-  max-height: 90vh;
-  object-fit: contain;
-  border-radius: var(--radius-md);
-  cursor: default;
-}
-
-.preview-close {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.1);
-  border: none;
-  border-radius: 50%;
-  color: white;
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-
-.preview-close:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-</style>
 

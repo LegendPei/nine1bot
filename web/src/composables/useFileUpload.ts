@@ -64,14 +64,6 @@ export function useFileUpload(options: UseFileUploadOptions) {
     return SUPPORTED_IMAGE_TYPES.includes(file.type)
   }
 
-  function isDocument(_file: File): boolean {
-    return true
-  }
-
-  function isSupported(file: File): boolean {
-    return file.size >= 0
-  }
-
   function getMimeType(file: File): string {
     if (file.type && file.type !== 'application/octet-stream') {
       return file.type
@@ -110,11 +102,6 @@ export function useFileUpload(options: UseFileUploadOptions) {
     uploadError.value = null
 
     for (const file of fileArray) {
-      if (!isSupported(file)) {
-        uploadError.value = `不支持上传 ${file.name}。`
-        continue
-      }
-
       if (file.size > MAX_FILE_SIZE) {
         uploadError.value = `${file.name} 过大。聊天上传当前限制为 500MB。`
         continue
@@ -161,7 +148,11 @@ export function useFileUpload(options: UseFileUploadOptions) {
         throw new Error('创建会话失败，请重试。')
       }
 
-      const uploaded = await api.uploadSessionFile(sessionId, attachments.value[idx].file, {
+      // await 期间用户可能已删除该附件，重新定位，找不到则中止本次上传
+      const currentIdx = findAttachmentIndex(id)
+      if (currentIdx === -1) return
+
+      const uploaded = await api.uploadSessionFile(sessionId, attachments.value[currentIdx].file, {
         signal: controller.signal,
         onProgress: (progress) => {
           const nextIdx = findAttachmentIndex(id)
@@ -248,8 +239,6 @@ export function useFileUpload(options: UseFileUploadOptions) {
     clearAll,
     clearError,
     toMessageParts,
-    isImage,
-    isDocument,
-    isSupported
+    isImage
   }
 }

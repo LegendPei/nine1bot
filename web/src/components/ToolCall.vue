@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { FileDown, File, Eye } from 'lucide-vue-next'
 import type { MessagePart } from '../api/client'
 import { useFilePreview } from '../composables/useFilePreview'
+import { getToolDisplayName } from '../utils/tool-names'
 
 // 附件类型
 interface FileAttachment {
@@ -60,20 +61,7 @@ const displayName = computed(() => {
   const title = props.tool.state?.title
   if (title) return title
 
-  const names: Record<string, string> = {
-    read: 'Read',
-    write: 'Write',
-    edit: 'Edit',
-    bash: 'Bash',
-    grep: 'Grep',
-    glob: 'Glob',
-    list: 'List',
-    webfetch: 'Fetch',
-    task: 'Task',
-    todowrite: 'Todo',
-    todoread: 'Todo'
-  }
-  return names[toolName.value.toLowerCase()] || toolName.value
+  return getToolDisplayName(toolName.value)
 })
 
 // Output preview
@@ -223,15 +211,15 @@ function formatSize(bytes: number): string {
 
     <div v-if="isExpanded" class="tool-call-body">
       <div v-if="tool.state?.input" class="detail-section">
-        <div class="detail-label">Input</div>
+        <div class="detail-label">输入</div>
         <pre>{{ fullInput }}</pre>
       </div>
       <div v-if="outputPreview" class="detail-section">
-        <div class="detail-label">Output</div>
+        <div class="detail-label">输出</div>
         <pre>{{ outputPreview }}</pre>
       </div>
       <div v-if="tool.state?.error" class="detail-section error">
-        <div class="detail-label">Error</div>
+        <div class="detail-label">错误</div>
         <pre class="error-text">{{ tool.state.error }}</pre>
       </div>
     </div>
@@ -318,7 +306,7 @@ function formatSize(bytes: number): string {
   padding: var(--space-sm);
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
 }
 
 .attachment-item {
@@ -329,7 +317,7 @@ function formatSize(bytes: number): string {
 }
 
 .attachment-item:not(:last-child) {
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   padding-bottom: var(--space-sm);
   margin-bottom: var(--space-xs);
 }
@@ -341,7 +329,7 @@ function formatSize(bytes: number): string {
 
 .attachment-name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -350,7 +338,7 @@ function formatSize(bytes: number): string {
 }
 
 .attachment-size {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -361,10 +349,10 @@ function formatSize(bytes: number): string {
   gap: 4px;
   padding: 4px 10px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -386,7 +374,7 @@ function formatSize(bytes: number): string {
   padding: var(--space-sm);
   background: var(--accent-subtle);
   border-radius: var(--radius-md);
-  border: 0.5px solid var(--accent);
+  border: 1px solid var(--accent);
 }
 
 .preview-item {
@@ -402,7 +390,7 @@ function formatSize(bytes: number): string {
 
 .preview-name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -411,7 +399,7 @@ function formatSize(bytes: number): string {
 }
 
 .preview-size {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -422,10 +410,10 @@ function formatSize(bytes: number): string {
   gap: 4px;
   padding: 4px 10px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);

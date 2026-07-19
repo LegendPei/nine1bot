@@ -17,6 +17,23 @@ const previews = ref<Map<string, FilePreviewInfo>>(new Map())
 const activePreviewId = ref<string | null>(null)
 const isPanelOpen = ref(false)
 
+// base64 内容驻留内存，限制条数，FIFO 淘汰最旧预览
+const MAX_PREVIEWS = 50
+
+function addPreview(info: FilePreviewInfo) {
+  // 同 id 覆盖时先删除，保证插入顺序即新旧顺序
+  previews.value.delete(info.id)
+  previews.value.set(info.id, info)
+  while (previews.value.size > MAX_PREVIEWS) {
+    const oldest = previews.value.keys().next().value
+    if (oldest === undefined) break
+    previews.value.delete(oldest)
+    if (activePreviewId.value === oldest) {
+      activePreviewId.value = previews.value.keys().next().value ?? null
+    }
+  }
+}
+
 export function useFilePreview() {
   const previewList = computed(() => Array.from(previews.value.values()))
 
@@ -132,7 +149,7 @@ export function useFilePreview() {
     switch (type) {
       case 'file-preview.open': {
         const info = properties as FilePreviewInfo
-        previews.value.set(info.id, info)
+        addPreview(info)
         activePreviewId.value = info.id
         isPanelOpen.value = true
         break
@@ -208,8 +225,8 @@ export function useFilePreview() {
 
       const data = await res.json()
 
-      // Generate a new preview ID
-      const previewId = `preview-${Date.now()}`
+      // Generate a new preview ID（时间戳 + 随机后缀，避免同毫秒碰撞）
+      const previewId = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
       const previewInfo: FilePreviewInfo = {
         id: previewId,
@@ -222,7 +239,7 @@ export function useFilePreview() {
         interactive: data.interactive,
       }
 
-      previews.value.set(previewId, previewInfo)
+      addPreview(previewInfo)
       activePreviewId.value = previewId
       isPanelOpen.value = true
 

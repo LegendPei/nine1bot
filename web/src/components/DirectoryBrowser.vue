@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   AlertCircle,
@@ -25,7 +25,7 @@ interface DirectoryItem {
 }
 
 const ROOTS_VIEW = '@roots'
-const ROOTS_LABEL = 'This PC'
+const ROOTS_LABEL = '此电脑'
 
 const props = defineProps<{
   visible: boolean
@@ -240,6 +240,31 @@ function enterDirectory(item: DirectoryItem) {
   loadBaseDirectory(item.path, { preserveStateOnError: true })
 }
 
+// 单击 250ms 后才触发预览，双击进入目录时取消未决的单击动作，
+// 避免同一行 @click + @dblclick 导致双击发出两次预览请求
+let entryClickTimer: ReturnType<typeof setTimeout> | null = null
+
+function handleEntryClick(item: DirectoryItem) {
+  if (item.type !== 'directory') {
+    focusCurrentItem(item)
+    return
+  }
+  if (entryClickTimer) clearTimeout(entryClickTimer)
+  entryClickTimer = setTimeout(() => {
+    entryClickTimer = null
+    focusCurrentItem(item)
+  }, 250)
+}
+
+function handleEntryDblclick(item: DirectoryItem) {
+  if (item.type !== 'directory') return
+  if (entryClickTimer) {
+    clearTimeout(entryClickTimer)
+    entryClickTimer = null
+  }
+  enterDirectory(item)
+}
+
 function navigateHome() {
   loadBaseDirectory(getHomeTarget(), { preserveStateOnError: true })
 }
@@ -377,6 +402,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleKeydown)
+  if (entryClickTimer) {
+    clearTimeout(entryClickTimer)
+    entryClickTimer = null
+  }
 })
 </script>
 
@@ -444,7 +473,7 @@ onUnmounted(() => {
                 <header class="column-header">
                   <span class="column-label">父级目录</span>
                   <span class="column-path" :title="parentPath || currentPath">
-                    {{ getColumnTitle(parentPath, 'Root') }}
+                    {{ getColumnTitle(parentPath, '根目录') }}
                   </span>
                 </header>
 
@@ -490,8 +519,8 @@ onUnmounted(() => {
                       directory: item.type === 'directory',
                       file: item.type === 'file',
                     }"
-                    @click="focusCurrentItem(item)"
-                    @dblclick="item.type === 'directory' && enterDirectory(item)"
+                    @click="handleEntryClick(item)"
+                    @dblclick="handleEntryDblclick(item)"
                   >
                     <component :is="item.type === 'directory' ? Folder : File" :size="16" class="entry-icon" />
                     <div class="entry-main">
@@ -518,7 +547,7 @@ onUnmounted(() => {
                 <header class="column-header">
                   <span class="column-label">下一层预览</span>
                   <span class="column-path" :title="previewDirectoryPath || ''">
-                    {{ getColumnTitle(previewDirectoryPath, 'Preview') }}
+                    {{ getColumnTitle(previewDirectoryPath, '预览') }}
                   </span>
                 </header>
 
@@ -607,7 +636,7 @@ onUnmounted(() => {
   padding: var(--space-md) var(--space-lg);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-secondary) 85%, white 15%) 0%, var(--bg-secondary) 100%);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .toolbar-actions {
@@ -621,7 +650,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-elevated) 70%, var(--bg-secondary) 30%);
   color: var(--text-secondary);
@@ -654,7 +683,7 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--space-sm);
   padding: 0 var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--bg-elevated) 76%, var(--bg-secondary) 24%);
   color: var(--text-muted);
@@ -709,7 +738,7 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-elevated) 28%);
   color: var(--text-secondary);
@@ -742,15 +771,6 @@ onUnmounted(() => {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .browser-columns {
   flex: 1;
   min-height: 0;
@@ -765,7 +785,7 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 88%, var(--bg-secondary) 12%) 0%, var(--bg-elevated) 100%);
@@ -782,7 +802,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--bg-secondary) 60%, var(--bg-elevated) 40%);
 }
 

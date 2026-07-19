@@ -12,6 +12,7 @@ const props = defineProps<{
   messages: Message[]
   isLoading: boolean
   isStreaming: boolean
+  sessionId?: string
   pendingQuestions?: QuestionRequest[]
   pendingPermissions?: PermissionRequest[]
   sessionError?: { message: string; dismissable?: boolean } | null
@@ -73,9 +74,9 @@ const displayGroups = computed<DisplayGroup[]>(() => {
 // Time-based greeting
 const greeting = computed(() => {
   const hour = new Date().getHours()
-  if (hour < 12) return 'Good morning'
-  if (hour < 18) return 'Good afternoon'
-  return 'Good evening'
+  if (hour < 12) return '上午好'
+  if (hour < 18) return '下午好'
+  return '晚上好'
 })
 
 function openDirectoryPicker() {
@@ -105,11 +106,21 @@ function scheduleScrollToBottom() {
   if (scrollFrame !== undefined) return
   scrollFrame = requestAnimationFrame(() => {
     scrollFrame = undefined
-    void nextTick().then(scrollToBottom)
+    void nextTick().then(() => scrollToBottom())
   })
 }
 
-watch(() => props.messages, scheduleScrollToBottom, { deep: true })
+// 只跟踪廉价标量（消息数 + 最后一条消息末尾 part 的文本长度），
+// 避免 deep watch 在每个 SSE delta 上全量遍历 messages
+watch(
+  () => {
+    const messages = props.messages
+    const last = messages[messages.length - 1]
+    const lastPart = last?.parts?.[last.parts.length - 1]
+    return `${messages.length}:${lastPart?.text?.length ?? 0}`
+  },
+  scheduleScrollToBottom,
+)
 
 watch(() => props.isStreaming, (streaming) => {
   if (streaming) {
@@ -117,20 +128,29 @@ watch(() => props.isStreaming, (streaming) => {
   }
 })
 
+// 切换会话后无条件瞬时滚到底部，避免残留旧会话的 scrollTop 落在历史中间
+watch(() => props.sessionId, () => {
+  if (scrollFrame !== undefined) {
+    cancelAnimationFrame(scrollFrame)
+    scrollFrame = undefined
+  }
+  void nextTick().then(() => scrollToBottom(true))
+})
+
 onUnmounted(() => {
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
 })
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
   if (scrollContainer.value) {
     // Check if user is already near bottom to avoid annoying auto-scroll if they are reading history
     const isNearBottom = scrollContainer.value.scrollHeight - scrollContainer.value.scrollTop - scrollContainer.value.clientHeight < 100
 
-    if (isNearBottom || validMessages.value.length <= 1) {
-       // Always scroll on simple cases
+    if (force || isNearBottom) {
       scrollContainer.value.scrollTo({
         top: scrollContainer.value.scrollHeight,
-        behavior: props.isStreaming ? 'auto' : 'smooth'
+        // 流式期间用 instant，避免每个 token 都触发一次平滑滚动动画
+        behavior: force || props.isStreaming ? 'instant' : 'smooth'
       })
     }
   }
@@ -176,6 +196,12 @@ function scrollToBottom() {
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- Loading State: waiting for first messages -->
+    <div v-else-if="isLoading && validMessages.length === 0" class="chat-loading">
+      <div class="loading-spinner"></div>
+      <span class="chat-loading-text">加载中…</span>
     </div>
 
     <!-- Messages -->
@@ -238,7 +264,6 @@ function scrollToBottom() {
   flex: 1;
   overflow-y: auto;
   padding: 0;
-  scroll-behavior: smooth;
 }
 
 .messages-container {
@@ -269,7 +294,7 @@ function scrollToBottom() {
   gap: var(--space-xl);
   max-width: var(--input-max-width);
   width: 100%;
-  animation: welcome-rise-in 0.6s ease-out;
+  animation: fade-up 0.6s ease-out;
   will-change: transform, opacity;
 }
 
@@ -311,7 +336,7 @@ function scrollToBottom() {
   border-radius: var(--radius-full);
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 400;
   cursor: pointer;
   transition: all var(--transition-normal);
@@ -334,6 +359,22 @@ function scrollToBottom() {
   white-space: nowrap;
 }
 
+/* === Loading State === */
+.chat-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  color: var(--text-muted);
+  animation: fade-up 0.3s var(--ease-smooth, ease);
+}
+
+.chat-loading-text {
+  font-size: var(--text-13);
+}
+
 .bottom-spacer {
   height: 48px;
 }
@@ -346,11 +387,6 @@ function scrollToBottom() {
   animation: fade-up 0.3s var(--ease-smooth, ease) forwards;
 }
 
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 .pending-requests {
   padding: 0 var(--space-lg);
   margin-bottom: var(--space-md);
@@ -361,7 +397,7 @@ function scrollToBottom() {
   margin: var(--space-md) auto;
   padding: var(--space-md);
   background: var(--error-subtle);
-  border: 0.5px solid var(--error);
+  border: 1px solid var(--error);
   border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
@@ -393,13 +429,4 @@ function scrollToBottom() {
   margin-left: 28px;
 }
 
-.btn-sm {
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 0.75rem;
-}
-
-@keyframes welcome-rise-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 </style>

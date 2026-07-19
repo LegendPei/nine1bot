@@ -65,6 +65,15 @@ const markdownCache = new Map<string, string>()
 const MARKDOWN_CACHE_LIMIT = 200
 
 function formatText(text: string): string {
+  // 流式期间文本持续增长，中间态进缓存只会冲刷 FIFO，直接渲染
+  if (props.isStreaming) {
+    try {
+      return DOMPurify.sanitize(marked.parse(text) as string)
+    } catch {
+      return DOMPurify.sanitize(text)
+    }
+  }
+
   const cached = markdownCache.get(text)
   if (cached !== undefined) return cached
 
@@ -198,8 +207,8 @@ async function openPreview(meta: PreviewMeta, idx: number) {
           @click="previewImageUrl = resolveFileUrl((item.part as any).url)"
         />
         <a v-else :href="resolveFileUrl((item.part as any).url)" target="_blank" class="file-badge">
-          <span class="file-icon">📄</span>
-          <span class="file-name">{{ (item.part as any).filename || 'File' }}</span>
+          <File :size="18" class="file-icon" />
+          <span class="file-name">{{ (item.part as any).filename || '文件' }}</span>
         </a>
       </div>
     </template>
@@ -260,49 +269,9 @@ async function openPreview(meta: PreviewMeta, idx: number) {
   width: 100%;
 }
 
+/* Prose / Markdown styling lives in global style.css (.markdown-content) */
 .markdown-content {
-  font-size: 15px;
-  line-height: 1.7;
-  color: var(--text-primary);
-  font-weight: var(--font-weight-normal);
   margin-bottom: 4px;
-}
-
-.markdown-content :deep(p) { margin-bottom: 1em; }
-.markdown-content :deep(p:last-child) { margin-bottom: 0; }
-.markdown-content :deep(h1),
-.markdown-content :deep(h2),
-.markdown-content :deep(h3) {
-  margin-top: 1.5em; margin-bottom: 0.75em;
-  font-weight: 600; line-height: 1.3; color: var(--text-primary);
-}
-.markdown-content :deep(code) {
-  background: var(--bg-tertiary); padding: 2px 5px;
-  border-radius: var(--radius-sm); font-family: var(--font-mono);
-  font-size: 0.9em; color: var(--accent);
-}
-.markdown-content :deep(pre) {
-  background: var(--bg-secondary); padding: 16px;
-  border-radius: var(--radius-md); margin: 1em 0;
-  overflow-x: auto; border: 0.5px solid var(--border-default);
-}
-:root[data-theme='dark'] .markdown-content :deep(pre) { background: #1a1a1e; }
-.markdown-content :deep(pre code) {
-  background: transparent; padding: 0; color: inherit;
-  font-size: 13px; border: none;
-}
-.markdown-content :deep(ul),
-.markdown-content :deep(ol) { margin-bottom: 1em; padding-left: 1.5em; }
-.markdown-content :deep(li) { margin-bottom: 0.25em; }
-.markdown-content :deep(a) {
-  color: var(--accent); text-decoration: underline;
-  text-decoration-color: rgba(204, 77, 40, 0.3);
-  text-underline-offset: 2px;
-}
-.markdown-content :deep(a:hover) { text-decoration-color: var(--accent); }
-.markdown-content :deep(blockquote) {
-  border-left: 2px solid var(--accent); margin: 1em 0;
-  padding-left: 1em; font-style: italic; color: var(--text-muted);
 }
 
 .file-attachment { margin: 8px 0; }
@@ -311,20 +280,20 @@ async function openPreview(meta: PreviewMeta, idx: number) {
   max-width: 100%; max-height: 300px;
   border-radius: var(--radius-md); cursor: pointer;
   transition: transform var(--transition-fast);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
 }
 .uploaded-image:hover { transform: scale(1.01); }
 
 .file-badge {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: var(--bg-secondary);
-  border: 0.5px solid var(--border-default);
-  border-radius: var(--radius-md); font-size: 13px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md); font-size: var(--text-13);
   text-decoration: none; color: inherit; cursor: pointer;
   transition: background var(--transition-fast);
 }
 .file-badge:hover { background: var(--bg-elevated); }
-.file-icon { font-size: 18px; }
+.file-icon { font-size: var(--text-lg); }
 .file-name {
   color: var(--text-primary); max-width: 200px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -335,7 +304,7 @@ async function openPreview(meta: PreviewMeta, idx: number) {
 .preview-tools-section {
   margin-top: 10px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
@@ -350,7 +319,7 @@ async function openPreview(meta: PreviewMeta, idx: number) {
 
 .attachment-item:not(:last-child),
 .preview-item:not(:last-child) {
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .attachment-icon {
@@ -366,7 +335,7 @@ async function openPreview(meta: PreviewMeta, idx: number) {
 .attachment-name,
 .preview-name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -376,7 +345,7 @@ async function openPreview(meta: PreviewMeta, idx: number) {
 
 .attachment-size,
 .preview-size {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -388,10 +357,10 @@ async function openPreview(meta: PreviewMeta, idx: number) {
   gap: 4px;
   padding: 4px 10px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -423,28 +392,4 @@ async function openPreview(meta: PreviewMeta, idx: number) {
   animation: spin 0.7s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-</style>
-
-<style>
-/* Non-scoped for Teleport */
-.image-preview-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.9);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 1001; cursor: pointer;
-}
-.preview-image {
-  max-width: 90vw; max-height: 90vh;
-  object-fit: contain; border-radius: 8px; cursor: default;
-}
-.preview-close {
-  position: absolute; top: 20px; right: 20px;
-  width: 40px; height: 40px; display: flex;
-  align-items: center; justify-content: center;
-  background: rgba(255,255,255,0.1); border: none;
-  border-radius: 50%; color: white; cursor: pointer;
-}
-.preview-close:hover { background: rgba(255,255,255,0.2); }
 </style>

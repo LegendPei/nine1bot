@@ -125,7 +125,7 @@ function toggleSource() {
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   background: var(--bg-secondary);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
@@ -135,9 +135,9 @@ function toggleSource() {
   gap: 4px;
   padding: 4px 10px;
   background: var(--bg-tertiary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -151,7 +151,7 @@ function toggleSource() {
 .html-controls button.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .interactive-badge {
@@ -162,7 +162,7 @@ function toggleSource() {
   padding: 4px 8px;
   background: var(--success);
   color: white;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 500;
   border-radius: var(--radius-sm);
 }
@@ -177,7 +177,7 @@ function toggleSource() {
   margin: 0;
   padding: var(--space-md);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.5;
   color: var(--text-primary);
   white-space: pre-wrap;

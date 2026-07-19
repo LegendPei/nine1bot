@@ -21,10 +21,10 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
   <div class="automations-page">
     <header class="automations-header">
       <div>
-        <h1>Automations</h1>
-        <p>Project-bound triggers for unattended agent runs.</p>
+        <h1>自动化</h1>
+        <p>绑定到项目的触发器，用于无人值守的 Agent 运行。</p>
       </div>
-      <div class="automation-tabs" role="tablist" aria-label="Automation types">
+      <div class="automation-tabs" role="tablist" aria-label="自动化类型">
         <button
           class="tab-btn"
           :class="{ active: activeTab === 'webhooks' }"
@@ -33,7 +33,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
           @click="activeTab = 'webhooks'"
         >
           <Webhook :size="16" />
-          Webhooks
+          Webhook
         </button>
         <button
           class="tab-btn"
@@ -43,7 +43,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
           @click="activeTab = 'schedules'"
         >
           <CalendarClock :size="16" />
-          Schedules
+          定时任务
         </button>
       </div>
     </header>
@@ -83,7 +83,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
 
 .automations-header h1 {
   margin: 0;
-  font-size: 30px;
+  font-size: var(--text-3xl);
   font-weight: 650;
   line-height: 1.15;
 }
@@ -91,7 +91,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
 .automations-header p {
   margin: var(--space-xs) 0 0;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .automation-tabs {
@@ -99,7 +99,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
   gap: var(--space-xs);
   padding: 4px;
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
 }
 
@@ -115,7 +115,7 @@ const activeTab = ref<'webhooks' | 'schedules'>('webhooks')
   justify-content: center;
   gap: var(--space-xs);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
 }
 

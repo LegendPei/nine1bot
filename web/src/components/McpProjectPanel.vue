@@ -69,7 +69,7 @@ async function disconnectServer(name: string) {
 function getStatusColor(status: string): string {
   switch (status) {
     case 'connected': return 'var(--success)'
-    case 'connecting': return 'var(--warning, #f59e0b)'
+    case 'connecting': return 'var(--warning)'
     case 'failed': return 'var(--error)'
     default: return 'var(--text-muted)'
   }
@@ -77,13 +77,13 @@ function getStatusColor(status: string): string {
 
 function getStatusText(status: string): string {
   switch (status) {
-    case 'connected': return 'Connected'
-    case 'connecting': return 'Connecting...'
-    case 'auth_in_progress': return 'Authorizing...'
-    case 'disabled': return 'Disconnected'
-    case 'failed': return 'Failed'
-    case 'needs_auth': return 'Auth Required'
-    case 'needs_client_registration': return 'Static Client Required'
+    case 'connected': return '已连接'
+    case 'connecting': return '连接中...'
+    case 'auth_in_progress': return '授权中...'
+    case 'disabled': return '已断开'
+    case 'failed': return '连接失败'
+    case 'needs_auth': return '需要授权'
+    case 'needs_client_registration': return '需要静态客户端'
     default: return status
   }
 }
@@ -234,13 +234,13 @@ onMounted(loadServers)
     <div class="mcp-panel-body">
       <div v-if="loading" class="mcp-loading">
         <Loader2 :size="16" class="spin" />
-        <span>Loading...</span>
+        <span>加载中...</span>
       </div>
 
       <div v-else-if="servers.length === 0 && !showAddForm" class="mcp-empty">
         <Server :size="24" />
-        <span>No MCP servers configured</span>
-        <p class="mcp-empty-hint">点击 "+" 添加服务器，或在 Settings → MCP 中管理</p>
+        <span>尚未配置 MCP 服务器</span>
+        <p class="mcp-empty-hint">点击 "+" 添加服务器，或在设置 → MCP 中管理</p>
       </div>
 
       <div v-else class="mcp-server-list">
@@ -257,7 +257,7 @@ onMounted(loadServers)
               v-if="canConnect(server.status)"
               class="mcp-action-btn connect"
               @click="connectServer(server.name)"
-              title="Connect"
+              title="连接"
             >
               <Plug :size="14" />
             </button>
@@ -265,7 +265,7 @@ onMounted(loadServers)
               v-else-if="server.status === 'connected'"
               class="mcp-action-btn disconnect"
               @click="disconnectServer(server.name)"
-              title="Disconnect"
+              title="断开连接"
             >
               <Unplug :size="14" />
             </button>
@@ -273,7 +273,7 @@ onMounted(loadServers)
               v-else-if="server.status === 'needs_auth'"
               class="mcp-action-btn connect"
               @click="authenticateServer(server.name)"
-              title="Authenticate"
+              title="授权"
             >
               <Plug :size="14" />
             </button>
@@ -288,7 +288,7 @@ onMounted(loadServers)
 <style scoped>
 .mcp-project-panel {
   background: var(--bg-elevated);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   max-height: 480px;
@@ -308,7 +308,7 @@ onMounted(loadServers)
   align-items: center;
   justify-content: space-between;
   padding: var(--space-sm) var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .mcp-panel-title-row {
@@ -319,7 +319,7 @@ onMounted(loadServers)
 }
 
 .mcp-panel-title {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
@@ -354,8 +354,8 @@ onMounted(loadServers)
   gap: 6px;
   padding: 6px var(--space-md);
   background: var(--bg-primary);
-  border-bottom: 0.5px solid var(--border-subtle);
-  font-size: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
 }
 
 .mcp-dir-label {
@@ -376,7 +376,7 @@ onMounted(loadServers)
   flex-direction: column;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-primary);
 }
 
@@ -387,11 +387,11 @@ onMounted(loadServers)
 .mcp-form-input {
   width: 100%;
   padding: 6px 10px;
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-composer);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-family: var(--font-sans);
   outline: none;
   transition: border-color var(--transition-fast);
@@ -414,7 +414,7 @@ onMounted(loadServers)
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   cursor: pointer;
 }
@@ -424,7 +424,7 @@ onMounted(loadServers)
 }
 
 .mcp-form-error {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--error);
   padding: 4px 8px;
   background: rgba(239, 68, 68, 0.1);
@@ -442,7 +442,7 @@ onMounted(loadServers)
   padding: 4px 12px;
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: var(--font-sans);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -460,7 +460,7 @@ onMounted(loadServers)
 
 .mcp-form-submit {
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   font-weight: 500;
 }
 
@@ -486,7 +486,7 @@ onMounted(loadServers)
   gap: 8px;
   padding: var(--space-xl);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .mcp-empty {
@@ -496,12 +496,12 @@ onMounted(loadServers)
   gap: 8px;
   padding: var(--space-xl);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-13);
   text-align: center;
 }
 
 .mcp-empty-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   opacity: 0.7;
   margin: 0;
 }
@@ -544,7 +544,7 @@ onMounted(loadServers)
 }
 
 .mcp-server-name {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -553,7 +553,7 @@ onMounted(loadServers)
 }
 
 .mcp-server-status-text {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -594,10 +594,5 @@ onMounted(loadServers)
 
 .spin {
   animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 </style>

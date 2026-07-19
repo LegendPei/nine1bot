@@ -200,12 +200,12 @@ export function useAgentTerminal() {
         }
       }
 
-      for (const info of list) {
+      await Promise.all(list.map(async (info) => {
         terminals.value.set(info.id, info)
         const existing = terminalScreens.value.get(info.id)
         await refreshScreen(info.id, sessionID)
         await recoverTerminalOutput(info.id, existing?.latestSeq ?? 0)
-      }
+      }))
 
       const visible = terminalListForSession(sessionID)
       const active = activeTerminalBySession.value.get(sessionID)

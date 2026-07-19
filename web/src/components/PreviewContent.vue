@@ -171,7 +171,7 @@ function openInNewTab() {
   flex-wrap: wrap;
   gap: var(--space-xs);
   padding: var(--space-sm);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
@@ -181,9 +181,9 @@ function openInNewTab() {
   gap: 6px;
   padding: 6px 8px 6px 10px;
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -196,7 +196,7 @@ function openInNewTab() {
 .preview-tab.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .tab-name {
@@ -240,12 +240,12 @@ function openInNewTab() {
   gap: var(--space-sm);
   padding: var(--space-sm);
   background: var(--bg-secondary);
-  border-bottom: 0.5px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
 .filename {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -254,7 +254,7 @@ function openInNewTab() {
 }
 
 .file-meta {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -308,7 +308,7 @@ function openInNewTab() {
 }
 
 .unsupported-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   opacity: 0.7;
   margin-top: var(--space-xs);
   margin-bottom: var(--space-md);
@@ -321,7 +321,7 @@ function openInNewTab() {
   padding: var(--space-sm) var(--space-md);
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -329,7 +329,7 @@ function openInNewTab() {
 
 .btn-primary {
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .btn-primary:hover {
@@ -353,7 +353,7 @@ function openInNewTab() {
 }
 
 .empty-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   opacity: 0.7;
   margin-top: var(--space-xs);
 }

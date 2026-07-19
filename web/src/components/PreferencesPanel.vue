@@ -29,10 +29,16 @@ async function handleAdd() {
 }
 
 // 删除确认
-async function handleDelete(id: string) {
-  if (confirm('确定要删除这条偏好吗？')) {
-    await deletePreference(id)
-  }
+const deletingId = ref<string | null>(null)
+
+function handleDelete(id: string) {
+  deletingId.value = id
+}
+
+async function confirmDelete() {
+  if (!deletingId.value) return
+  await deletePreference(deletingId.value)
+  deletingId.value = null
 }
 
 // 初始加载
@@ -149,6 +155,31 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 删除确认对话框 -->
+    <Teleport to="body">
+      <div v-if="deletingId" class="dialog-overlay" @click="deletingId = null">
+        <div class="dialog" @click.stop>
+          <div class="dialog-header">
+            <span>删除偏好</span>
+            <button class="action-btn" @click="deletingId = null">
+              <X :size="16" />
+            </button>
+          </div>
+          <div class="dialog-body">
+            <p class="dialog-message">确定要删除这条偏好吗？</p>
+            <p class="dialog-warning">此操作不可撤销。</p>
+          </div>
+          <div class="dialog-footer">
+            <button class="btn btn-ghost btn-sm" @click="deletingId = null">取消</button>
+            <button class="btn btn-danger btn-sm" @click="confirmDelete">
+              <Trash2 :size="14" />
+              删除
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -163,11 +194,11 @@ onMounted(() => {
 
 .panel-header {
   padding-bottom: var(--space-sm);
-  border-bottom: 0.5px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .description {
-  font-size: 13px;
+  font-size: var(--text-13);
   color: var(--text-muted);
   margin: 0;
 }
@@ -189,11 +220,11 @@ onMounted(() => {
 .add-input {
   width: 100%;
   padding: var(--space-sm);
-  border: 0.5px solid var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--text-13);
   resize: vertical;
   min-height: 60px;
 }
@@ -217,7 +248,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
@@ -229,8 +260,8 @@ onMounted(() => {
   border: none;
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: white;
-  font-size: 13px;
+  color: var(--accent-fg);
+  font-size: var(--text-13);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -248,11 +279,11 @@ onMounted(() => {
 /* 错误提示 */
 .error-message {
   padding: var(--space-sm) var(--space-md);
-  background: rgba(239, 68, 68, 0.1);
-  border: 0.5px solid rgba(239, 68, 68, 0.3);
+  background: var(--error-subtle);
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
   border-radius: var(--radius-sm);
-  color: #ef4444;
-  font-size: 13px;
+  color: var(--error);
+  font-size: var(--text-13);
 }
 
 /* 偏好列表 */
@@ -261,26 +292,21 @@ onMounted(() => {
   overflow-y: auto;
 }
 
-.empty-state,
+/* .empty-state 使用全局样式（style.css），此处仅补充列表内布局 */
 .loading-state {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
   padding: var(--space-xl);
   color: var(--text-muted);
   text-align: center;
+  gap: var(--space-sm);
 }
 
 .empty-state .hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   margin-top: var(--space-xs);
-  opacity: 0.7;
-}
-
-.loading-state {
-  flex-direction: row;
-  gap: var(--space-sm);
 }
 
 .spinner {
@@ -290,10 +316,6 @@ onMounted(() => {
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 /* 偏好分组 */
@@ -306,7 +328,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--space-sm);
   margin: 0 0 var(--space-sm) 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -317,7 +339,7 @@ onMounted(() => {
   padding: 2px 6px;
   background: var(--bg-tertiary);
   border-radius: 10px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 500;
 }
 
@@ -333,7 +355,7 @@ onMounted(() => {
   gap: var(--space-sm);
   padding: var(--space-md);
   background: var(--bg-secondary);
-  border: 0.5px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   transition: all var(--transition-fast);
 }
@@ -349,7 +371,7 @@ onMounted(() => {
 
 .content-text {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--text-base);
   color: var(--text-primary);
   line-height: 1.5;
   word-break: break-word;
@@ -359,18 +381,18 @@ onMounted(() => {
   display: flex;
   gap: var(--space-md);
   margin-top: var(--space-xs);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
 .edit-input {
   flex: 1;
   padding: var(--space-sm);
-  border: 0.5px solid var(--accent);
+  border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
   resize: vertical;
   min-height: 60px;
 }
@@ -405,8 +427,8 @@ onMounted(() => {
 }
 
 .action-btn.delete:hover {
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
+  background: var(--error-subtle);
+  color: var(--error);
 }
 
 .action-btn.save {
@@ -414,11 +436,11 @@ onMounted(() => {
 }
 
 .action-btn.save:hover {
-  background: rgba(34, 197, 94, 0.1);
+  background: var(--success-subtle);
 }
 
 .action-btn.cancel:hover {
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
+  background: var(--error-subtle);
+  color: var(--error);
 }
 </style>

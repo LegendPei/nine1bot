@@ -97,14 +97,14 @@ const attentionSummary = computed(() => {
 
   const items: string[] = []
   if (overview.value?.p95ApiDurationMs && overview.value.p95ApiDurationMs >= 10_000) {
-    items.push(`P95 API latency is elevated at ${formatDuration(overview.value.p95ApiDurationMs)}`)
+    items.push(`P95 API 延迟偏高，当前为 ${formatDuration(overview.value.p95ApiDurationMs)}`)
   }
   if (overview.value?.busyRejectRate && overview.value.busyRejectRate >= 0.1) {
-    items.push(`Busy rejects are high at ${formatPercent(overview.value.busyRejectRate)}`)
+    items.push(`繁忙拒绝率偏高，当前为 ${formatPercent(overview.value.busyRejectRate)}`)
   }
-  if (modelHotspots) items.push(`${formatNumber(modelHotspots)} model lanes need attention`)
-  if (toolHotspots) items.push(`${formatNumber(toolHotspots)} tools are degraded or failing`)
-  if (resourceHotspots) items.push(`${formatNumber(resourceHotspots)} resource dependencies are unstable`)
+  if (modelHotspots) items.push(`${formatNumber(modelHotspots)} 个模型通道需要关注`)
+  if (toolHotspots) items.push(`${formatNumber(toolHotspots)} 个工具性能下降或失败`)
+  if (resourceHotspots) items.push(`${formatNumber(resourceHotspots)} 个资源依赖不稳定`)
   return items.slice(0, 4)
 })
 
@@ -119,9 +119,9 @@ const overviewCards = computed<Array<{
   if (!value) return []
   return [
     {
-      label: 'Requests',
+      label: '请求数',
       value: formatNumber(value.requestsTotal),
-      note: `${formatPercent(value.successRate)} success`,
+      note: `成功率 ${formatPercent(value.successRate)}`,
       icon: Activity,
       tone: severityFromRate(value.successRate, { watchBelow: 0.95, criticalBelow: 0.85 }),
     },
@@ -135,28 +135,28 @@ const overviewCards = computed<Array<{
     {
       label: 'Tokens',
       value: formatCompactNumber(value.totalTokens),
-      note: `${formatCurrency(value.totalCostUsd)} spend`,
+      note: `支出 ${formatCurrency(value.totalCostUsd)}`,
       icon: Coins,
       tone: value.totalCostUsd >= 25 ? 'watch' : 'healthy',
     },
     {
-      label: 'Tools',
+      label: '工具',
       value: formatNumber(value.toolCallsTotal),
-      note: `${formatPercent(value.toolSuccessRate)} success`,
+      note: `成功率 ${formatPercent(value.toolSuccessRate)}`,
       icon: Hammer,
       tone: severityFromRate(value.toolSuccessRate, { watchBelow: 0.92, criticalBelow: 0.8 }),
     },
     {
-      label: 'Busy Rejects',
+      label: '繁忙拒绝',
       value: formatNumber(value.busyRejects),
-      note: `${formatPercent(value.busyRejectRate)} of requests`,
+      note: `占请求的 ${formatPercent(value.busyRejectRate)}`,
       icon: Waves,
       tone: severityFromRate(value.busyRejectRate, { watchAbove: 0.03, criticalAbove: 0.1 }),
     },
     {
-      label: 'Resource Failures',
+      label: '资源失败',
       value: formatNumber(value.resourceFailuresTotal),
-      note: 'MCP / skill issues',
+      note: 'MCP / 技能问题',
       icon: ServerCrash,
       tone: value.resourceFailuresTotal >= 5 ? 'critical' : value.resourceFailuresTotal > 0 ? 'watch' : 'healthy',
     },
@@ -172,17 +172,17 @@ const tokenTrendPath = computed(() => sparklinePath(timeline.value.map((bucket) 
 const costTrendPath = computed(() => sparklinePath(timeline.value.map((bucket) => bucket.totalCostUsd)))
 const latestTrend = computed(() => timeline.value[timeline.value.length - 1] ?? null)
 const timelineMetricOptions: Array<{ key: TimelineMetricKey; label: string }> = [
-  { key: 'requests', label: 'Requests' },
-  { key: 'latency', label: 'Latency' },
+  { key: 'requests', label: '请求数' },
+  { key: 'latency', label: '延迟' },
   { key: 'tokens', label: 'Tokens' },
-  { key: 'cost', label: 'Cost' },
-  { key: 'tools', label: 'Tools' },
+  { key: 'cost', label: '费用' },
+  { key: 'tools', label: '工具' },
 ]
 
 const timelineMetricConfig = computed(() => {
   if (timelineMetric.value === 'latency') {
     return {
-      label: 'Avg API latency',
+      label: '平均 API 延迟',
       values: timeline.value.map((bucket) => bucket.avgApiDurationMs),
       colorClass: 'warm',
       formatter: formatDuration,
@@ -190,7 +190,7 @@ const timelineMetricConfig = computed(() => {
   }
   if (timelineMetric.value === 'tokens') {
     return {
-      label: 'Token throughput',
+      label: 'Token 吞吐量',
       values: timeline.value.map((bucket) => bucket.totalTokens),
       colorClass: 'cool',
       formatter: formatCompactNumber,
@@ -198,7 +198,7 @@ const timelineMetricConfig = computed(() => {
   }
   if (timelineMetric.value === 'cost') {
     return {
-      label: 'Cost trend',
+      label: '费用趋势',
       values: timeline.value.map((bucket) => bucket.totalCostUsd),
       colorClass: 'danger',
       formatter: formatCurrency,
@@ -206,14 +206,14 @@ const timelineMetricConfig = computed(() => {
   }
   if (timelineMetric.value === 'tools') {
     return {
-      label: 'Tool calls',
+      label: '工具调用',
       values: timeline.value.map((bucket) => bucket.toolCalls),
       colorClass: 'accent',
       formatter: formatNumber,
     }
   }
   return {
-    label: 'Request volume',
+    label: '请求量',
     values: timeline.value.map((bucket) => bucket.requests),
     colorClass: 'accent',
     formatter: formatNumber,
@@ -254,7 +254,7 @@ const toolBars = computed(() => {
     label: row.tool,
     value: row.calls,
     width: `${Math.max(12, (row.calls / max) * 100)}%`,
-    note: `${formatPercent(row.successRate)} success · ${formatDuration(row.p95DurationMs)}`,
+    note: `成功率 ${formatPercent(row.successRate)} · ${formatDuration(row.p95DurationMs)}`,
     tone: toolSeverity(row),
   }))
 })
@@ -333,7 +333,7 @@ async function loadMetrics() {
     timeline.value = payload.timeline
   } catch (err) {
     if (requestId !== metricsRequestId) return
-    error.value = err instanceof Error ? err.message : 'Failed to load metrics'
+    error.value = err instanceof Error ? err.message : '加载统计指标失败'
   } finally {
     if (requestId !== metricsRequestId) return
     isLoading.value = false
@@ -344,7 +344,7 @@ async function openModelDetail(row: ModelMetricsRow) {
   detailSelection.value = {
     kind: 'model',
     title: `${row.providerID}/${row.modelID}`,
-    subtitle: 'Recent turn events, finish reasons, and token/cost samples.',
+    subtitle: '最近的轮次事件、结束原因以及 Token / 费用样本。',
     params: {
       kind: 'turn',
       providerID: row.providerID,
@@ -358,7 +358,7 @@ async function openToolDetail(row: ToolMetricsRow) {
   detailSelection.value = {
     kind: 'tool',
     title: row.tool,
-    subtitle: 'Recent tool lifecycle events with duration and failure context.',
+    subtitle: '最近的工具生命周期事件，含耗时与失败上下文。',
     params: {
       kind: 'tool',
       tool: row.tool,
@@ -371,7 +371,7 @@ async function openResourceDetail(row: ResourceMetricsRow) {
   detailSelection.value = {
     kind: 'resource',
     title: `${row.resourceType} / ${row.resourceID}`,
-    subtitle: 'Recent resource failures and recovery-related runtime events.',
+    subtitle: '最近的资源失败及恢复相关的运行时事件。',
     params: {
       kind: 'resource',
       resourceType: row.resourceType,
@@ -399,7 +399,7 @@ async function loadDetail() {
     detailEvents.value = events
   } catch (err) {
     if (requestId !== detailRequestId) return
-    detailError.value = err instanceof Error ? err.message : 'Failed to load detail events'
+    detailError.value = err instanceof Error ? err.message : '加载详情事件失败'
     detailEvents.value = []
   } finally {
     if (requestId !== detailRequestId) return
@@ -434,7 +434,7 @@ async function loadDetailDebug() {
     detailDebug.value = debug
   } catch (err) {
     if (requestId !== detailDebugRequestId) return
-    detailDebugError.value = err instanceof Error ? err.message : 'Failed to load session debug'
+    detailDebugError.value = err instanceof Error ? err.message : '加载会话调试信息失败'
     detailDebug.value = null
   } finally {
     if (requestId !== detailDebugRequestId) return
@@ -519,9 +519,9 @@ function severityFromRate(
 }
 
 function severityLabel(value: Severity) {
-  if (value === 'critical') return 'Critical'
-  if (value === 'watch') return 'Watch'
-  return 'Healthy'
+  if (value === 'critical') return '严重'
+  if (value === 'watch') return '关注'
+  return '正常'
 }
 
 function detailStatusTone(event: MetricsDetailEvent): Severity {
@@ -546,9 +546,9 @@ function detailStatusTone(event: MetricsDetailEvent): Severity {
 
 function detailEventTitle(event: MetricsDetailEvent) {
   if (event.kind === 'controller_api') return `${event.method} ${event.route}`
-  if (event.kind === 'turn') return event.status === 'failed' ? 'Turn failed' : 'Turn completed'
+  if (event.kind === 'turn') return event.status === 'failed' ? '轮次失败' : '轮次完成'
   if (event.kind === 'tool') return `${event.tool} · ${event.status}`
-  return event.status === 'failed' ? `${event.resourceType} / ${event.resourceID}` : 'Resource resolution'
+  return event.status === 'failed' ? `${event.resourceType} / ${event.resourceID}` : '资源解析'
 }
 
 function detailEventSummary(event: MetricsDetailEvent) {
@@ -557,7 +557,7 @@ function detailEventSummary(event: MetricsDetailEvent) {
   }
   if (event.kind === 'turn') {
     if (event.status === 'failed') {
-      return `${event.providerID ?? 'unknown'}/${event.modelID ?? 'unknown'} · ${event.errorType ?? 'TurnError'}`
+      return `${event.providerID ?? '未知'}/${event.modelID ?? '未知'} · ${event.errorType ?? 'TurnError'}`
     }
     const tokenTotal =
       (event.tokens?.input ?? 0) +
@@ -565,7 +565,7 @@ function detailEventSummary(event: MetricsDetailEvent) {
       (event.tokens?.reasoning ?? 0) +
       (event.tokens?.cache.read ?? 0) +
       (event.tokens?.cache.write ?? 0)
-    return `${event.providerID ?? 'unknown'}/${event.modelID ?? 'unknown'} · ${formatCompactNumber(tokenTotal)} tokens · ${formatCurrency(event.costUsd)}`
+    return `${event.providerID ?? '未知'}/${event.modelID ?? '未知'} · ${formatCompactNumber(tokenTotal)} Tokens · ${formatCurrency(event.costUsd)}`
   }
   if (event.kind === 'tool') {
     return `${formatDuration(event.durationMs)}${event.status === 'failed' ? ` · ${event.errorType ?? 'ToolError'}` : ''}`
@@ -573,21 +573,21 @@ function detailEventSummary(event: MetricsDetailEvent) {
   if (event.status === 'failed') {
     return `${event.failureStatus} · ${event.stage}${event.reason ? ` · ${event.reason}` : ''}`
   }
-  return `${event.resolvedMcp ?? 0} MCP · ${event.resolvedSkills ?? 0} skills`
+  return `${event.resolvedMcp ?? 0} MCP · ${event.resolvedSkills ?? 0} 个技能`
 }
 
 function detailMeta(event: MetricsDetailEvent) {
   const parts: string[] = []
-  if ('sessionID' in event && event.sessionID) parts.push(`session ${event.sessionID}`)
-  if ('turnSnapshotId' in event && event.turnSnapshotId) parts.push(`turn ${event.turnSnapshotId}`)
-  if (event.kind === 'tool') parts.push(`call ${event.toolCallId}`)
+  if ('sessionID' in event && event.sessionID) parts.push(`会话 ${event.sessionID}`)
+  if ('turnSnapshotId' in event && event.turnSnapshotId) parts.push(`轮次 ${event.turnSnapshotId}`)
+  if (event.kind === 'tool') parts.push(`调用 ${event.toolCallId}`)
   if (event.kind === 'controller_api' && event.traceId) parts.push(`trace ${event.traceId}`)
   return parts.join(' · ')
 }
 
 function formatDebugFailures(debug?: SessionDebugResponse | null) {
   const failures = debug?.resourceAudit?.failures ?? []
-  if (!failures.length) return 'No resource failures recorded.'
+  if (!failures.length) return '暂无资源失败记录。'
   return failures
     .slice(0, 3)
     .map((item) => `${item.resourceType}/${item.resourceID} · ${item.status} · ${item.stage}`)
@@ -717,10 +717,10 @@ onUnmounted(() => {
     <div class="metrics-shell" :class="{ 'has-detail': !!detailSelection }">
       <div class="metrics-hero">
         <div>
-          <p class="metrics-kicker">Runtime Observability</p>
-          <h1 class="metrics-title">Metrics dashboard for latency, token spend, tools, and runtime health.</h1>
+          <p class="metrics-kicker">运行时观测</p>
+          <h1 class="metrics-title">统计仪表盘：延迟、Token 支出、工具与运行时健康状况。</h1>
           <p class="metrics-subtitle">
-            Aggregated from Controller API metrics and runtime turn/tool/resource events.
+            数据聚合自 Controller API 指标与运行时轮次 / 工具 / 资源事件。
           </p>
         </div>
 
@@ -738,11 +738,11 @@ onUnmounted(() => {
           </div>
           <label class="auto-refresh-toggle">
             <input v-model="autoRefresh" type="checkbox" />
-            <span>Auto refresh</span>
+            <span>自动刷新</span>
           </label>
           <button class="refresh-button" :disabled="isLoading" @click="loadMetrics">
             <RefreshCw :size="16" :class="{ spinning: isLoading }" />
-            <span>{{ isLoading ? 'Refreshing' : 'Refresh' }}</span>
+            <span>{{ isLoading ? '刷新中' : '刷新' }}</span>
           </button>
         </div>
       </div>
@@ -755,7 +755,7 @@ onUnmounted(() => {
       <div v-if="attentionSummary.length" class="attention-strip">
         <div class="attention-strip-head">
           <AlertTriangle :size="16" />
-          <span>Needs attention</span>
+          <span>需要关注</span>
         </div>
         <div class="attention-pills">
           <span v-for="item in attentionSummary" :key="item" class="attention-pill">
@@ -787,7 +787,7 @@ onUnmounted(() => {
         <article class="trend-card">
           <div class="trend-head">
             <div>
-              <span>Request volume</span>
+              <span>请求量</span>
               <strong>{{ latestTrend ? formatNumber(latestTrend.requests) : '--' }}</strong>
             </div>
             <Activity :size="18" />
@@ -804,7 +804,7 @@ onUnmounted(() => {
         <article class="trend-card">
           <div class="trend-head">
             <div>
-              <span>Avg API latency</span>
+              <span>平均 API 延迟</span>
               <strong>{{ latestTrend ? formatDuration(latestTrend.avgApiDurationMs) : '--' }}</strong>
             </div>
             <TimerReset :size="18" />
@@ -812,13 +812,13 @@ onUnmounted(() => {
           <svg class="trend-chart" viewBox="0 0 240 72" preserveAspectRatio="none">
             <path v-if="latencyTrendPath" :d="latencyTrendPath" class="trend-line warm" />
           </svg>
-          <div class="trend-foot">Bucketed by current window</div>
+          <div class="trend-foot">按当前时间窗口分桶</div>
         </article>
 
         <article class="trend-card">
           <div class="trend-head">
             <div>
-              <span>Token throughput</span>
+              <span>Token 吞吐量</span>
               <strong>{{ latestTrend ? formatCompactNumber(latestTrend.totalTokens) : '--' }}</strong>
             </div>
             <Radar :size="18" />
@@ -826,13 +826,13 @@ onUnmounted(() => {
           <svg class="trend-chart" viewBox="0 0 240 72" preserveAspectRatio="none">
             <path v-if="tokenTrendPath" :d="tokenTrendPath" class="trend-line cool" />
           </svg>
-          <div class="trend-foot">Input + output + reasoning + cache</div>
+          <div class="trend-foot">输入 + 输出 + 推理 + 缓存</div>
         </article>
 
         <article class="trend-card">
           <div class="trend-head">
             <div>
-              <span>Cost trend</span>
+              <span>费用趋势</span>
               <strong>{{ latestTrend ? formatCurrency(latestTrend.totalCostUsd) : '--' }}</strong>
             </div>
             <Coins :size="18" />
@@ -840,7 +840,7 @@ onUnmounted(() => {
           <svg class="trend-chart" viewBox="0 0 240 72" preserveAspectRatio="none">
             <path v-if="costTrendPath" :d="costTrendPath" class="trend-line danger" />
           </svg>
-          <div class="trend-foot">{{ formatNumber(timeline.length) }} buckets in window</div>
+          <div class="trend-foot">当前窗口共 {{ formatNumber(timeline.length) }} 个分桶</div>
         </article>
       </div>
 
@@ -848,8 +848,8 @@ onUnmounted(() => {
         <section class="visual-panel visual-panel-wide">
           <div class="panel-head">
             <div>
-              <h2>Deep Trends</h2>
-              <span>Interactive time-series view for the current window</span>
+              <h2>深度趋势</h2>
+              <span>当前窗口的交互式时序视图</span>
             </div>
             <div class="chart-switcher">
               <button
@@ -898,15 +898,15 @@ onUnmounted(() => {
 
           <div class="chart-legend">
             <div class="chart-legend-item">
-              <span class="chart-label">Metric</span>
+              <span class="chart-label">指标</span>
               <strong>{{ timelineMetricConfig.label }}</strong>
             </div>
             <div class="chart-legend-item">
-              <span class="chart-label">Latest</span>
+              <span class="chart-label">最新</span>
               <strong>{{ timelineMetricConfig.formatter(timelineStats.latest) }}</strong>
             </div>
             <div class="chart-legend-item">
-              <span class="chart-label">Range</span>
+              <span class="chart-label">范围</span>
               <strong>
                 {{ timelineMetricConfig.formatter(timelineStats.min) }} - {{ timelineMetricConfig.formatter(timelineStats.max) }}
               </strong>
@@ -917,8 +917,8 @@ onUnmounted(() => {
         <section class="visual-panel">
           <div class="panel-head">
             <div>
-              <h2>Model Mix</h2>
-              <span>Top lanes by conversation traffic</span>
+              <h2>模型分布</h2>
+              <span>按会话流量排名的前列通道</span>
             </div>
           </div>
           <div class="bar-list">
@@ -932,15 +932,15 @@ onUnmounted(() => {
               </div>
               <small>{{ row.note }}</small>
             </article>
-            <div v-if="!modelBars.length" class="table-empty">No model traffic yet.</div>
+            <div v-if="!modelBars.length" class="table-empty">暂无模型流量。</div>
           </div>
         </section>
 
         <section class="visual-panel">
           <div class="panel-head">
             <div>
-              <h2>Tool Mix</h2>
-              <span>Top lanes by tool usage</span>
+              <h2>工具分布</h2>
+              <span>按使用量排名的前列工具</span>
             </div>
           </div>
           <div class="bar-list">
@@ -954,7 +954,7 @@ onUnmounted(() => {
               </div>
               <small>{{ row.note }}</small>
             </article>
-            <div v-if="!toolBars.length" class="table-empty">No tool traffic yet.</div>
+            <div v-if="!toolBars.length" class="table-empty">暂无工具流量。</div>
           </div>
         </section>
       </div>
@@ -963,7 +963,7 @@ onUnmounted(() => {
         <article class="highlight-card">
           <div class="highlight-head">
             <Bot :size="18" />
-            <span>Top model</span>
+            <span>热门模型</span>
           </div>
           <div v-if="topModel" class="highlight-body">
             <div class="highlight-title-row">
@@ -972,16 +972,16 @@ onUnmounted(() => {
                 {{ severityLabel(modelSeverity(topModel)) }}
               </span>
             </div>
-            <span>{{ formatNumber(topModel.turns) }} turns · {{ formatCurrency(topModel.totalCostUsd) }}</span>
+            <span>{{ formatNumber(topModel.turns) }} 轮次 · {{ formatCurrency(topModel.totalCostUsd) }}</span>
             <small>{{ formatRecord(topModel.finishReasons) }}</small>
           </div>
-          <div v-else class="highlight-empty">No model traffic yet.</div>
+          <div v-else class="highlight-empty">暂无模型流量。</div>
         </article>
 
         <article class="highlight-card">
           <div class="highlight-head">
             <Hammer :size="18" />
-            <span>Most-used tool</span>
+            <span>最常用工具</span>
           </div>
           <div v-if="topTool" class="highlight-body">
             <div class="highlight-title-row">
@@ -990,16 +990,16 @@ onUnmounted(() => {
                 {{ severityLabel(toolSeverity(topTool)) }}
               </span>
             </div>
-            <span>{{ formatNumber(topTool.calls) }} calls · {{ formatPercent(topTool.successRate) }}</span>
+            <span>{{ formatNumber(topTool.calls) }} 次调用 · {{ formatPercent(topTool.successRate) }}</span>
             <small>{{ formatRecord(topTool.failureReasons) }}</small>
           </div>
-          <div v-else class="highlight-empty">No tool activity yet.</div>
+          <div v-else class="highlight-empty">暂无工具活动。</div>
         </article>
 
         <article class="highlight-card">
           <div class="highlight-head">
             <ServerCrash :size="18" />
-            <span>Top resource issue</span>
+            <span>主要资源问题</span>
           </div>
           <div v-if="topResource" class="highlight-body">
             <div class="highlight-title-row">
@@ -1008,10 +1008,10 @@ onUnmounted(() => {
                 {{ severityLabel(resourceSeverity(topResource)) }}
               </span>
             </div>
-            <span>{{ formatNumber(topResource.failures) }} failures</span>
+            <span>{{ formatNumber(topResource.failures) }} 次失败</span>
             <small>{{ formatRecord(topResource.statuses) }}</small>
           </div>
-          <div v-else class="highlight-empty">No resource failures in this window.</div>
+          <div v-else class="highlight-empty">当前窗口暂无资源失败。</div>
         </article>
       </div>
 
@@ -1019,24 +1019,24 @@ onUnmounted(() => {
         <section class="metrics-panel">
           <div class="panel-head">
             <div>
-              <h2>Models</h2>
-              <span>Latency, token, cost, finish reason</span>
+              <h2>模型</h2>
+              <span>延迟、Token、费用、结束原因</span>
             </div>
             <div class="panel-controls">
               <div class="filter-group">
                 <SlidersHorizontal :size="14" />
-                <input v-model="modelSearch" class="filter-input" placeholder="Search model" />
+                <input v-model="modelSearch" class="filter-input" placeholder="搜索模型" />
                 <select v-model="modelProviderFilter" class="filter-select">
-                  <option value="all">All providers</option>
+                  <option value="all">全部服务商</option>
                   <option v-for="provider in providerOptions" :key="provider" :value="provider">
                     {{ provider }}
                   </option>
                 </select>
                 <select v-model="modelSort" class="filter-select">
-                  <option value="turns">Sort: traffic</option>
-                  <option value="latency">Sort: latency</option>
-                  <option value="cost">Sort: cost</option>
-                  <option value="failures">Sort: failure rate</option>
+                  <option value="turns">排序：流量</option>
+                  <option value="latency">排序：延迟</option>
+                  <option value="cost">排序：费用</option>
+                  <option value="failures">排序：失败率</option>
                 </select>
               </div>
             </div>
@@ -1045,14 +1045,14 @@ onUnmounted(() => {
             <table class="metrics-table">
               <thead>
                 <tr>
-                  <th>Model</th>
-                  <th>Status</th>
-                  <th>Turns</th>
-                  <th>First token</th>
-                  <th>P95 duration</th>
+                  <th>模型</th>
+                  <th>状态</th>
+                  <th>轮次</th>
+                  <th>首 Token 延迟</th>
+                  <th>P95 耗时</th>
                   <th>Tokens</th>
-                  <th>Cost</th>
-                  <th>Finish reasons</th>
+                  <th>费用</th>
+                  <th>结束原因</th>
                 </tr>
               </thead>
               <tbody>
@@ -1066,7 +1066,7 @@ onUnmounted(() => {
                   <td>
                     <div class="primary-cell">
                       <strong>{{ row.providerID }}/{{ row.modelID }}</strong>
-                      <small>{{ formatNumber(row.failures) }} failed</small>
+                      <small>{{ formatNumber(row.failures) }} 次失败</small>
                     </div>
                   </td>
                   <td>
@@ -1083,7 +1083,7 @@ onUnmounted(() => {
                 </tr>
                 <tr v-if="!filteredModels.length">
                   <td colspan="8" class="table-empty">
-                    {{ models.length ? 'No model rows match the current filters.' : 'No model metrics in this window.' }}
+                    {{ models.length ? '没有符合当前筛选条件的模型。' : '当前窗口暂无模型指标。' }}
                   </td>
                 </tr>
               </tbody>
@@ -1094,24 +1094,24 @@ onUnmounted(() => {
         <section class="metrics-panel">
           <div class="panel-head">
             <div>
-              <h2>Tools</h2>
-              <span>Success rate, duration, failure patterns</span>
+              <h2>工具</h2>
+              <span>成功率、耗时、失败模式</span>
             </div>
             <div class="panel-controls">
               <div class="filter-group">
                 <SlidersHorizontal :size="14" />
-                <input v-model="toolSearch" class="filter-input" placeholder="Search tool" />
+                <input v-model="toolSearch" class="filter-input" placeholder="搜索工具" />
                 <select v-model="toolHealthFilter" class="filter-select">
-                  <option value="all">All health</option>
-                  <option value="critical">Critical</option>
-                  <option value="watch">Watch</option>
-                  <option value="healthy">Healthy</option>
+                  <option value="all">全部状态</option>
+                  <option value="critical">严重</option>
+                  <option value="watch">关注</option>
+                  <option value="healthy">正常</option>
                 </select>
                 <select v-model="toolSort" class="filter-select">
-                  <option value="calls">Sort: traffic</option>
-                  <option value="successRate">Sort: success rate</option>
-                  <option value="latency">Sort: latency</option>
-                  <option value="failures">Sort: failure rate</option>
+                  <option value="calls">排序：流量</option>
+                  <option value="successRate">排序：成功率</option>
+                  <option value="latency">排序：延迟</option>
+                  <option value="failures">排序：失败率</option>
                 </select>
               </div>
             </div>
@@ -1120,13 +1120,13 @@ onUnmounted(() => {
             <table class="metrics-table">
               <thead>
                 <tr>
-                  <th>Tool</th>
-                  <th>Status</th>
-                  <th>Calls</th>
-                  <th>Success rate</th>
-                  <th>Avg duration</th>
+                  <th>工具</th>
+                  <th>状态</th>
+                  <th>调用次数</th>
+                  <th>成功率</th>
+                  <th>平均耗时</th>
                   <th>P95</th>
-                  <th>Failures</th>
+                  <th>失败次数</th>
                 </tr>
               </thead>
               <tbody>
@@ -1151,7 +1151,7 @@ onUnmounted(() => {
                 </tr>
                 <tr v-if="!filteredTools.length">
                   <td colspan="7" class="table-empty">
-                    {{ tools.length ? 'No tool rows match the current filters.' : 'No tool metrics in this window.' }}
+                    {{ tools.length ? '没有符合当前筛选条件的工具。' : '当前窗口暂无工具指标。' }}
                   </td>
                 </tr>
               </tbody>
@@ -1162,28 +1162,28 @@ onUnmounted(() => {
         <section class="metrics-panel">
           <div class="panel-head">
             <div>
-              <h2>Resources</h2>
-              <span>MCP and skill degradation / auth issues</span>
+              <h2>资源</h2>
+              <span>MCP 与技能性能下降 / 鉴权问题</span>
             </div>
             <div class="panel-controls">
               <div class="filter-group">
                 <SlidersHorizontal :size="14" />
-                <input v-model="resourceSearch" class="filter-input" placeholder="Search resource" />
+                <input v-model="resourceSearch" class="filter-input" placeholder="搜索资源" />
                 <select v-model="resourceTypeFilter" class="filter-select">
-                  <option value="all">All types</option>
+                  <option value="all">全部类型</option>
                   <option value="mcp">MCP</option>
-                  <option value="skill">Skill</option>
+                  <option value="skill">技能</option>
                 </select>
                 <select v-model="resourceSeverityFilter" class="filter-select">
-                  <option value="all">All health</option>
-                  <option value="critical">Critical</option>
-                  <option value="watch">Watch</option>
-                  <option value="healthy">Healthy</option>
+                  <option value="all">全部状态</option>
+                  <option value="critical">严重</option>
+                  <option value="watch">关注</option>
+                  <option value="healthy">正常</option>
                 </select>
                 <select v-model="resourceSort" class="filter-select">
-                  <option value="failures">Sort: failures</option>
-                  <option value="recoverable">Sort: recoverable</option>
-                  <option value="statusBreadth">Sort: status breadth</option>
+                  <option value="failures">排序：失败次数</option>
+                  <option value="recoverable">排序：可恢复</option>
+                  <option value="statusBreadth">排序：状态广度</option>
                 </select>
               </div>
             </div>
@@ -1192,13 +1192,13 @@ onUnmounted(() => {
             <table class="metrics-table">
               <thead>
                 <tr>
-                  <th>Resource</th>
-                  <th>Status</th>
-                  <th>Failures</th>
-                  <th>Recoverable</th>
-                  <th>Status mix</th>
-                  <th>Stages</th>
-                  <th>Reasons</th>
+                  <th>资源</th>
+                  <th>状态</th>
+                  <th>失败次数</th>
+                  <th>可恢复</th>
+                  <th>状态分布</th>
+                  <th>阶段</th>
+                  <th>原因</th>
                 </tr>
               </thead>
               <tbody>
@@ -1230,8 +1230,8 @@ onUnmounted(() => {
                   <td colspan="7" class="table-empty">
                     {{
                       resources.length
-                        ? 'No resource rows match the current filters.'
-                        : 'No resource failures in this window.'
+                        ? '没有符合当前筛选条件的资源。'
+                        : '当前窗口暂无资源失败。'
                     }}
                   </td>
                 </tr>
@@ -1245,16 +1245,16 @@ onUnmounted(() => {
         <aside class="detail-drawer">
           <div class="detail-drawer-head">
             <div>
-              <p class="detail-kicker">Drill-down</p>
+              <p class="detail-kicker">详情</p>
               <h3>{{ detailSelection.title }}</h3>
               <p class="detail-subtitle">{{ detailSelection.subtitle }}</p>
             </div>
             <div class="detail-drawer-actions">
               <button v-if="detailSessionId" class="detail-action" @click="openDetailSession">
-                Open session
+                打开会话
               </button>
               <button v-if="detailSessionId" class="detail-action" @click="loadDetailDebug">
-                {{ detailDebugLoading ? 'Loading debug...' : 'Load debug' }}
+                {{ detailDebugLoading ? '加载中…' : '加载调试' }}
               </button>
               <button class="detail-close" @click="closeDetail">
                 <X :size="18" />
@@ -1270,11 +1270,11 @@ onUnmounted(() => {
         </div>
 
         <div v-else-if="detailLoading" class="detail-empty">
-          Loading recent events...
+          正在加载最近事件…
         </div>
 
         <div v-else-if="!detailEvents.length" class="detail-empty">
-          No matching events in this time window.
+          当前时间窗口内没有匹配的事件。
         </div>
 
         <div v-else class="detail-event-list">
@@ -1298,7 +1298,7 @@ onUnmounted(() => {
 
         <section v-if="detailDebug || detailDebugLoading || detailDebugError" class="debug-card">
           <div class="debug-card-head">
-            <h4>Session debug</h4>
+            <h4>会话调试</h4>
             <span v-if="detailDebug?.session?.runtime?.currentModel">
               {{ detailDebug.session.runtime.currentModel.providerID }}/{{ detailDebug.session.runtime.currentModel.modelID }}
             </span>
@@ -1310,39 +1310,39 @@ onUnmounted(() => {
           </div>
 
           <div v-else-if="detailDebugLoading" class="detail-empty">
-            Loading debug snapshot...
+            正在加载调试快照…
           </div>
 
           <div v-else-if="detailDebug" class="debug-grid">
             <article class="debug-item">
-              <span>Status</span>
-              <strong>{{ detailDebug.status?.type ?? 'unknown' }}</strong>
+              <span>状态</span>
+              <strong>{{ detailDebug.status?.type ?? '未知' }}</strong>
             </article>
             <article class="debug-item">
               <span>Agent</span>
-              <strong>{{ detailDebug.session.runtime?.agent ?? 'default' }}</strong>
+              <strong>{{ detailDebug.session.runtime?.agent ?? '默认' }}</strong>
             </article>
             <article class="debug-item">
-              <span>Profile snapshot</span>
+              <span>Profile 快照</span>
               <strong>{{ detailDebug.profileSnapshot?.id ?? detailDebug.session.runtime?.profileSnapshotId ?? '--' }}</strong>
             </article>
             <article class="debug-item">
-              <span>Recent messages</span>
+              <span>最近消息</span>
               <strong>{{ formatNumber(detailDebug.recentMessages?.length ?? 0) }}</strong>
             </article>
             <article class="debug-item debug-item-wide">
-              <span>Directory</span>
+              <span>目录</span>
               <strong>{{ detailDebug.session.directory }}</strong>
             </article>
             <article class="debug-item debug-item-wide">
-              <span>Resources</span>
+              <span>资源</span>
               <strong>
                 MCP {{ formatNumber(detailDebug.profileSnapshot?.resources?.mcp?.length ?? 0) }} ·
-                Skills {{ formatNumber(detailDebug.profileSnapshot?.resources?.skills?.length ?? 0) }}
+                技能 {{ formatNumber(detailDebug.profileSnapshot?.resources?.skills?.length ?? 0) }}
               </strong>
             </article>
             <article class="debug-item debug-item-wide">
-              <span>Resource failures</span>
+              <span>资源失败</span>
               <strong>{{ formatDebugFailures(detailDebug) }}</strong>
             </article>
           </div>
@@ -1390,7 +1390,6 @@ onUnmounted(() => {
 
 .metrics-kicker {
   margin-bottom: var(--space-sm);
-  font-family: var(--font-sans);
   font-size: 0.78rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -1423,7 +1422,6 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-family: var(--font-sans);
   color: var(--text-secondary);
   font-size: 0.88rem;
 }
@@ -1506,16 +1504,15 @@ onUnmounted(() => {
 
 .attention-strip {
   justify-content: space-between;
-  background: color-mix(in srgb, #f59e0b 10%, var(--bg-elevated));
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-elevated));
   color: var(--text-primary);
-  border-color: color-mix(in srgb, #f59e0b 28%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 28%, transparent);
 }
 
 .attention-strip-head {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-family: var(--font-sans);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -1532,7 +1529,6 @@ onUnmounted(() => {
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--bg-primary) 84%, transparent);
   color: var(--text-secondary);
-  font-family: var(--font-sans);
   font-size: 0.82rem;
 }
 
@@ -1560,7 +1556,6 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   color: var(--text-secondary);
-  font-family: var(--font-sans);
   font-size: 0.82rem;
 }
 
@@ -1603,7 +1598,6 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-sm);
-  font-family: var(--font-sans);
 }
 
 .trend-head span {
@@ -1634,14 +1628,13 @@ onUnmounted(() => {
 }
 
 .trend-line.accent { stroke: var(--accent); }
-.trend-line.warm { stroke: #d97706; }
-.trend-line.cool { stroke: #2563eb; }
+.trend-line.warm { stroke: var(--warning); }
+.trend-line.cool { stroke: var(--info); }
 .trend-line.danger { stroke: var(--error); }
 
 .trend-foot {
   margin-top: var(--space-sm);
   color: var(--text-muted);
-  font-family: var(--font-sans);
   font-size: 0.8rem;
 }
 
@@ -1789,7 +1782,6 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   color: var(--accent);
-  font-family: var(--font-sans);
   font-weight: 600;
 }
 
@@ -1841,7 +1833,6 @@ onUnmounted(() => {
 
 .panel-head span {
   color: var(--text-muted);
-  font-family: var(--font-sans);
   font-size: 0.82rem;
 }
 
@@ -1884,7 +1875,6 @@ onUnmounted(() => {
 .metrics-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--font-sans);
 }
 
 .metrics-table th,
@@ -1931,7 +1921,7 @@ onUnmounted(() => {
 .detail-drawer-overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-header);
   display: flex;
   justify-content: flex-end;
   align-items: stretch;
@@ -1997,7 +1987,6 @@ onUnmounted(() => {
   margin-bottom: 6px;
   color: var(--accent);
   font-size: 0.76rem;
-  font-family: var(--font-sans);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -2062,13 +2051,11 @@ onUnmounted(() => {
 .detail-event-head time {
   color: var(--text-muted);
   font-size: 0.82rem;
-  font-family: var(--font-sans);
 }
 
 .detail-event-title {
   display: block;
   margin-top: var(--space-sm);
-  font-family: var(--font-sans);
   font-size: 0.98rem;
 }
 
@@ -2144,7 +2131,6 @@ onUnmounted(() => {
   width: fit-content;
   padding: 5px 10px;
   border-radius: var(--radius-full);
-  font-family: var(--font-sans);
   font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -2152,15 +2138,15 @@ onUnmounted(() => {
 }
 
 .severity-healthy {
-  border-color: color-mix(in srgb, #22c55e 18%, transparent);
-  background: color-mix(in srgb, #22c55e 10%, var(--bg-elevated));
-  color: #15803d;
+  border-color: color-mix(in srgb, var(--success) 18%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-elevated));
+  color: var(--success);
 }
 
 .severity-watch {
-  border-color: color-mix(in srgb, #f59e0b 20%, transparent);
-  background: color-mix(in srgb, #f59e0b 12%, var(--bg-elevated));
-  color: #b45309;
+  border-color: color-mix(in srgb, var(--warning) 20%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated));
+  color: var(--warning);
 }
 
 .severity-critical {
@@ -2171,7 +2157,7 @@ onUnmounted(() => {
 
 .overview-card.severity-watch,
 .row-watch {
-  background: linear-gradient(180deg, color-mix(in srgb, #f59e0b 6%, var(--bg-elevated)), var(--bg-elevated));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--warning) 6%, var(--bg-elevated)), var(--bg-elevated));
 }
 
 .overview-card.severity-critical,
@@ -2196,16 +2182,11 @@ onUnmounted(() => {
 }
 
 .row-watch td:first-child::before {
-  background: #f59e0b;
+  background: var(--warning);
 }
 
 .row-critical td:first-child::before {
   background: var(--error);
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 1200px) {
