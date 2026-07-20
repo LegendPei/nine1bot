@@ -10,6 +10,7 @@ import type {
   PlatformActionResult,
   Provider,
 } from '../api/client'
+import { copyText } from '../utils/clipboard'
 
 const props = defineProps<{
   platforms: PlatformSummary[]
@@ -422,7 +423,7 @@ function gitLabWebhookBaseUrl() {
 async function copyGitLabWebhookUrl() {
   gitLabWebhookUrlMessage.value = ''
   try {
-    await navigator.clipboard.writeText(gitLabReviewWebhookUrl.value)
+    if (!await copyText(gitLabReviewWebhookUrl.value)) throw new Error('copy failed')
     gitLabWebhookUrlMessage.value = 'Webhook URL 已复制。'
   } catch {
     gitLabWebhookUrlMessage.value = '复制失败，请手动选中 URL 复制。'

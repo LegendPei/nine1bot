@@ -233,33 +233,6 @@ setup_path() {
     fi
 }
 
-# 创建默认配置
-create_default_config() {
-    local config_file="$INSTALL_DIR/nine1bot.config.jsonc"
-
-    if [ ! -f "$config_file" ]; then
-        log_info "正在创建默认配置..."
-        cat > "$config_file" << 'EOF'
-{
-  "$schema": "https://nine1bot.com/config.schema.json",
-  "server": {
-    "port": 4096,
-    "hostname": "127.0.0.1",
-    "openBrowser": true
-  },
-  "auth": {
-    "enabled": false
-  },
-  "tunnel": {
-    "enabled": false,
-    "provider": "ngrok"
-  }
-}
-EOF
-        log_success "默认配置已创建"
-    fi
-}
-
 # 显示安装完成信息
 show_completion() {
     echo ""
@@ -276,7 +249,7 @@ show_completion() {
     echo -e "  ${CYAN}nine1bot config show${NC}  查看配置"
     echo -e "  ${CYAN}nine1bot --help${NC}       查看帮助"
     echo ""
-    echo -e "配置文件: ${CYAN}$INSTALL_DIR/nine1bot.config.jsonc${NC}"
+    echo -e "配置文件: ${CYAN}$HOME/.config/nine1bot/config.jsonc${NC}"
     echo ""
 
     if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -307,8 +280,6 @@ main() {
     build_web
     create_launcher
     setup_path
-    create_default_config
-
     show_completion
 }
 

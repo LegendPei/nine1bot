@@ -2,7 +2,7 @@ import open from 'open'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import type { Nine1BotConfig } from '../config/schema'
-import { loadConfig, findConfigPath, getDefaultConfigPath } from '../config/loader'
+import { resolveConfigContext } from '../config/loader'
 import { startServer, type ServerInstance } from './server'
 import { createTunnel, type TunnelManager } from '../tunnel'
 import {
@@ -10,6 +10,7 @@ import {
   stopBuiltinPlatformBackgroundServices,
 } from '../platform/builtin'
 import type { PlatformControllerBridge } from '@nine1bot/platform-protocol'
+import { createAccessAuthRuntime } from '../access-auth/service'
 
 const execFileAsync = promisify(execFile)
 
@@ -33,14 +34,12 @@ export interface LaunchResult {
  * 启动 Nine1Bot
  */
 export async function launch(options: LaunchOptions = {}): Promise<LaunchResult> {
-  // 查找或使用指定的配置文件
-  let configPath = options.configPath
-  if (!configPath) {
-    configPath = await findConfigPath() || getDefaultConfigPath()
-  }
-
-  // 加载配置（使用指定的配置路径）
-  const config = await loadConfig(configPath)
+  const configContext = await resolveConfigContext({
+    customConfigPath: options.configPath,
+    startDir: process.cwd(),
+  })
+  const configPath = configContext.writePath
+  const config = configContext.effective
 
   // 合并命令行选项
   const serverConfig = {
@@ -51,17 +50,26 @@ export async function launch(options: LaunchOptions = {}): Promise<LaunchResult>
 
   const enableTunnel = options.tunnel ?? config.tunnel.enabled
 
+  // 认证状态必须在 server bind 和 tunnel 创建前确定。enabled 但凭据缺失/损坏
+  // 会直接失败，不允许静默退化为无认证。
+  const accessAuth = await createAccessAuthRuntime(config.auth)
+  if (enableTunnel && accessAuth.state !== 'active') {
+    throw new Error(
+      'Tunnel requires active Web access authentication. Run `nine1bot config set-password` or disable the tunnel.',
+    )
+  }
+
   // 1. 启动服务器
   const server = await startServer({
     server: serverConfig,
-    auth: config.auth,
+    accessAuth,
     configPath,
     fullConfig: config,
   })
 
   const localUrl = server.url || `http://${serverConfig.hostname}:${serverConfig.port}`
   process.env.NINE1BOT_LOCAL_URL = localUrl
-  const authHeader = createAuthHeader(config.auth)
+  const authHeader = accessAuth.service.createInternalAuthorization()
 
   await startBuiltinPlatformBackgroundServices({
     localUrl,
@@ -78,12 +86,6 @@ export async function launch(options: LaunchOptions = {}): Promise<LaunchResult>
   delete process.env.NINE1BOT_PUBLIC_URL
 
   if (enableTunnel) {
-    // 安全警告：隧道会将服务暴露到公网
-    if (!config.auth?.enabled) {
-      console.warn('\n⚠️  WARNING: Tunnel enabled without password protection!')
-      console.warn('   Your Nine1Bot instance will be publicly accessible without authentication.')
-      console.warn('   Consider enabling auth in your config for security.\n')
-    }
     try {
       tunnel = await createTunnel(config.tunnel)
       publicUrl = await tunnel.start(serverConfig.port)
@@ -150,12 +152,6 @@ export async function shutdown(result: LaunchResult): Promise<void> {
       // 忽略停止服务器时的错误
     }
   }
-}
-
-function createAuthHeader(auth: Nine1BotConfig['auth']): string | undefined {
-  return auth?.enabled && auth.password
-    ? `Basic ${Buffer.from(`nine1bot:${auth.password}`).toString('base64')}`
-    : undefined
 }
 
 function createPlatformControllerBridge(localUrl: string, authHeader?: string): PlatformControllerBridge {

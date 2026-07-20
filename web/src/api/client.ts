@@ -107,6 +107,109 @@ function createEventStreamConnection(options: EventStreamOptions = {}) {
   }
 }
 
+export function createFetchEventStream(
+  url: string,
+  onData: (data: string) => void,
+  options: EventStreamOptions = {},
+): EventStreamSubscription {
+  let closed = false
+  let controller: AbortController | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempts = 0
+  const maxReconnectAttempts = 5
+  const connection = createEventStreamConnection(options)
+
+  function dispatchBlock(block: string): void {
+    const data = block
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /, ''))
+      .join('\n')
+    if (data) onData(data)
+  }
+
+  function reconnect(): void {
+    if (closed) return
+    if (reconnectAttempts >= maxReconnectAttempts) {
+      options.onGiveUp?.()
+      return
+    }
+    reconnectAttempts += 1
+    const delay = 1000 * 2 ** (reconnectAttempts - 1)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      void connect()
+    }, delay)
+  }
+
+  async function connect(): Promise<void> {
+    if (closed) return
+    controller?.abort()
+    controller = new AbortController()
+    try {
+      const response = await fetch(url, {
+        headers: { Accept: 'text/event-stream' },
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+      if (!response.ok || !response.body) {
+        if (response.status === 401) {
+          connection.close()
+          options.onGiveUp?.()
+          return
+        }
+        throw new Error(`Event stream failed with HTTP ${response.status}`)
+      }
+      const openedAt = Date.now()
+      connection.opened()
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (!closed) {
+        const { value, done } = await reader.read()
+        buffer += decoder.decode(value, { stream: !done })
+        buffer = buffer
+          .replace(/\r\n/g, '\n')
+          .replace(/\r(?!$)/g, '\n')
+        let separator = buffer.indexOf('\n\n')
+        while (separator >= 0) {
+          dispatchBlock(buffer.slice(0, separator))
+          buffer = buffer.slice(separator + 2)
+          separator = buffer.indexOf('\n\n')
+        }
+        if (done) break
+      }
+      if (!closed) {
+        if (Date.now() - openedAt >= 30_000) reconnectAttempts = 0
+        reconnect()
+      }
+    } catch (error) {
+      if (!closed && !(error instanceof DOMException && error.name === 'AbortError')) reconnect()
+    }
+  }
+
+  void connect()
+  return {
+    ready: connection.ready,
+    connectionGeneration: connection.connectionGeneration,
+    close() {
+      closed = true
+      connection.close()
+      controller?.abort()
+      controller = null
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+    },
+  }
+}
+
+function useFetchEventStream(): boolean {
+  const bunRuntime = 'Bun' in (globalThis as typeof globalThis & { Bun?: unknown })
+  return typeof ReadableStream !== 'undefined' && !bunRuntime
+}
+
 function normalizeSession(session: Session): Session {
   return {
     ...session,
@@ -1281,6 +1384,18 @@ export const api = {
 
   // 订阅事件流（带自动重连）
   subscribeEvents(onEvent: (event: SSEEvent) => void, options: EventStreamOptions = {}): EventStreamSubscription {
+    const url = applyDirectoryToUrl(`${BASE_URL}/event?content=false`)
+    if (useFetchEventStream()) {
+      return createFetchEventStream(url, (raw) => {
+        try {
+          const data = JSON.parse(raw)
+          const event = data.payload || data
+          if (event.type) onEvent(event)
+        } catch {
+          console.warn('Failed to parse event:', raw)
+        }
+      }, options)
+    }
     let eventSource: EventSource | null = null
     let reconnectAttempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -1292,7 +1407,7 @@ export const api = {
     function connect(): void {
       if (closed) return
       eventSource?.close()
-      eventSource = new EventSource(applyDirectoryToUrl(`${BASE_URL}/event?content=false`))
+      eventSource = new EventSource(url)
 
       eventSource.onopen = () => {
         // 连接成功，重置重连计数
@@ -1359,14 +1474,9 @@ export const api = {
     onEvent: (event: SSEEvent) => void,
     options: EventStreamOptions = {},
   ): EventStreamSubscription {
-    let eventSource: EventSource | null = null
-    let reconnectAttempts = 0
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    let closed = false
-    const maxReconnectAttempts = 5
-    const baseReconnectDelay = 1000
-    const connection = createEventStreamConnection(options)
-
+    const url = applyDirectoryToUrl(
+      `${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/events`,
+    )
     function dispatchEnvelope(raw: string) {
       try {
         const envelope = JSON.parse(raw) as RuntimeEventEnvelope
@@ -1377,13 +1487,21 @@ export const api = {
         console.warn('Failed to parse runtime event:', raw)
       }
     }
+    if (useFetchEventStream()) {
+      return createFetchEventStream(url, dispatchEnvelope, options)
+    }
+    let eventSource: EventSource | null = null
+    let reconnectAttempts = 0
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let closed = false
+    const maxReconnectAttempts = 5
+    const baseReconnectDelay = 1000
+    const connection = createEventStreamConnection(options)
 
     function connect(): void {
       if (closed) return
       eventSource?.close()
-      eventSource = new EventSource(
-        applyDirectoryToUrl(`${BASE_URL}/nine1bot/agent/sessions/${encodeURIComponent(sessionId)}/events`)
-      )
+      eventSource = new EventSource(url)
 
       eventSource.onopen = () => {
         reconnectAttempts = 0
@@ -1445,6 +1563,17 @@ export const api = {
     onEvent: (event: GlobalSSEEventEnvelope) => void,
     options: EventStreamOptions = {},
   ): EventStreamSubscription {
+    const url = `${BASE_URL}/global/event?content=false`
+    if (useFetchEventStream()) {
+      return createFetchEventStream(url, (raw) => {
+        try {
+          const data = JSON.parse(raw)
+          if (data?.payload?.type) onEvent(data as GlobalSSEEventEnvelope)
+        } catch {
+          // ignore malformed event payload
+        }
+      }, options)
+    }
     let eventSource: EventSource | null = null
     let reconnectAttempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -1456,7 +1585,7 @@ export const api = {
     function connect(): void {
       if (closed) return
       eventSource?.close()
-      eventSource = new EventSource(`${BASE_URL}/global/event?content=false`)
+      eventSource = new EventSource(url)
 
       eventSource.onopen = () => {
         reconnectAttempts = 0

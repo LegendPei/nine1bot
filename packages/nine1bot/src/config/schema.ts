@@ -10,7 +10,10 @@ export const ServerConfigSchema = z.object({
 
 export const AuthConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  /** @deprecated Use `nine1bot config set-password`; retained for one migration window. */
   password: z.string().optional(),
+  sessionTtlMinutes: z.number().int().min(5).max(7 * 24 * 60).default(12 * 60),
+  legacyBasic: z.enum(['compat', 'disabled']).default('compat'),
 })
 
 export const NgrokConfigSchema = z.object({

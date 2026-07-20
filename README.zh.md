@@ -321,8 +321,21 @@ Nine1Bot 可以记录你的个人偏好，AI 会在所有会话中自动遵循�
 ## 配置
 
 配置文件位置：
-- **项目配置**：`nine1bot.config.jsonc`（安装目录）
-- **全局配置**：`~/.config/nine1bot/config.jsonc`（Linux/macOS）或 `%APPDATA%\nine1bot\config.jsonc`（Windows）
+- **项目配置**：从当前目录向上找到的最近一个 `nine1bot.config.jsonc`
+- **全局配置**：Linux、macOS 和 Windows 均使用 `~/.config/nine1bot/config.jsonc`
+
+### WebUI 访问密码
+
+使用隐藏输入设置或更换访问密码；Nine1Bot 只会在用户数据目录保存 Argon2id 哈希：
+
+```bash
+nine1bot config set-password
+nine1bot config auth-status
+```
+
+使用 `nine1bot config disable-auth` 可关闭访问认证。旧配置中的明文 `auth.password` 暂时保留一个迁移周期，可执行 `nine1bot config migrate-auth` 转为哈希。自动化部署也可以使用 `NINE1BOT_WEB_PASSWORD`，请勿把密码放入命令行位置参数。
+
+局域网 IP、公网 IP 和域名通过 HTTP 或 HTTPS 访问时，都能完成密码登录并使用完整 WebUI。HTTP 会话 Cookie 会有意省略 `Secure`，因此功能可用但传输没有加密：链路上的监听者或中间人可能获得密码、会话和页面内容，公网访问仍建议使用 HTTPS。
 
 ### 配置示例
 
@@ -335,10 +348,11 @@ Nine1Bot 可以记录你的个人偏好，AI 会在所有会话中自动遵循�
     "openBrowser": true
   },
 
-  // 密码保护（用户名固定为 "nine1bot"）
+  // 启用前先执行 `nine1bot config set-password`
   "auth": {
     "enabled": true,
-    "password": "your-password"
+    "sessionTtlMinutes": 720,
+    "legacyBasic": "compat"
   },
 
   // 隧道配置
@@ -385,7 +399,8 @@ Nine1Bot 可以记录你的个人偏好，AI 会在所有会话中自动遵循�
 > **隧道安全警告**
 >
 > 启用隧道会将你的 Nine1Bot 实例暴露到公网，请务必注意以下风险：
-> - **强烈建议启用密码保护**：未设置密码时，任何人都可以通过隧道 URL 访问并控制你的 AI 助手
+> - **内置隧道要求启用密码保护**：请先执行 `nine1bot config set-password`
+> - **HTTP 不提供传输加密**：密码登录仍可用，但公网 HTTP 流量可能被截获，建议使用 HTTPS 隧道
 > - **隧道 URL 会被记录**：ngrok/NATAPP 等服务商会记录你的隧道访问日志
 > - **不要分享隧道 URL**：除非你信任对方，否则不要将隧道地址分享给他人
 > - **及时关闭不使用的隧道**：长时间暴露在公网增加被攻击的风险

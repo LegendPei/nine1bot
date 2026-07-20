@@ -1,8 +1,34 @@
 import * as prompts from '@clack/prompts'
 import { access } from 'fs/promises'
 import { UI } from '../ui'
-import { saveConfig, configExists, getDefaultConfigPath, isInPath, addToPath, getInstallDir, getGlobalConfigPath } from '../../config/loader'
+import { configExists, isInPath, addToPath, getGlobalConfigPath, resolveConfigContext } from '../../config/loader'
 import type { Nine1BotConfig } from '../../config/schema'
+import {
+  FileAccessCredentialStore,
+  MIN_ACCESS_PASSWORD_LENGTH,
+  validateAccessPassword,
+} from '../../access-auth/credential-store'
+import { updateConfigValue } from '../../config/editor'
+
+async function promptNewAccessPassword(): Promise<string> {
+  const password = await prompts.password({
+    message: 'Set a password for web access',
+    validate: (value) => {
+      try {
+        validateAccessPassword(value || '')
+      } catch (error) {
+        return error instanceof Error
+          ? error.message
+          : `Password must be at least ${MIN_ACCESS_PASSWORD_LENGTH} characters`
+      }
+    },
+  })
+  if (prompts.isCancel(password)) throw new UI.CancelledError()
+  const confirmation = await prompts.password({ message: 'Confirm the web access password' })
+  if (prompts.isCancel(confirmation)) throw new UI.CancelledError()
+  if (password !== confirmation) throw new Error('Passwords do not match')
+  return password
+}
 
 /**
  * 检查是否需要运行 setup（首次运行）
@@ -50,9 +76,10 @@ export async function runSetup(): Promise<void> {
 
   const config: Partial<Nine1BotConfig> = {
     server: { port: 4096, hostname: '127.0.0.1', openBrowser: true },
-    auth: { enabled: false },
+    auth: { enabled: false, sessionTtlMinutes: 720, legacyBasic: 'compat' },
     tunnel: { enabled: false, provider: 'ngrok' },
   }
+  let accessPassword: string | undefined
 
   // Step 0: PATH 设置（仅在未添加时询问）
   let pathResult: { success: boolean; message: string; shellRc?: string } | null = null
@@ -111,20 +138,12 @@ export async function runSetup(): Promise<void> {
   }
 
   if (enableAuth) {
-    const password = await prompts.password({
-      message: 'Set a password for web access',
-      validate: (value) => {
-        if (!value || value.length < 4) {
-          return 'Password must be at least 4 characters'
-        }
-      },
-    })
-
-    if (prompts.isCancel(password)) {
-      throw new UI.CancelledError()
+    accessPassword = await promptNewAccessPassword()
+    config.auth = {
+      enabled: true,
+      sessionTtlMinutes: 720,
+      legacyBasic: 'compat',
     }
-
-    config.auth = { enabled: true, password }
   }
 
   // Step 3: 隧道配置
@@ -138,6 +157,15 @@ export async function runSetup(): Promise<void> {
   }
 
   if (setupTunnel) {
+    if (!accessPassword) {
+      prompts.log.info('Public tunnel access requires WebUI password protection.')
+      accessPassword = await promptNewAccessPassword()
+      config.auth = {
+        enabled: true,
+        sessionTtlMinutes: 720,
+        legacyBasic: 'compat',
+      }
+    }
     const tunnelProvider = await prompts.select({
       message: 'Select tunnel provider',
       options: [
@@ -247,8 +275,18 @@ export async function runSetup(): Promise<void> {
   spinner.start('Saving configuration...')
 
   try {
-    const configPath = getGlobalConfigPath()
-    await saveConfig(config, configPath)
+    const context = await resolveConfigContext({ startDir: process.cwd() })
+    const configPath = context.writePath
+    await updateConfigValue(configPath, ['$schema'], 'https://nine1bot.com/config.schema.json')
+    for (const [key, value] of Object.entries(config)) {
+      await updateConfigValue(configPath, [key], value)
+    }
+    if (accessPassword) {
+      for (const source of context.sources) {
+        await updateConfigValue(source.path, ['auth', 'password'], undefined)
+      }
+      await new FileAccessCredentialStore().setPassword(accessPassword)
+    }
     spinner.stop(`Configuration saved to ${configPath}`)
   } catch (error: any) {
     spinner.stop(`Failed to save configuration: ${error.message}`)

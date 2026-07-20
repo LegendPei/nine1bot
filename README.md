@@ -320,8 +320,21 @@ Preferences are automatically injected into every conversation prompt.
 
 Config file locations:
 
-- **Project config**: `nine1bot.config.jsonc` (installation directory)
-- **Global config**: `~/.config/nine1bot/config.jsonc` (Linux/macOS) or `%APPDATA%\nine1bot\config.jsonc` (Windows)
+- **Project config**: the nearest `nine1bot.config.jsonc` found from the current directory upward
+- **Global config**: `~/.config/nine1bot/config.jsonc` on Linux, macOS, and Windows
+
+### WebUI access password
+
+Set or rotate the password with hidden input; Nine1Bot stores only an Argon2id hash in its user data directory:
+
+```bash
+nine1bot config set-password
+nine1bot config auth-status
+```
+
+Use `nine1bot config disable-auth` to disable access authentication. Existing configs containing a plaintext `auth.password` remain supported for one migration window and can be migrated with `nine1bot config migrate-auth`. Automated deployments may supply `NINE1BOT_WEB_PASSWORD` instead; do not put the value in command-line arguments.
+
+Password login and the full WebUI work over both HTTP and HTTPS, including LAN IPs and public HTTP endpoints. On HTTP the session cookie intentionally omits `Secure`, so the connection is functional but not encrypted: network observers or a man-in-the-middle may capture the password, session, or page contents. Prefer HTTPS for public access.
 
 ### Config Example
 
@@ -334,10 +347,11 @@ Config file locations:
     "openBrowser": true,
   },
 
-  // Password protection (username is fixed as "nine1bot")
+  // Run `nine1bot config set-password` before enabling this.
   "auth": {
     "enabled": true,
-    "password": "your-password",
+    "sessionTtlMinutes": 720,
+    "legacyBasic": "compat",
   },
 
   // Tunnel config
@@ -385,7 +399,8 @@ Config files support environment variable substitution:
 >
 > Enabling tunnel exposes your Nine1Bot instance to the internet. Please note:
 >
-> - **Strongly recommended to enable password protection**: Without a password, anyone can access and control your AI assistant
+> - **Password protection is required for the built-in tunnel**: configure it with `nine1bot config set-password`
+> - **HTTP is not encrypted**: password login remains available, but public HTTP traffic can be intercepted; prefer an HTTPS tunnel
 > - **Tunnel URLs are logged**: Services like ngrok/NATAPP record access logs
 > - **Don't share tunnel URLs**: Unless you trust the recipient
 > - **Close unused tunnels promptly**: Prolonged public exposure increases attack risk

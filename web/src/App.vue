@@ -20,6 +20,7 @@ import ProjectsPage from './components/ProjectsPage.vue'
 import AutomationsPage from './components/AutomationsPage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import BrowserExtensionSettingsPanel from './components/BrowserExtensionSettingsPanel.vue'
+import AccessLogin from './components/AccessLogin.vue'
 import FileViewer from './components/FileViewer.vue'
 import TodoList from './components/TodoList.vue'
 import PlanPanel from './components/PlanPanel.vue'
@@ -30,6 +31,7 @@ import { useFilePreview } from './composables/useFilePreview'
 import { useTheme } from './composables/useTheme'
 import { Globe2, Plus, RefreshCw, Settings, Terminal } from 'lucide-vue-next'
 import { getTrustedExtensionParentContext, isTrustedExtensionParentEvent } from './utils/extension-parent'
+import { useAccessAuth } from './composables/useAccessAuth'
 
 import { MAX_PARALLEL_AGENTS } from './composables/useParallelSessions'
 
@@ -123,6 +125,35 @@ const {
 } = useSettings()
 
 const { isBrowserExtension } = useClientSurface()
+const {
+  loading: accessLoading,
+  enabled: accessEnabled,
+  authenticated: accessAuthenticated,
+  required: accessRequired,
+  insecureTransport,
+  initialize: initializeAccessAuth,
+  logout: logoutAccessAuth,
+} = useAccessAuth()
+
+const ACCESS_TRANSPORT_WARNING_DURATION_MS = 5_000
+const showAccessTransportWarning = ref(false)
+let accessTransportWarningTimer: number | undefined
+
+function clearAccessTransportWarningTimer() {
+  if (accessTransportWarningTimer === undefined) return
+  window.clearTimeout(accessTransportWarningTimer)
+  accessTransportWarningTimer = undefined
+}
+
+watch([insecureTransport, accessAuthenticated], ([insecure, authenticated]) => {
+  clearAccessTransportWarningTimer()
+  showAccessTransportWarning.value = insecure && authenticated
+  if (!showAccessTransportWarning.value) return
+  accessTransportWarningTimer = window.setTimeout(() => {
+    showAccessTransportWarning.value = false
+    accessTransportWarningTimer = undefined
+  }, ACCESS_TRANSPORT_WARNING_DURATION_MS)
+}, { immediate: true })
 
 // 主题在 App 根初始化一次：启动即应用 data-theme，不随设置面板卸载失效
 useTheme()
@@ -268,6 +299,7 @@ let unregisterTerminalHandler: (() => void) | null = null
 let unregisterPreviewHandler: (() => void) | null = null
 let globalEventSource: EventStreamSubscription | null = null
 let projectsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let authenticatedRuntimeStarted = false
 
 async function refreshGlobalRecentsIfAgent() {
   if (appMode.value !== 'agent') return
@@ -400,7 +432,44 @@ function openCurrentExtensionSessionInMainWeb() {
   }, parentContext.origin)
 }
 
-onMounted(async () => {
+function stopAuthenticatedRuntime() {
+  if (!authenticatedRuntimeStarted) return
+  authenticatedRuntimeStarted = false
+  unsubscribe()
+  if (globalEventSource) {
+    globalEventSource.close()
+    globalEventSource = null
+  }
+  if (projectsRefreshTimer) {
+    clearTimeout(projectsRefreshTimer)
+    projectsRefreshTimer = null
+  }
+  document.removeEventListener('keydown', handleGlobalKeydown)
+  stopGlobalRecentPolling()
+  if (stopSessionWatch) {
+    stopSessionWatch()
+    stopSessionWatch = null
+  }
+  if (unregisterTerminalHandler) {
+    unregisterTerminalHandler()
+    unregisterTerminalHandler = null
+  }
+  if (unregisterPreviewHandler) {
+    unregisterPreviewHandler()
+    unregisterPreviewHandler = null
+  }
+  sessions.value = []
+  currentSession.value = null
+  messages.value = []
+  files.value = []
+  clearFileContent()
+  extensionPageContext.value = undefined
+}
+
+async function startAuthenticatedRuntime() {
+  if (authenticatedRuntimeStarted) return
+  authenticatedRuntimeStarted = true
+
   // 先注册事件处理器，确保在 SSE 连接建立时能接收到 server.connected 事件
   unregisterTerminalHandler = registerEventHandler(handleTerminalEvent)
   unregisterPreviewHandler = registerEventHandler(handlePreviewEvent)
@@ -440,7 +509,6 @@ onMounted(async () => {
   const requestedSessionId = initialSessionIdFromUrl()
 
   if (isBrowserExtension.value) {
-    window.addEventListener('message', handleExtensionParentMessage)
     await refreshExtensionPageContext()
     createSession('.')
   } else if (requestedSessionId && await selectSessionById(requestedSessionId)) {
@@ -459,36 +527,29 @@ onMounted(async () => {
 
   // Cmd+K / Ctrl+K 搜索（仅主界面）与 Escape 关闭浮层
   document.addEventListener('keydown', handleGlobalKeydown)
+}
+
+async function handleAccessLogout() {
+  stopAuthenticatedRuntime()
+  await logoutAccessAuth()
+}
+
+watch(accessAuthenticated, (value) => {
+  if (!value) stopAuthenticatedRuntime()
+})
+
+onMounted(async () => {
+  if (isBrowserExtension.value) {
+    window.addEventListener('message', handleExtensionParentMessage)
+  }
+  const allowed = await initializeAccessAuth(isBrowserExtension.value ? 'browser-extension' : 'web')
+  if (allowed) await startAuthenticatedRuntime()
 })
 
 onUnmounted(() => {
   window.removeEventListener('message', handleExtensionParentMessage)
-  unsubscribe()
-  if (globalEventSource) {
-    globalEventSource.close()
-    globalEventSource = null
-  }
-  if (projectsRefreshTimer) {
-    clearTimeout(projectsRefreshTimer)
-    projectsRefreshTimer = null
-  }
-  document.removeEventListener('keydown', handleGlobalKeydown)
-  stopGlobalRecentPolling()
-  // 清理 watch
-  if (stopSessionWatch) {
-    stopSessionWatch()
-    stopSessionWatch = null
-  }
-  // 清理终端事件处理器
-  if (unregisterTerminalHandler) {
-    unregisterTerminalHandler()
-    unregisterTerminalHandler = null
-  }
-  // 清理文件预览事件处理器
-  if (unregisterPreviewHandler) {
-    unregisterPreviewHandler()
-    unregisterPreviewHandler = null
-  }
+  clearAccessTransportWarningTimer()
+  stopAuthenticatedRuntime()
 })
 
 function handleGlobalKeydown(e: KeyboardEvent) {
@@ -828,6 +889,24 @@ function handlePromptSelect(prompt: string) {
 </script>
 
 <template>
+  <div v-if="accessLoading" class="access-loading">正在检查访问权限…</div>
+
+  <AccessLogin v-else-if="accessRequired" @authenticated="startAuthenticatedRuntime" />
+
+  <template v-else>
+    <Transition name="access-transport-warning">
+      <div v-if="showAccessTransportWarning" class="access-transport-warning" role="status">
+        当前通过 HTTP 访问；功能可用，但传输内容不会被加密。
+      </div>
+    </Transition>
+    <button
+      v-if="accessEnabled"
+      class="access-logout-button"
+      type="button"
+      title="退出 WebUI 登录"
+      @click="handleAccessLogout"
+    >退出登录</button>
+
   <div v-if="isBrowserExtension" class="extension-app-layout">
     <header class="extension-chat-header">
       <div class="extension-header-main">
@@ -1177,10 +1256,62 @@ function handlePromptSelect(prompt: string) {
       </div>
     </div>
   </div>
+  </template>
 </template>
 
 <style scoped>
 /* Layout uses global styles from style.css */
+
+.access-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+}
+
+.access-transport-warning {
+  position: fixed;
+  z-index: 1000;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 220px);
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: #fff4d6;
+  color: #7a4b00;
+  font-size: 11px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.access-transport-warning-enter-active,
+.access-transport-warning-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.access-transport-warning-enter-from,
+.access-transport-warning-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -4px);
+}
+
+.access-logout-button {
+  position: fixed;
+  z-index: 1001;
+  right: 12px;
+  bottom: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.access-logout-button:hover { opacity: 1; color: var(--text-primary); }
 
 .extension-app-layout {
   display: flex;

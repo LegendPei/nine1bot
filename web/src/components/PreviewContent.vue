@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { Eye, X, Download, ExternalLink, Copy, Check } from 'lucide-vue-next'
 import { useFilePreview } from '../composables/useFilePreview'
 import { decodeBase64Utf8 } from '../utils/encoding'
+import { copyText } from '../utils/clipboard'
 
 // Sub-renderers
 import ImagePreview from './preview/ImagePreview.vue'
@@ -51,7 +52,7 @@ function downloadFile() {
 // Copy file path
 async function copyPath() {
   if (!activePreview.value) return
-  await navigator.clipboard.writeText(activePreview.value.path)
+  if (!await copyText(activePreview.value.path)) return
   copied.value = true
   setTimeout(() => copied.value = false, 2000)
 }

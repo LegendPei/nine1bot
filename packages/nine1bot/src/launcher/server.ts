@@ -1,7 +1,7 @@
 import { resolve, dirname } from 'path'
 import { writeFile, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
-import type { ServerConfig, AuthConfig, Nine1BotConfig } from '../config/schema'
+import type { ServerConfig, Nine1BotConfig } from '../config/schema'
 import { getInstallDir, getGlobalSkillsDir, getAuthPath, getGlobalConfigDir, getMcpAuthPath, getPlatformPackageResourcesRoot, getPlatformSecretsPath, getProjectEnvDir } from '../config/loader'
 import { getGlobalPreferencesPath } from '../preferences'
 import { registerBuiltinPlatformAdapters } from '../platform/builtin'
@@ -13,6 +13,11 @@ import { BridgeServer } from '../../../browser-mcp-server/src/bridge/server'
 import type { BridgeServer as OpencodeBridgeServer } from '../../../../opencode/packages/opencode/src/browser/bridge'
 import { clearBridgeServer, setBridgeServer } from '../../../../opencode/packages/opencode/src/browser/bridge'
 import { NINE1BOT_PROVENANCE } from '../provenance'
+import type { AccessAuthRuntime } from '../access-auth/service'
+import {
+  clearServerAccessAuthProvider,
+  setServerAccessAuthProvider,
+} from '../../../../opencode/packages/opencode/src/server/access-auth'
 
 /**
  * 获取内置 skills 目录路径
@@ -46,7 +51,7 @@ export interface ServerInstance {
 
 export interface StartServerOptions {
   server: ServerConfig
-  auth: AuthConfig
+  accessAuth: AccessAuthRuntime
   configPath: string
   fullConfig: Nine1BotConfig
 }
@@ -91,7 +96,7 @@ async function generateOpencodeConfig(config: Nine1BotConfig): Promise<string> {
  * 启动 OpenCode 服务器
  */
 export async function startServer(options: StartServerOptions): Promise<ServerInstance> {
-  const { server, auth, fullConfig } = options
+  const { server, accessAuth, fullConfig } = options
   const installDir = getInstallDir()
 
   // 生成 opencode 兼容的配置文件（过滤掉 nine1bot 特有字段）
@@ -115,11 +120,10 @@ export async function startServer(options: StartServerOptions): Promise<ServerIn
     process.env.OPENCODE_DISABLE_PROJECT_CONFIG = 'true'
   }
 
-  // 如果启用了认证，设置密码
-  if (auth.enabled && auth.password) {
-    process.env.OPENCODE_SERVER_PASSWORD = auth.password
-    process.env.OPENCODE_SERVER_USERNAME = 'nine1bot'
-  }
+  // Nine1Bot 使用产品层 AccessAuth provider。显式清理继承/旧进程留下的
+  // OpenCode Basic 环境变量，防止配置关闭后仍出现原生密码框。
+  delete process.env.OPENCODE_SERVER_PASSWORD
+  delete process.env.OPENCODE_SERVER_USERNAME
 
   // Skills 配置：设置 Nine1Bot skills 目录
   process.env.NINE1BOT_SKILLS_DIR = getGlobalSkillsDir()
@@ -208,12 +212,35 @@ export async function startServer(options: StartServerOptions): Promise<ServerIn
     }
   }
 
+  setServerAccessAuthProvider(accessAuth.service)
+
+  const loopbackHostnames = new Set(['127.0.0.1', 'localhost', '::1'])
+  if (!loopbackHostnames.has(server.hostname.toLowerCase())) {
+    if (accessAuth.state === 'disabled') {
+      console.warn(
+        `[Nine1Bot] WARNING: WebUI is binding to ${server.hostname} without access authentication. ` +
+        'Anyone who can reach this address may control the instance.',
+      )
+    } else {
+      console.warn(
+        `[Nine1Bot] WebUI password login is enabled on an HTTP listener at ${server.hostname}. ` +
+        'Access remains functional, but HTTP traffic is not encrypted; prefer HTTPS for public access.',
+      )
+    }
+  }
+
   // 使用静态导入的 OpenCode 服务器启动
-  const serverInstance = await OpencodeServer.listen({
-    port: server.port,
-    hostname: server.hostname,
-    cors: [],
-  })
+  let serverInstance: ReturnType<typeof OpencodeServer.listen>
+  try {
+    serverInstance = OpencodeServer.listen({
+      port: server.port,
+      hostname: server.hostname,
+      cors: [],
+    })
+  } catch (error) {
+    clearServerAccessAuthProvider(accessAuth.service)
+    throw error
+  }
 
   return {
     url: serverInstance.url.toString(),
@@ -236,6 +263,8 @@ export async function startServer(options: StartServerOptions): Promise<ServerIn
         await serverInstance.stop(true)
       } catch (error) {
         stopError ??= error
+      } finally {
+        clearServerAccessAuthProvider(accessAuth.service)
       }
 
       if (stopError) {

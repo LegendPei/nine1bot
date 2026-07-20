@@ -27,6 +27,7 @@ import {
   type WebhookSource,
   type WebhookStatus,
 } from '../api/client'
+import { copyText as copyToClipboard } from '../utils/clipboard'
 import type { ProjectInfo } from './Sidebar.vue'
 import {
   WEBHOOK_PRESETS,
@@ -540,15 +541,11 @@ async function copyText(text: string) {
   if (!text) return
   error.value = ''
   notice.value = ''
-  if (!navigator.clipboard?.writeText) {
-    error.value = '当前浏览器不支持剪贴板。'
-    return
-  }
   try {
-    await navigator.clipboard.writeText(text)
+    if (!await copyToClipboard(text)) throw new Error('copy failed')
     notice.value = '已复制。'
   } catch {
-    error.value = '无法复制到剪贴板。'
+    error.value = '自动复制失败，请手动复制。'
   }
 }
 

@@ -1,7 +1,13 @@
 import type { Argv, ArgumentsCamelCase } from 'yargs'
+import * as prompts from '@clack/prompts'
 import { UI } from '../ui'
-import { loadConfig, findConfigPath, getDefaultConfigPath, saveConfig } from '../../config/loader'
-import type { Nine1BotConfig } from '../../config/schema'
+import { resolveConfigContext } from '../../config/loader'
+import {
+  FileAccessCredentialStore,
+  MIN_ACCESS_PASSWORD_LENGTH,
+  validateAccessPassword,
+} from '../../access-auth/credential-store'
+import { updateConfigValue } from '../../config/editor'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -30,19 +36,19 @@ function getMcpDisplayInfo(mcpConfig: unknown): { type: string; enabled: boolean
  * 显示配置
  */
 async function showConfig(): Promise<void> {
-  const configPath = await findConfigPath()
-
-  if (!configPath) {
-    UI.warn('No configuration file found.')
-    UI.info(`Run 'nine1bot setup' to create one, or create ${getDefaultConfigPath()} manually.`)
-    return
-  }
+  const context = await resolveConfigContext({ startDir: process.cwd() })
+  const configPath = context.writePath
 
   UI.title('Configuration')
   UI.info(`File: ${configPath}`)
   UI.empty()
 
-  const config = await loadConfig()
+  const config = context.effective
+  if (context.sources.length > 0) {
+    UI.println('Sources:')
+    for (const source of context.sources) UI.println(`  ${source.kind}: ${source.path}`)
+    UI.empty()
+  }
 
   // 显示 server 配置
   UI.println('Server:')
@@ -53,8 +59,9 @@ async function showConfig(): Promise<void> {
 
   // 显示 auth 配置
   UI.println('Auth:')
-  UI.println(`  enabled:  ${UI.formatConfigValue(config.auth.enabled)}`)
-  UI.println(`  password: ${UI.formatConfigValue(config.auth.password ? '***' : undefined)}`)
+  UI.println(`  enabled:        ${UI.formatConfigValue(config.auth.enabled)}`)
+  UI.println(`  enabledSource:  ${UI.formatConfigValue(context.provenance['auth.enabled'])}`)
+  UI.println(`  legacyPassword: ${UI.formatConfigValue(config.auth.password ? 'configured (migration required)' : undefined)}`)
   UI.empty()
 
   // 显示 tunnel 配置
@@ -101,7 +108,10 @@ async function showConfig(): Promise<void> {
  * 设置配置值
  */
 async function setConfig(key: string, value: string): Promise<void> {
-  const configPath = await findConfigPath() || getDefaultConfigPath()
+  if (key === 'auth.password') {
+    throw new Error("Use 'nine1bot config set-password' so the password is not exposed in shell history")
+  }
+  const { writePath: configPath } = await resolveConfigContext({ startDir: process.cwd() })
 
   // 解析键路径，例如 "server.port" -> ["server", "port"]
   const keys = key.split('.')
@@ -112,16 +122,7 @@ async function setConfig(key: string, value: string): Promise<void> {
   else if (value === 'false') parsedValue = false
   else if (/^\d+$/.test(value)) parsedValue = parseInt(value)
 
-  // 构建配置对象
-  const config: any = {}
-  let current = config
-  for (let i = 0; i < keys.length - 1; i++) {
-    current[keys[i]] = {}
-    current = current[keys[i]]
-  }
-  current[keys[keys.length - 1]] = parsedValue
-
-  await saveConfig(config, configPath)
+  await updateConfigValue(configPath, keys, parsedValue)
   UI.success(`Set ${key} = ${JSON.stringify(parsedValue)}`)
 }
 
@@ -129,7 +130,7 @@ async function setConfig(key: string, value: string): Promise<void> {
  * 在编辑器中打开配置文件
  */
 async function editConfig(): Promise<void> {
-  const configPath = await findConfigPath() || getDefaultConfigPath()
+  const { writePath: configPath } = await resolveConfigContext({ startDir: process.cwd() })
 
   // 尝试使用系统默认编辑器打开
   const { exec } = await import('child_process')
@@ -155,6 +156,80 @@ async function editConfig(): Promise<void> {
   }
 }
 
+async function promptAccessPassword(): Promise<string> {
+  const first = await prompts.password({
+    message: 'Set a password for WebUI access',
+    validate(value) {
+      try {
+        validateAccessPassword(value || '')
+      } catch (error) {
+        return error instanceof Error
+          ? error.message
+          : `Password must be at least ${MIN_ACCESS_PASSWORD_LENGTH} characters`
+      }
+    },
+  })
+  if (prompts.isCancel(first)) throw new UI.CancelledError()
+  const confirmation = await prompts.password({ message: 'Confirm the WebUI access password' })
+  if (prompts.isCancel(confirmation)) throw new UI.CancelledError()
+  if (first !== confirmation) throw new Error('Passwords do not match')
+  return first
+}
+
+async function setAccessPassword(): Promise<void> {
+  const password = await promptAccessPassword()
+  const context = await resolveConfigContext({ startDir: process.cwd() })
+  await updateConfigValue(context.writePath, ['auth', 'enabled'], true)
+  for (const source of context.sources) {
+    await updateConfigValue(source.path, ['auth', 'password'], undefined)
+  }
+  await new FileAccessCredentialStore().setPassword(password)
+  UI.success(`WebUI access password updated; auth is enabled in ${context.writePath}`)
+}
+
+async function migrateAccessPassword(): Promise<void> {
+  const context = await resolveConfigContext({ startDir: process.cwd() })
+  const legacy = context.effective.auth.password
+  if (!legacy) throw new Error('No legacy auth.password value was found in the effective configuration')
+  await new FileAccessCredentialStore().setPassword(legacy)
+  await updateConfigValue(context.writePath, ['auth', 'enabled'], true)
+  const legacySource = context.provenance['auth.password']
+  if (legacySource && legacySource !== 'schema-default') {
+    await updateConfigValue(legacySource, ['auth', 'password'], undefined)
+  }
+  UI.success('Migrated WebUI access password to the hashed credential store')
+}
+
+async function disableAccessAuth(): Promise<void> {
+  const context = await resolveConfigContext({ startDir: process.cwd() })
+  await updateConfigValue(context.writePath, ['auth', 'enabled'], false)
+  UI.success(`Disabled WebUI access authentication in ${context.writePath}`)
+}
+
+async function showAccessAuthStatus(): Promise<void> {
+  const context = await resolveConfigContext({ startDir: process.cwd() })
+  let source: 'environment' | 'credential-store' | 'legacy-config' | 'missing' | 'invalid-credential'
+  if (process.env.NINE1BOT_WEB_PASSWORD !== undefined) {
+    source = 'environment'
+  } else {
+    try {
+      const credential = await new FileAccessCredentialStore().load()
+      source = credential
+        ? 'credential-store'
+        : context.effective.auth.password
+          ? 'legacy-config'
+          : 'missing'
+    } catch {
+      source = 'invalid-credential'
+    }
+  }
+  UI.title('WebUI Access Authentication')
+  UI.println(`  enabled: ${context.effective.auth.enabled}`)
+  UI.println(`  source:  ${source}`)
+  UI.println(`  active:  ${context.effective.auth.enabled && source !== 'missing' && source !== 'invalid-credential'}`)
+  UI.println(`  config:  ${context.writePath}`)
+}
+
 /**
  * Config 命令处理器
  */
@@ -165,7 +240,7 @@ export const ConfigCommand = {
     return yargs
       .positional('action', {
         describe: 'Action to perform',
-        choices: ['show', 'set', 'edit'] as const,
+        choices: ['show', 'set', 'edit', 'set-password', 'migrate-auth', 'disable-auth', 'auth-status'] as const,
         default: 'show' as const,
       })
       .positional('key', {
@@ -193,6 +268,18 @@ export const ConfigCommand = {
           break
         case 'edit':
           await editConfig()
+          break
+        case 'set-password':
+          await setAccessPassword()
+          break
+        case 'migrate-auth':
+          await migrateAccessPassword()
+          break
+        case 'disable-auth':
+          await disableAccessAuth()
+          break
+        case 'auth-status':
+          await showAccessAuthStatus()
           break
         default:
           UI.error(`Unknown action: ${args.action}`)

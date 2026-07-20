@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir, access, appendFile } from 'fs/promises'
-import { dirname, resolve, join } from 'path'
+import { dirname, resolve, join, parse } from 'path'
 import { homedir } from 'os'
 import { Nine1BotConfigSchema, type Nine1BotConfig } from './schema'
 import { execSync } from 'child_process'
@@ -54,21 +54,14 @@ async function findConfigInDir(dir: string): Promise<string | null> {
 /**
  * 查找配置文件路径
  * 优先级：
- * 1. 程序安装目录
- * 2. 从当前目录向上查找
+ * 1. 从当前目录向上查找
+ * 2. 程序安装目录（历史兼容）
  */
 export async function findConfigPath(startDir?: string): Promise<string | null> {
-  // 首先检查安装目录
-  const installDir = getInstallDir()
-  const installConfigPath = await findConfigInDir(installDir)
-  if (installConfigPath) {
-    return installConfigPath
-  }
-
-  // 如果指定了起始目录，从那里向上查找
+  // 如果指定了起始目录，最近的项目配置优先于历史安装目录配置。
   if (startDir) {
     let dir = resolve(startDir)
-    const root = dirname(dir)
+    const root = parse(dir).root
 
     while (dir !== root) {
       const configPath = await findConfigInDir(dir)
@@ -85,14 +78,88 @@ export async function findConfigPath(startDir?: string): Promise<string | null> 
     }
   }
 
+  // 发行版历史兼容：旧安装会在安装目录中创建配置。
+  const installDir = getInstallDir()
+  const installConfigPath = await findConfigInDir(installDir)
+  if (installConfigPath) {
+    return installConfigPath
+  }
+
   return null
+}
+
+export type ConfigSource = {
+  kind: 'global' | 'install' | 'project' | 'explicit'
+  path: string
+}
+
+export type ConfigContext = {
+  effective: Nine1BotConfig
+  writePath: string
+  sources: ConfigSource[]
+  provenance: Record<string, string>
+}
+
+/**
+ * Resolve the effective config and the one path all mutating commands must use.
+ * This prevents setup/config/launch from each choosing a different file.
+ */
+export async function resolveConfigContext(options: {
+  customConfigPath?: string
+  startDir?: string
+} = {}): Promise<ConfigContext> {
+  const globalPath = getGlobalConfigPath()
+  const activePath = options.customConfigPath || await findConfigPath(options.startDir ?? process.cwd())
+  const sources: ConfigSource[] = []
+  const activeConfig = activePath && await fileExists(activePath)
+    ? await loadConfigFile(activePath)
+    : undefined
+  if (!activeConfig?.isolation?.disableGlobalConfig && await fileExists(globalPath)) {
+    sources.push({ kind: 'global', path: globalPath })
+  }
+  if (activePath && activePath !== globalPath && await fileExists(activePath)) {
+    const installPath = await findConfigInDir(getInstallDir())
+    const kind = options.customConfigPath
+      ? 'explicit'
+      : installPath && resolve(installPath) === resolve(activePath)
+        ? 'install'
+        : 'project'
+    sources.push({ kind, path: activePath })
+  }
+
+  const effective = await loadConfig(activePath || undefined)
+  const writePath = activePath || globalPath
+  const provenance: Record<string, string> = {}
+  for (const path of ['auth.enabled', 'auth.password']) {
+    const keys = path.split('.')
+    for (const source of [...sources].reverse()) {
+      const sourceConfig = await loadConfigFile(source.path)
+      let value: unknown = sourceConfig
+      for (const key of keys) {
+        value = value && typeof value === 'object'
+          ? (value as Record<string, unknown>)[key]
+          : undefined
+      }
+      if (value !== undefined) {
+        provenance[path] = source.path
+        break
+      }
+    }
+    provenance[path] ??= 'schema-default'
+  }
+  return {
+    effective,
+    writePath,
+    sources,
+    provenance,
+  }
 }
 
 /**
  * 检查配置文件是否存在
  */
 export async function configExists(): Promise<boolean> {
-  const configPath = await findConfigPath()
+  const configPath = await findConfigPath(process.cwd())
   return configPath !== null
 }
 
@@ -157,6 +224,14 @@ export function getDataDir(): string {
  */
 export function getAuthPath(): string {
   return join(getDataDir(), 'auth.json')
+}
+
+/**
+ * 获取 WebUI 访问密码凭据文件路径。
+ * 与 Provider auth.json 分开，文件只保存密码哈希。
+ */
+export function getAccessAuthPath(): string {
+  return join(getDataDir(), 'access-auth.json')
 }
 
 /**
@@ -405,6 +480,8 @@ export async function createDefaultConfig(): Promise<string> {
     },
     auth: {
       enabled: false,
+      sessionTtlMinutes: 720,
+      legacyBasic: 'compat',
     },
     tunnel: {
       enabled: false,

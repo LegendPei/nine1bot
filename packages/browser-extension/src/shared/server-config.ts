@@ -6,6 +6,7 @@ export const SERVER_ORIGIN_STORAGE_KEY = BROWSER_RELAY_ORIGIN_STORAGE_KEY
 export const LEGACY_WEB_UI_URL_STORAGE_KEY = 'webUiUrl'
 export const LEGACY_RELAY_URL_STORAGE_KEY = 'relayUrl'
 export const SIDE_PANEL_OPEN_NONCE_STORAGE_KEY = 'sidePanelOpenNonce'
+export const ACCESS_TOKEN_STORAGE_KEY = 'nine1botAccessToken'
 
 export interface StoredServerConfig {
   browserRelayOrigin?: unknown

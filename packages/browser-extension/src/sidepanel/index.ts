@@ -1,4 +1,5 @@
 import {
+  ACCESS_TOKEN_STORAGE_KEY,
   SERVER_ORIGIN_STORAGE_KEY,
   SIDE_PANEL_OPEN_NONCE_STORAGE_KEY,
   browserRelayOriginToBootstrapUrl,
@@ -16,6 +17,9 @@ let currentServerOrigin = ''
 let currentOpenNonce = ''
 let serverReachable = false
 let relayConnected = false
+let accessEnabled = false
+let accessAuthenticated = false
+let accessToken = ''
 let settingsOpen = false
 let activeSettingsTab = 'relay'
 let healthTimer: ReturnType<typeof setInterval> | null = null
@@ -73,6 +77,80 @@ async function fetchBootstrap(origin: string, timeoutMs = 3000): Promise<{ insta
   }
 }
 
+type StoredAccessToken = { origin: string; token: string }
+
+async function readAccessToken(origin: string): Promise<string> {
+  try {
+    const stored = await chrome.storage.session.get({ [ACCESS_TOKEN_STORAGE_KEY]: null })
+    const value = stored[ACCESS_TOKEN_STORAGE_KEY] as StoredAccessToken | null
+    if (value?.origin === normalizeServerOrigin(origin) && typeof value.token === 'string') {
+      return value.token
+    }
+  } catch {
+    // Session storage is best-effort; a fresh login remains available.
+  }
+  return ''
+}
+
+async function persistAccessToken(token: string): Promise<void> {
+  accessToken = token
+  if (!token) {
+    await chrome.storage.session.remove(ACCESS_TOKEN_STORAGE_KEY).catch(() => undefined)
+    return
+  }
+  await chrome.storage.session.set({
+    [ACCESS_TOKEN_STORAGE_KEY]: {
+      origin: normalizeServerOrigin(currentServerOrigin),
+      token,
+    } satisfies StoredAccessToken,
+  }).catch(() => undefined)
+}
+
+function accessHeaders(): HeadersInit {
+  return accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+}
+
+async function refreshAccessStatus(): Promise<void> {
+  const response = await fetch(`${normalizeServerOrigin(currentServerOrigin)}/access-auth/status`, {
+    headers: { Accept: 'application/json', ...accessHeaders() },
+    cache: 'no-store',
+  })
+  if (!response.ok) throw new Error(`认证状态请求失败（HTTP ${response.status}）`)
+  const status = await response.json() as { enabled?: boolean; authenticated?: boolean }
+  accessEnabled = status.enabled === true
+  accessAuthenticated = status.authenticated === true
+  if (accessEnabled && !accessAuthenticated && accessToken) {
+    await persistAccessToken('')
+  }
+}
+
+async function loginAccessPassword(password: string): Promise<{ ok: boolean; message: string }> {
+  const response = await fetch(`${normalizeServerOrigin(currentServerOrigin)}/access-auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password, surface: 'browser-extension' }),
+  })
+  const body = await response.json().catch(() => ({})) as {
+    accessToken?: string
+    error?: { message?: string }
+  }
+  if (!response.ok || !body.accessToken) {
+    const retryAfter = response.headers.get('Retry-After')
+    return {
+      ok: false,
+      message: response.status === 429
+        ? `尝试次数过多，请在 ${retryAfter || '稍后'} 秒后重试。`
+        : response.status === 401
+          ? '访问密码不正确。'
+          : body.error?.message || '登录失败，请稍后重试。',
+    }
+  }
+  await persistAccessToken(body.accessToken)
+  accessEnabled = true
+  accessAuthenticated = true
+  return { ok: true, message: '登录成功。' }
+}
+
 async function testRelayOrigin(origin: string): Promise<{ ok: true; message: string; instanceId?: string } | { ok: false; message: string }> {
   try {
     const body = await fetchBootstrap(origin, 2500)
@@ -106,7 +184,7 @@ function relaySettingsPayload(message = '') {
 
 function postFrameMessage(type: string, payload: Record<string, unknown> = {}): void {
   const frame = qs<HTMLIFrameElement>('app-frame')
-  if (!frame?.contentWindow || !currentFrameOrigin || !serverReachable) return
+  if (!frame?.contentWindow || !currentFrameOrigin || !serverReachable || !accessAuthenticated) return
   frame.contentWindow.postMessage({ type, ...payload }, currentFrameOrigin)
 }
 
@@ -120,11 +198,13 @@ function setStatus(): void {
   const status = qs<HTMLDivElement>('status')
   if (!status) return
 
-  status.classList.toggle('connected', serverReachable && relayConnected)
+  status.classList.toggle('connected', serverReachable && accessAuthenticated && relayConnected)
   status.classList.toggle('error', !serverReachable)
 
   if (!serverReachable) {
     status.textContent = '未连接到 Nine1Bot 主进程'
+  } else if (!accessAuthenticated) {
+    status.textContent = '需要输入 Nine1Bot 访问密码'
   } else if (!relayConnected) {
     status.textContent = 'Nine1Bot 可访问，浏览器 relay 正在重连'
   } else {
@@ -161,17 +241,22 @@ function renderSettingsTabs(): void {
 function renderPanels(): void {
   const frame = qs<HTMLIFrameElement>('app-frame')
   const fallback = qs<HTMLElement>('fallback-app')
+  const connectionCard = qs<HTMLElement>('connection-card')
+  const authCard = qs<HTMLElement>('auth-card')
   const settingsPanel = qs<HTMLElement>('settings-panel')
-  if (!frame || !fallback || !settingsPanel) return
+  if (!frame || !fallback || !connectionCard || !authCard || !settingsPanel) return
 
-  frame.classList.toggle('hidden', !serverReachable)
-  fallback.classList.toggle('hidden', serverReachable)
+  const canMount = serverReachable && accessAuthenticated
+  frame.classList.toggle('hidden', !canMount)
+  fallback.classList.toggle('hidden', canMount)
+  connectionCard.classList.toggle('hidden', serverReachable)
+  authCard.classList.toggle('hidden', !serverReachable || accessAuthenticated)
   settingsPanel.classList.toggle('visible', settingsOpen)
   renderSettingsTabs()
 }
 
 async function mountFrame(): Promise<void> {
-  if (!serverReachable) return
+  if (!serverReachable || !accessAuthenticated) return
   if (!currentOpenNonce) currentOpenNonce = await readOpenNonce()
 
   const frame = qs<HTMLIFrameElement>('app-frame')
@@ -191,6 +276,17 @@ async function refreshConnection(options: { mount?: boolean } = {}): Promise<voi
   setRelayFormValue(currentServerOrigin)
   const result = await testRelayOrigin(currentServerOrigin)
   serverReachable = result.ok
+  if (serverReachable) {
+    try {
+      await refreshAccessStatus()
+    } catch (error) {
+      accessAuthenticated = false
+      setMessage('access-message', error instanceof Error ? error.message : '无法读取认证状态。', 'error')
+    }
+  } else {
+    accessEnabled = false
+    accessAuthenticated = false
+  }
   relayConnected = await checkExtensionHealth()
   setStatus()
   renderPanels()
@@ -212,7 +308,11 @@ async function saveRelayOrigin(
   const parsed = parseRelayOriginInput(origin)
   if (!parsed.ok) return { ok: false, message: parsed.message }
 
+  const previousOrigin = currentServerOrigin
   currentServerOrigin = await writeStoredServerOrigin(parsed.origin)
+  if (normalizeServerOrigin(previousOrigin) !== normalizeServerOrigin(currentServerOrigin)) {
+    await persistAccessToken('')
+  }
   setRelayFormValue(currentServerOrigin)
   await refreshConnection({ mount: options.mount !== false })
   return {
@@ -253,6 +353,23 @@ async function handleFrameMessage(event: MessageEvent): Promise<void> {
 
   const message = event.data as { type?: string; requestId?: unknown; origin?: unknown; sessionID?: unknown } | undefined
   if (!message?.type) return
+
+  if (message.type === 'nine1bot.requestAccessToken' && typeof message.requestId === 'string') {
+    frame.contentWindow?.postMessage({
+      type: 'nine1bot.accessToken',
+      requestId: message.requestId,
+      accessToken,
+    }, currentFrameOrigin)
+    return
+  }
+
+  if (message.type === 'nine1bot.clearAccessToken') {
+    await persistAccessToken('')
+    accessAuthenticated = false
+    renderPanels()
+    setStatus()
+    return
+  }
 
   if (message.type === 'nine1bot.requestPageContext' && typeof message.requestId === 'string') {
     const payload = await collectActiveTabPageContext().catch((error) => {
@@ -443,6 +560,27 @@ function setupControls(): void {
       console.warn('[SidePanel] Failed to refresh connection:', error)
     })
   })
+  qs<HTMLFormElement>('auth-card')?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const input = qs<HTMLInputElement>('access-password')
+    const button = qs<HTMLButtonElement>('access-login')
+    if (!input || !button || !input.value) return
+    button.disabled = true
+    setMessage('access-message', '正在登录...')
+    loginAccessPassword(input.value).then(async (result) => {
+      setMessage('access-message', result.message, result.ok ? 'success' : 'error')
+      if (result.ok) {
+        input.value = ''
+        setStatus()
+        renderPanels()
+        await mountFrame()
+      }
+    }).catch((error) => {
+      setMessage('access-message', error instanceof Error ? error.message : '登录失败。', 'error')
+    }).finally(() => {
+      button.disabled = false
+    })
+  })
   document.addEventListener('click', (event) => {
     const target = event.target as HTMLElement | null
     if (target?.matches('.tab[data-tab]')) {
@@ -469,6 +607,7 @@ function setupControls(): void {
 
 async function init(): Promise<void> {
   currentServerOrigin = await readStoredServerOrigin()
+  accessToken = await readAccessToken(currentServerOrigin)
   currentOpenNonce = await readOpenNonce()
   setRelayFormValue(currentServerOrigin)
   await ensureDedicatedTabGroup()

@@ -182,6 +182,20 @@
         line-height: 1.55;
       }
 
+      .auth-card label {
+        margin-top: 16px;
+      }
+
+      .auth-warning {
+        margin-top: 14px;
+        padding: 10px 11px;
+        border-radius: 8px;
+        background: #fff4d6;
+        color: #7a4b00;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
       .fake-input {
         flex: 0 0 auto;
         display: flex;
@@ -420,10 +434,19 @@
       </header>
 
       <main class="fallback-body">
-        <div class="disconnected-card">
+        <div id="connection-card" class="disconnected-card">
           <h1>未连接到 Nine1Bot 主进程</h1>
           <p>插件侧边栏已经启动。你可以在设置里修改 Browser relay origin，保存后会自动重连。</p>
         </div>
+        <form id="auth-card" class="disconnected-card auth-card hidden">
+          <h1>登录 Nine1Bot</h1>
+          <p>主进程已连接，请输入 WebUI 访问密码。</p>
+          <div class="auth-warning">本机 HTTP relay 支持密码登录；令牌只保存在当前扩展会话中。</div>
+          <label for="access-password">访问密码</label>
+          <input id="access-password" type="password" autocomplete="current-password" />
+          <button id="access-login" class="primary-button" type="submit">登录</button>
+          <div id="access-message" class="message"></div>
+        </form>
         <div class="fake-input">连接 Nine1Bot 后即可发送浏览器对话...</div>
       </main>
 

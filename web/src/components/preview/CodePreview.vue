@@ -4,6 +4,7 @@ import { Copy, Check } from 'lucide-vue-next'
 import type { FilePreviewInfo } from '../../composables/useFilePreview'
 import { useFilePreview } from '../../composables/useFilePreview'
 import { decodeBase64Utf8 } from '../../utils/encoding'
+import { copyText } from '../../utils/clipboard'
 
 const props = defineProps<{
   preview: FilePreviewInfo
@@ -43,7 +44,7 @@ watch(() => props.preview.id, loadContent)
 
 // Copy code to clipboard
 async function copyCode() {
-  await navigator.clipboard.writeText(codeContent.value)
+  if (!await copyText(codeContent.value)) return
   copied.value = true
   setTimeout(() => copied.value = false, 2000)
 }

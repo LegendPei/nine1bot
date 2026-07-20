@@ -3,6 +3,7 @@ import { X, FileText, Copy, Check } from 'lucide-vue-next'
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { FileContent } from '../api/client'
 import { getFileName } from '../utils/path'
+import { copyText } from '../utils/clipboard'
 
 const props = defineProps<{
   file: FileContent | null
@@ -21,7 +22,7 @@ let copyTimer: ReturnType<typeof setTimeout> | null = null
 async function copyContent() {
   if (!props.file?.content) return
   try {
-    await navigator.clipboard.writeText(props.file.content)
+    if (!await copyText(props.file.content)) return
     copied.value = true
     // 清理之前的定时器
     if (copyTimer) {

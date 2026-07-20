@@ -69,7 +69,7 @@ echo "Created test config: $TEST_CONFIG"
 
 # 超时设置
 TIMEOUT_SECONDS=60
-SUCCESS_PATTERN="Local:.*http"
+HEALTH_URL="http://127.0.0.1:4097/healthz"
 
 # 启动服务器并捕获输出
 LOG_FILE=$(mktemp)
@@ -147,9 +147,9 @@ while true; do
         break
     fi
 
-    # 检查成功模式
-    if grep -qE "$SUCCESS_PATTERN" "$LOG_FILE" 2>/dev/null; then
-        echo "SUCCESS: Server started successfully!"
+    # 使用公开的最小健康端点确认 HTTP 服务已经真正可用。
+    if curl --fail --silent --show-error --max-time 2 "$HEALTH_URL" 2>/dev/null | grep -q '"ok":true'; then
+        echo "SUCCESS: Server health check passed!"
         print_server_output
         SUCCESS=1
         break
