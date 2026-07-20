@@ -24,6 +24,14 @@ import {
 } from './sessionEventReconciler'
 import { createFrameDeltaBuffer } from './streaming-render-buffer'
 
+export type SessionNotification = {
+  id: string
+  sessionId: string
+  sessionTitle: string
+  message: string
+  type: 'success' | 'info' | 'error'
+}
+
 export function useSession() {
   const sessions = ref<Session[]>([])
   const currentSession = ref<Session | null>(null)
@@ -64,8 +72,8 @@ export function useSession() {
   // 重试状态（后端正在指数退避重试时显示）
   const retryInfo = ref<{ attempt: number; message: string; next: number } | null>(null)
 
-  // 会话完成通知（用于其他会话完成时的友好提示）
-  const sessionNotifications = ref<{ id: string; sessionId: string; sessionTitle: string; message: string; type: 'success' | 'info' }[]>([])
+  // 页面级会话通知
+  const sessionNotifications = ref<SessionNotification[]>([])
 
   // 待办事项
   const todoItems = ref<TodoItem[]>([])
@@ -108,23 +116,62 @@ export function useSession() {
   function pushSessionNotification(input: {
     sessionId: string
     message: string
-    type?: 'success' | 'info'
-    ttlMs?: number
+    type?: SessionNotification['type']
+    ttlMs?: number | null
   }) {
-    const session = sessions.value.find(s => s.id === input.sessionId) ?? currentSession.value
+    const type = input.type ?? 'info'
+    const duplicate = sessionNotifications.value.find(notification =>
+      notification.sessionId === input.sessionId &&
+      notification.type === type &&
+      notification.message === input.message
+    )
+    if (duplicate) return duplicate.id
+
+    const session = sessions.value.find(s => s.id === input.sessionId)
+      ?? (currentSession.value?.id === input.sessionId ? currentSession.value : null)
     const notificationId = `${input.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     sessionNotifications.value.push({
       id: notificationId,
       sessionId: input.sessionId,
-      sessionTitle: session?.title || '会话',
+      sessionTitle: session?.title || input.sessionId,
       message: input.message,
-      type: input.type ?? 'info'
+      type
     })
+
+    // 错误默认保留到用户手动关闭，其他通知保持原有自动关闭行为。
+    if (input.ttlMs === null || (type === 'error' && input.ttlMs === undefined)) {
+      return notificationId
+    }
+
     const timerId = setTimeout(() => {
       sessionNotifications.value = sessionNotifications.value.filter(n => n.id !== notificationId)
       notificationTimers.delete(notificationId)
     }, input.ttlMs ?? 5000)
     notificationTimers.set(notificationId, timerId)
+    return notificationId
+  }
+
+  function notifySessionFailure(event: SSEEvent) {
+    const sessionId = extractSessionID(event)
+    if (!sessionId) return
+
+    if (event.type === 'session.error') {
+      const error = event.properties?.error
+      pushSessionNotification({
+        sessionId,
+        message: error?.data?.message || error?.message || event.properties?.message || '发生未知错误',
+        type: 'error',
+      })
+      return
+    }
+
+    if (event.type === 'runtime.resource.failed') {
+      pushSessionNotification({
+        sessionId,
+        message: event.properties?.message || '资源不可用，请检查当前配置',
+        type: 'error',
+      })
+    }
   }
 
   function showContextEnrichmentNotice(sessionId: string, summary?: ContextEnrichmentSummary) {
@@ -450,10 +497,11 @@ export function useSession() {
 
     // Check parallel limit
     if (!canStartNewAgent.value) {
-      sessionError.value = {
+      pushSessionNotification({
+        sessionId: currentSession.value.id,
         message: `最多支持 ${MAX_PARALLEL_AGENTS} 个并行 agent，请等待其中一个完成`,
-        dismissable: true
-      }
+        type: 'error',
+      })
       return false
     }
 
@@ -501,24 +549,20 @@ export function useSession() {
       // Handle session busy error
       if (error instanceof SessionBusyError) {
         console.log('Session is busy:', error.sessionID)
-        // 用户可能已切换到其他会话，仅在仍是当前会话时展示错误
-        if (currentSession.value?.id === sessionId) {
-          sessionError.value = {
-            message: '该会话正在被其他客户端使用中，请稍后重试或创建新会话',
-            dismissable: true
-          }
-        }
+        pushSessionNotification({
+          sessionId,
+          message: '该会话正在被其他客户端使用中，请稍后重试或创建新会话',
+          type: 'error',
+        })
         await reconcileCurrentSessionState(sessionId)
         return false
       }
       console.error('Failed to send message:', error)
-      // 用户可能已切换到其他会话，仅在仍是当前会话时展示错误
-      if (currentSession.value?.id === sessionId) {
-        sessionError.value = {
-          message: `发送失败: ${error.message || '未知错误'}`,
-          dismissable: true
-        }
-      }
+      pushSessionNotification({
+        sessionId,
+        message: `发送失败: ${error.message || '未知错误'}`,
+        type: 'error',
+      })
       await reconcileCurrentSessionState(sessionId)
       return false
     } finally {
@@ -761,30 +805,19 @@ export function useSession() {
         break
 
       case 'session.error':
-        // 会话错误（如模型不可用）
-        if (properties?.error?.sessionID && currentSession.value && properties.error.sessionID !== currentSession.value.id) {
+        // 页面级错误通知由 notifySessionFailure 统一处理。
+        if (
+          (properties?.sessionID || properties?.error?.sessionID) &&
+          currentSession.value &&
+          (properties.sessionID || properties.error.sessionID) !== currentSession.value.id
+        ) {
           break
         }
         retryInfo.value = null
-        if (properties?.error) {
-          const error = properties.error
-          const message = error.data?.message || error.message || '发生未知错误'
-          sessionError.value = {
-            message,
-            dismissable: true
-          }
-          // Note: session running state is handled by handleGlobalSSEEvent
-        }
         break
 
       case 'runtime.resource.failed':
-        if (properties?.sessionID && currentSession.value && properties.sessionID !== currentSession.value.id) {
-          break
-        }
-        sessionError.value = {
-          message: properties?.message || '资源不可用，请检查当前配置',
-          dismissable: true
-        }
+        // 页面级错误通知由 notifySessionFailure 统一处理。
         break
 
       case 'session.idle':
@@ -865,6 +898,7 @@ export function useSession() {
 
   function dispatchSessionEvent(event: SSEEvent) {
     handleGlobalSSEEvent(event)
+    notifySessionFailure(event)
     dispatchExternalEvent(event)
     handleSSEEvent(event)
   }
@@ -882,6 +916,7 @@ export function useSession() {
 
       // Extract sessionID from all possible locations
       const sessionID = extractSessionID(event)
+      notifySessionFailure(event)
 
       // Dedicated per-session SSE is authoritative for current message content.
       if (
@@ -904,23 +939,11 @@ export function useSession() {
       if (sessionID && sessionID !== currentSession.value.id) {
         // Show friendly notification when other session completes
         if (event.type === 'session.idle' || (event.type === 'session.status' && event.properties?.status?.type === 'idle')) {
-          const session = sessions.value.find(s => s.id === sessionID)
-          if (session) {
-            const notificationId = `${sessionID}-${Date.now()}`
-            sessionNotifications.value.push({
-              id: notificationId,
-              sessionId: sessionID,
-              sessionTitle: session.title || '会话',
-              message: '任务已完成',
-              type: 'success'
-            })
-            // Auto-dismiss after 5 seconds (with cleanup tracking)
-            const timerId = setTimeout(() => {
-              sessionNotifications.value = sessionNotifications.value.filter(n => n.id !== notificationId)
-              notificationTimers.delete(notificationId)
-            }, 5000)
-            notificationTimers.set(notificationId, timerId)
-          }
+          pushSessionNotification({
+            sessionId: sessionID,
+            message: '任务已完成',
+            type: 'success',
+          })
         }
         return
       }
@@ -969,10 +992,11 @@ export function useSession() {
           // 重连彻底失败：复位 running 状态，避免 runningCount 泄漏锁死新 agent
           setSessionRunning(sessionId, false)
           if (currentSession.value?.id === sessionId) {
-            sessionError.value = {
+            pushSessionNotification({
+              sessionId,
               message: '连接已断开，请刷新或重新发送',
-              dismissable: true
-            }
+              type: 'error',
+            })
           }
         },
       },

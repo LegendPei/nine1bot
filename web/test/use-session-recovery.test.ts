@@ -267,6 +267,96 @@ describe('useSession event recovery', () => {
     useParallelSessions().clearSession(selected.id)
   })
 
+  it('shows one persistent page notification when both event streams report the same session error', async () => {
+    const selected = {
+      ...session('session-error'),
+      title: '接口排查会话',
+    }
+    api.getMessages = async () => []
+
+    active = useSession()
+    await active.selectSession(selected)
+    const runtimeSource = FakeEventSource.latest
+    active.subscribeToEvents()
+    const directorySource = FakeEventSource.latest
+
+    let autoDismissScheduled = false
+    const nativeSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+      if (timeout === 5000) autoDismissScheduled = true
+      return nativeSetTimeout(handler, timeout, ...args)
+    }) as typeof setTimeout
+
+    try {
+      runtimeSource.emit({
+        version: '1',
+        id: 'event-runtime-error',
+        sessionId: selected.id,
+        createdAt: Date.now(),
+        type: 'runtime.turn.failed',
+        data: { error: { message: 'provider unavailable\nrequest id: req_123' } },
+      })
+      directorySource.emit({
+        type: 'session.error',
+        properties: {
+          sessionID: selected.id,
+          error: {
+            sessionID: selected.id,
+            message: 'provider unavailable\nrequest id: req_123',
+          },
+        },
+      })
+    } finally {
+      globalThis.setTimeout = nativeSetTimeout
+    }
+
+    expect(active.sessionNotifications.value).toEqual([
+      expect.objectContaining({
+        sessionId: selected.id,
+        sessionTitle: selected.title,
+        message: 'provider unavailable\nrequest id: req_123',
+        type: 'error',
+      }),
+    ])
+    expect(autoDismissScheduled).toBe(false)
+
+    active.dismissNotification(active.sessionNotifications.value[0].id)
+    expect(active.sessionNotifications.value).toEqual([])
+    useParallelSessions().clearSession(selected.id)
+  })
+
+  it('labels background session errors without borrowing the current session title', async () => {
+    const selected = {
+      ...session('session-current'),
+      title: '当前会话',
+    }
+    api.getMessages = async () => []
+
+    active = useSession()
+    await active.selectSession(selected)
+    active.subscribeToEvents()
+    FakeEventSource.latest.emit({
+      type: 'session.error',
+      properties: {
+        sessionID: 'session-background',
+        error: {
+          sessionID: 'session-background',
+          message: 'background failed',
+        },
+      },
+    })
+
+    expect(active.sessionNotifications.value).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-background',
+        sessionTitle: 'session-background',
+        message: 'background failed',
+        type: 'error',
+      }),
+    ])
+    useParallelSessions().clearSession(selected.id)
+  })
+
   it('reconciles a lost message response instead of assuming the backend stopped', async () => {
     const selected = session('session-response-lost')
     let backendBusy = false

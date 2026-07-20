@@ -20,6 +20,7 @@ import ProjectsPage from './components/ProjectsPage.vue'
 import AutomationsPage from './components/AutomationsPage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import BrowserExtensionSettingsPanel from './components/BrowserExtensionSettingsPanel.vue'
+import SessionNotifications from './components/SessionNotifications.vue'
 import AccessLogin from './components/AccessLogin.vue'
 import FileViewer from './components/FileViewer.vue'
 import TodoList from './components/TodoList.vue'
@@ -1012,20 +1013,10 @@ function handlePromptSelect(prompt: string) {
 
     <BrowserExtensionSettingsPanel v-if="showSettings" @close="closeSettings" />
 
-    <div class="notifications-container" v-if="sessionNotifications.length > 0">
-      <div
-        v-for="notification in sessionNotifications"
-        :key="notification.id"
-        class="notification-toast"
-        :class="notification.type"
-      >
-        <div class="notification-content">
-          <span class="notification-title">{{ notification.sessionTitle }}</span>
-          <span class="notification-message">{{ notification.message }}</span>
-        </div>
-        <button class="notification-close" @click="dismissNotification(notification.id)">×</button>
-      </div>
-    </div>
+    <SessionNotifications
+      :notifications="sessionNotifications"
+      @dismiss="dismissNotification"
+    />
   </div>
 
   <div v-else class="app-layout">
@@ -1230,31 +1221,10 @@ function handlePromptSelect(prompt: string) {
       @close="closeFileViewer"
     />
 
-    <!-- Session Notifications Toast -->
-    <div class="notifications-container" v-if="sessionNotifications.length > 0">
-      <div
-        v-for="notification in sessionNotifications"
-        :key="notification.id"
-        class="notification-toast"
-        :class="notification.type"
-      >
-        <div class="notification-icon">
-          <svg v-if="notification.type === 'success'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
-        </div>
-        <div class="notification-content">
-          <span class="notification-title">{{ notification.sessionTitle }}</span>
-          <span class="notification-message">{{ notification.message }}</span>
-        </div>
-        <button class="notification-close" @click="dismissNotification(notification.id)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18"/>
-            <line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
-    </div>
+    <SessionNotifications
+      :notifications="sessionNotifications"
+      @dismiss="dismissNotification"
+    />
   </div>
   </template>
 </template>
@@ -1581,110 +1551,4 @@ function handlePromptSelect(prompt: string) {
   margin: 0 auto;
 }
 
-/* Session Notifications */
-.notifications-container {
-  position: fixed;
-  bottom: var(--space-lg);
-  right: var(--space-lg);
-  z-index: var(--z-overlay);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  max-width: 320px;
-}
-
-.notification-toast {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  animation: slideIn 0.3s var(--ease-smooth);
-}
-
-.notification-toast.success {
-  border-color: var(--success);
-  background: var(--bg-elevated);
-}
-
-.notification-toast.info {
-  border-color: var(--accent);
-  background: var(--bg-elevated);
-}
-
-.notification-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.notification-toast.success .notification-icon {
-  background: rgba(34, 197, 94, 0.2);
-  color: var(--success);
-}
-
-.notification-toast.info .notification-icon {
-  background: rgba(var(--accent-rgb), 0.15);
-  color: var(--accent);
-}
-
-.notification-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.notification-title {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notification-message {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
-
-.notification-close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.notification-close:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
 </style>
