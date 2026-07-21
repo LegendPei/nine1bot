@@ -38,7 +38,7 @@
 - **终端历史** - 支持终端输出的滚动回溯查看
 - **隧道支持** - 内置 ngrok 和 NATAPP 支持，可从公网访问
 - **浏览器控制** - 内置浏览器自动化功能，通过 Chrome / Edge 扩展实现
-- **密码保护** - 可选的 Web 访问密码保护（用户名固定为 `nine1bot`）
+- **密码保护** - 使用站内密码登录保护 WebUI，支持多个客户端同时访问
 - **并行会话** - 支持同时运行至多10个 AI 会话
 - **热更新** - Skills 和 MCP 配置修改后自动生效，无需重启
 - **开箱即用** - 下载即可运行，内置 Bun 运行时
@@ -324,18 +324,22 @@ Nine1Bot 可以记录你的个人偏好，AI 会在所有会话中自动遵循�
 - **项目配置**：从当前目录向上找到的最近一个 `nine1bot.config.jsonc`
 - **全局配置**：Linux、macOS 和 Windows 均使用 `~/.config/nine1bot/config.jsonc`
 
-### WebUI 访问密码
+### 设置 WebUI 访问密码
 
-使用隐藏输入设置或更换访问密码；Nine1Bot 只会在用户数据目录保存 Argon2id 哈希：
+运行下面的命令，按提示输入并确认密码。命令会自动开启访问认证，密码不会写入配置文件：
 
 ```bash
 nine1bot config set-password
-nine1bot config auth-status
 ```
 
-使用 `nine1bot config disable-auth` 可关闭访问认证。旧配置中的明文 `auth.password` 暂时保留一个迁移周期，可执行 `nine1bot config migrate-auth` 转为哈希。自动化部署也可以使用 `NINE1BOT_WEB_PASSWORD`，请勿把密码放入命令行位置参数。
+设置后重新启动 Nine1Bot，访问 WebUI 时输入刚才设置的密码即可。查看状态或关闭密码保护：
 
-局域网 IP、公网 IP 和域名通过 HTTP 或 HTTPS 访问时，都能完成密码登录并使用完整 WebUI。HTTP 会话 Cookie 会有意省略 `Secure`，因此功能可用但传输没有加密：链路上的监听者或中间人可能获得密码、会话和页面内容，公网访问仍建议使用 HTTPS。
+```bash
+nine1bot config auth-status
+nine1bot config disable-auth
+```
+
+旧配置中如果还有明文 `auth.password`，运行 `nine1bot config migrate-auth` 完成迁移。自动化部署可以使用 `NINE1BOT_WEB_PASSWORD`。HTTP 和 HTTPS 都支持密码登录，但公网访问建议使用 HTTPS。
 
 ### 配置示例
 
@@ -348,7 +352,7 @@ nine1bot config auth-status
     "openBrowser": true
   },
 
-  // 启用前先执行 `nine1bot config set-password`
+  // 使用 `nine1bot config set-password` 设置密码并开启认证
   "auth": {
     "enabled": true,
     "sessionTtlMinutes": 720,

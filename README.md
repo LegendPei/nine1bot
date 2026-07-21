@@ -38,7 +38,7 @@ Supports programming, file management, information retrieval, content creation, 
 - **Terminal History** - Scrollback history support for terminal output
 - **Tunnel Support** - Built-in ngrok and NATAPP support for public access
 - **Browser Control** - Built-in browser automation via Chrome / Edge extension
-- **Password Protection** - Optional web access password protection (username: `nine1bot`)
+- **Password Protection** - Built-in WebUI password login with concurrent client access
 - **Parallel Sessions** - Run up to 10 AI sessions simultaneously
 - **Hot Reload** - Skills and MCP config changes take effect automatically without restart
 - **Ready to Use** - Download and run, includes Bun runtime
@@ -323,18 +323,22 @@ Config file locations:
 - **Project config**: the nearest `nine1bot.config.jsonc` found from the current directory upward
 - **Global config**: `~/.config/nine1bot/config.jsonc` on Linux, macOS, and Windows
 
-### WebUI access password
+### Set a WebUI access password
 
-Set or rotate the password with hidden input; Nine1Bot stores only an Argon2id hash in its user data directory:
+Run the following command, then enter and confirm the password. The command enables access authentication automatically and does not write the password to your config file:
 
 ```bash
 nine1bot config set-password
-nine1bot config auth-status
 ```
 
-Use `nine1bot config disable-auth` to disable access authentication. Existing configs containing a plaintext `auth.password` remain supported for one migration window and can be migrated with `nine1bot config migrate-auth`. Automated deployments may supply `NINE1BOT_WEB_PASSWORD` instead; do not put the value in command-line arguments.
+Restart Nine1Bot after setting the password. Enter that password when opening the WebUI. To check the current status or disable password protection:
 
-Password login and the full WebUI work over both HTTP and HTTPS, including LAN IPs and public HTTP endpoints. On HTTP the session cookie intentionally omits `Secure`, so the connection is functional but not encrypted: network observers or a man-in-the-middle may capture the password, session, or page contents. Prefer HTTPS for public access.
+```bash
+nine1bot config auth-status
+nine1bot config disable-auth
+```
+
+If an old config still contains plaintext `auth.password`, run `nine1bot config migrate-auth`. Automated deployments can use `NINE1BOT_WEB_PASSWORD`. Password login works over both HTTP and HTTPS, but HTTPS is recommended for public access.
 
 ### Config Example
 
@@ -347,7 +351,7 @@ Password login and the full WebUI work over both HTTP and HTTPS, including LAN I
     "openBrowser": true,
   },
 
-  // Run `nine1bot config set-password` before enabling this.
+  // Use `nine1bot config set-password` to set the password and enable authentication.
   "auth": {
     "enabled": true,
     "sessionTtlMinutes": 720,
