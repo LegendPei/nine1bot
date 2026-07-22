@@ -2427,7 +2427,7 @@ export const providerApi = {
   // 获取所有提供者和模型
   // 后端返回 { all: Provider[], default: Record<string, string>, connected: string[] }
   async list(): Promise<{ providers: Provider[]; defaults: Record<string, string>; connected: string[] }> {
-    const res = await fetch(`${BASE_URL}/provider`)
+    const res = await fetchWithDirectory(`${BASE_URL}/provider`)
     const data = await res.json()
     // 后端返回 { all: [...], default: {...}, connected: [...] }
     const providerList = data.all || data
@@ -2455,7 +2455,7 @@ export const providerApi = {
   // 获取认证方法
   // 后端返回 Record<string, AuthMethod[]>
   async getAuthMethods(): Promise<Record<string, AuthMethod[]>> {
-    const res = await fetch(`${BASE_URL}/provider/auth`)
+    const res = await fetchWithDirectory(`${BASE_URL}/provider/auth`)
     const data = await res.json()
     const normalized: Record<string, AuthMethod[]> = {}
     for (const [providerId, methods] of Object.entries(data || {})) {
@@ -2472,7 +2472,7 @@ export const providerApi = {
 
   // 启动 OAuth - 需要 method index
   async startOAuth(providerId: string, methodIndex: number = 0): Promise<{ url: string }> {
-    const res = await fetch(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
+    const res = await fetchWithDirectory(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ method: methodIndex })
@@ -2483,7 +2483,7 @@ export const providerApi = {
 
   // 完成 OAuth 回调
   async completeOAuth(providerId: string, code: string, methodIndex: number = 0): Promise<void> {
-    await fetch(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
+    await fetchWithDirectory(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ method: methodIndex, code })
@@ -2654,7 +2654,7 @@ export const configApi = {
 
 export const authApi = {
   async list(): Promise<string[]> {
-    const res = await fetch(`${BASE_URL}/auth`)
+    const res = await fetchWithDirectory(`${BASE_URL}/auth`)
     if (!res.ok) return []
     const data = await res.json().catch(() => [])
     return Array.isArray(data) ? data : []
@@ -2663,7 +2663,7 @@ export const authApi = {
   // 设置 API Key
   // 后端期望 Auth.Info 格式: { type: 'api', key: string }
   async setApiKey(providerId: string, apiKey: string): Promise<void> {
-    await fetch(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
+    await fetchWithDirectory(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'api', key: apiKey })
@@ -2672,14 +2672,14 @@ export const authApi = {
 
   // 移除认证
   async remove(providerId: string): Promise<void> {
-    await fetch(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
+    await fetchWithDirectory(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
       method: 'DELETE'
     })
   }
 }
 
 export async function importAuthFromOpencode(): Promise<AuthImportResult> {
-  const res = await fetch(`${BASE_URL}/auth/import/opencode`, {
+  const res = await fetchWithDirectory(`${BASE_URL}/auth/import/opencode`, {
     method: 'POST'
   })
   if (!res.ok) {

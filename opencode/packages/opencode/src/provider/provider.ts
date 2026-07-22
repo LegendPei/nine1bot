@@ -942,6 +942,10 @@ export namespace Provider {
     State.invalidate(Instance.directory, stateInit)
   }
 
+  export function refreshAll() {
+    State.invalidateAll(stateInit)
+  }
+
   export async function list() {
     return state().then((state) => state.providers)
   }

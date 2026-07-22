@@ -34,6 +34,12 @@ export namespace State {
     entries.delete(init)
   }
 
+  export function invalidateAll(init: any) {
+    for (const entries of recordsByKey.values()) {
+      entries.delete(init)
+    }
+  }
+
   export async function dispose(key: string) {
     const entries = recordsByKey.get(key)
     if (!entries) return

@@ -1337,6 +1337,10 @@ export namespace Config {
     State.invalidate(Instance.directory, stateInit)
   }
 
+  export function refreshAll() {
+    State.invalidateAll(stateInit)
+  }
+
   export async function update(config: Info, options: UpdateOptions = {}) {
     const filepath = path.join(Instance.directory, "config.json")
     const existing = await loadFile(filepath)

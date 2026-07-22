@@ -641,7 +641,7 @@ export namespace Server {
             const providerID = c.req.valid("param").providerID
             const info = c.req.valid("json")
             await Auth.set(providerID, info)
-            Provider.refresh() // Refresh provider state cache after auth change
+            Provider.refreshAll() // Auth storage is shared across project instances
             return c.json(true)
           },
         )
@@ -664,7 +664,7 @@ export namespace Server {
           }),
           async (c) => {
             const result = await Auth.importFromOpencode()
-            Provider.refresh()
+            Provider.refreshAll()
             return c.json(result)
           },
         )
@@ -695,7 +695,7 @@ export namespace Server {
           async (c) => {
             const providerID = c.req.valid("param").providerID
             await Auth.remove(providerID)
-            Provider.refresh() // Refresh provider state cache after auth removal
+            Provider.refreshAll() // Auth storage is shared across project instances
             return c.json(true)
           },
         )

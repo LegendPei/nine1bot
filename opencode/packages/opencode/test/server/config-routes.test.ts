@@ -170,6 +170,78 @@ describe("config routes reload behavior", () => {
       disposed.stop()
     }
   })
+
+  test("custom provider updates invalidate provider caches across project directories", async () => {
+    const setup = await setupProject()
+    const otherProjectDir = await mkdtemp(path.join(tmpdir(), "opencode-config-routes-other-"))
+    tempDirs.push(otherProjectDir)
+    const provider = {
+      name: "Shared Custom",
+      protocol: "openai",
+      baseURL: "https://example.test/v1",
+      models: [{ id: "shared-model" }],
+    }
+
+    expect(await hasProvider(setup.projectDir, "shared-custom")).toBe(false)
+    expect(await hasProvider(otherProjectDir, "shared-custom")).toBe(false)
+
+    const upsert = await request(otherProjectDir, "/config/nine1bot/custom-providers/shared-custom", {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(provider),
+    })
+
+    expect(upsert.status).toBe(200)
+    expect(await hasProvider(setup.projectDir, "shared-custom")).toBe(true)
+    expect(await hasProvider(otherProjectDir, "shared-custom")).toBe(true)
+
+    const remove = await request(otherProjectDir, "/config/nine1bot/custom-providers/shared-custom", {
+      method: "DELETE",
+      headers: jsonHeaders,
+    })
+
+    expect(remove.status).toBe(200)
+    expect(await hasProvider(setup.projectDir, "shared-custom")).toBe(false)
+    expect(await hasProvider(otherProjectDir, "shared-custom")).toBe(false)
+  })
+
+  test("provider auth updates invalidate provider caches across project directories", async () => {
+    const setup = await setupProject()
+    const otherProjectDir = await mkdtemp(path.join(tmpdir(), "opencode-auth-routes-other-"))
+    tempDirs.push(otherProjectDir)
+    const provider = {
+      name: "Shared Auth",
+      protocol: "openai",
+      baseURL: "https://example.test/v1",
+      models: [{ id: "shared-model" }],
+    }
+
+    const upsert = await request(setup.projectDir, "/config/nine1bot/custom-providers/shared-auth", {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(provider),
+    })
+    expect(upsert.status).toBe(200)
+    expect(await providerKey(setup.projectDir, "shared-auth")).toBeUndefined()
+    expect(await providerKey(otherProjectDir, "shared-auth")).toBeUndefined()
+
+    const setAuth = await request(otherProjectDir, "/auth/shared-auth", {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify({ type: "api", key: "test-key" }),
+    })
+    expect(setAuth.status).toBe(200)
+    expect(await providerKey(setup.projectDir, "shared-auth")).toBe("test-key")
+    expect(await providerKey(otherProjectDir, "shared-auth")).toBe("test-key")
+
+    const removeAuth = await request(otherProjectDir, "/auth/shared-auth", {
+      method: "DELETE",
+      headers: jsonHeaders,
+    })
+    expect(removeAuth.status).toBe(200)
+    expect(await providerKey(setup.projectDir, "shared-auth")).toBeUndefined()
+    expect(await providerKey(otherProjectDir, "shared-auth")).toBeUndefined()
+  })
 })
 
 async function setupProject() {
@@ -177,10 +249,12 @@ async function setupProject() {
   tempDirs.push(projectDir)
   const runtimeConfigPath = path.join(projectDir, "config.json")
   const nine1botConfigPath = path.join(projectDir, "nine1bot.config.jsonc")
+  const authPath = path.join(projectDir, "auth.json")
   await writeFile(runtimeConfigPath, "{}\n", "utf-8")
   await writeFile(nine1botConfigPath, "{}\n", "utf-8")
   process.env.OPENCODE_CONFIG = runtimeConfigPath
   process.env.NINE1BOT_CONFIG_PATH = nine1botConfigPath
+  process.env.NINE1BOT_AUTH_PATH = authPath
   process.env.OPENCODE_DISABLE_GLOBAL_CONFIG = "true"
   process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "true"
   process.env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL = "true"
@@ -201,6 +275,20 @@ async function configModel(projectDir: string) {
   return Instance.provide({
     directory: projectDir,
     fn: async () => (await Config.get()).model,
+  })
+}
+
+async function hasProvider(projectDir: string, providerID: string) {
+  return Instance.provide({
+    directory: projectDir,
+    fn: async () => providerID in (await Provider.list()),
+  })
+}
+
+async function providerKey(projectDir: string, providerID: string) {
+  return Instance.provide({
+    directory: projectDir,
+    fn: async () => (await Provider.list())[providerID]?.key,
   })
 }
 

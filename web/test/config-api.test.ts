@@ -20,6 +20,7 @@ type FetchCall = {
   url: string
   method: string
   body?: unknown
+  directory?: string
 }
 
 const originalFetch = globalThis.fetch
@@ -44,7 +45,8 @@ function installFetchMock(handler: (url: string, init?: RequestInit) => Response
           : input.url
     const method = init?.method || 'GET'
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
-    calls.push({ url, method, body })
+    const directory = new Headers(init?.headers).get('x-opencode-directory') || undefined
+    calls.push({ url, method, body, directory })
     return handler(url, init)
   }) as typeof fetch
 }
@@ -317,6 +319,31 @@ describe('web config APIs', () => {
     expect(calls[5].body).toEqual({ model: 'openai/gpt-5' })
     expect(calls[7].body).toEqual(customProvider)
     expect(calls[12].body).toEqual({ type: 'api', key: 'sk-test' })
+  })
+
+  it('keeps provider and auth operations in the active project directory', async () => {
+    setApiDirectory('D:/workspace/active project')
+    installFetchMock((url) => {
+      if (url.startsWith('/provider')) {
+        return jsonResponse({ all: [], default: {}, connected: [] })
+      }
+      if (url.startsWith('/auth')) {
+        return jsonResponse([])
+      }
+      return jsonResponse({})
+    })
+
+    await providerApi.list()
+    await providerApi.getAuthMethods()
+    await providerApi.startOAuth('local-provider')
+    await providerApi.completeOAuth('local-provider', 'code')
+    await authApi.list()
+    await authApi.setApiKey('local-provider', 'secret')
+    await authApi.remove('local-provider')
+    await importAuthFromOpencode()
+
+    expect(calls).toHaveLength(8)
+    expect(calls.every((call) => call.directory === 'D:/workspace/active project')).toBe(true)
   })
 
   it('keeps preferences operations on preferences endpoints', async () => {

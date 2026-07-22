@@ -210,8 +210,8 @@ export const ConfigRoutes = lazy(() =>
           runtimePatch.provider = { ...preserved, ...mapped }
         }
         await patchOpencodeRuntimeConfig(runtimePatch)
-        Config.refresh()
-        Provider.refresh()
+        Config.refreshAll()
+        Provider.refreshAll()
         return c.json({ success: true })
       } catch (e: any) {
         return c.json({ error: e.message }, 500)
@@ -280,8 +280,8 @@ export const ConfigRoutes = lazy(() =>
               ...mapped,
             },
           })
-          Config.refresh()
-          Provider.refresh()
+          Config.refreshAll()
+          Provider.refreshAll()
           return c.json({ success: true })
         } catch (e: any) {
           return c.json({ error: e.message }, 500)
@@ -318,8 +318,8 @@ export const ConfigRoutes = lazy(() =>
             ...mapped,
           }
           await patchOpencodeRuntimeConfig({ provider: nextProvider })
-          Config.refresh()
-          Provider.refresh()
+          Config.refreshAll()
+          Provider.refreshAll()
           return c.json({ success: true })
         } catch (e: any) {
           return c.json({ error: e.message }, 500)
