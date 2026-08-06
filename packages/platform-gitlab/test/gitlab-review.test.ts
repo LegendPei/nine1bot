@@ -15,6 +15,7 @@ import {
   parseReviewStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
+  sliceGitLabReviewDiff,
   resolveGitLabReviewProjectProfile,
   renderBlockedDiffComment,
   validateGitLabInlinePosition,
@@ -332,6 +333,15 @@ describe('GitLab review foundation', () => {
       excludedProjects: [{ id: 4, pathWithNamespace: 'root/legacy' }],
       hookGroups: [{ id: 9, fullPath: 'root' }],
     })
+  })
+
+  test('slices review diff at hunk boundaries within a deterministic byte budget', () => {
+    const slices = sliceGitLabReviewDiff([
+      { oldPath: 'src/auth.ts', newPath: 'src/auth.ts', diff: '@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-c\n+d\n', added: false, renamed: false, deleted: false, generated: false },
+    ], 20)
+
+    expect(slices.slices).toEqual([{ file: 'src/auth.ts', hunk: '@@ -1 +1 @@\n-a\n+b\n' }])
+    expect(slices.omissions).toEqual([{ file: 'src/auth.ts', reason: 'budget-exceeded' }])
   })
 
   test('matches a configured GitLab project profile by host and project id', () => {

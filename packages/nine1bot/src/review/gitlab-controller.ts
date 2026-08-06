@@ -138,31 +138,30 @@ export function buildGitLabReviewRuntimePrompt(input: {
 }
 
 function renderGitLabDiffEvidence(context: ReturnType<typeof buildGitLabReviewContext>) {
-  const files = context.diff.files ?? []
+  const slices = context.slices?.slices ?? context.diff.files.map((file) => ({ file: file.newPath, hunk: file.diff }))
   const skipped = context.diff.skipped ?? []
   const parts = [
     'GitLab diff evidence:',
-    `Files included: ${files.length}`,
+    `Hunks included: ${slices.length}`,
     `Skipped files: ${skipped.length}`,
     context.diff.diffRefs?.headSha ? `Diff head SHA: ${context.diff.diffRefs.headSha}` : undefined,
     '',
-    ...files.flatMap((file, index) => [
-      `### File ${index + 1}: ${file.newPath}`,
-      `Old path: ${file.oldPath}`,
-      `New path: ${file.newPath}`,
-      `Added: ${String(file.added)} Renamed: ${String(file.renamed)} Deleted: ${String(file.deleted)}`,
+    ...slices.flatMap((slice, index) => [
+      `### File ${index + 1}: ${slice.file}`,
       '```diff',
-      file.diff,
+      slice.hunk,
       '```',
       '',
       'Review line map for file/newLine/oldLine fields:',
       '```text',
-      renderReviewLineMap(file.diff),
+      renderReviewLineMap(slice.hunk),
       '```',
       '',
     ]),
     skipped.length > 0 ? 'Skipped files:' : undefined,
     ...skipped.map((file) => `- ${file.path}: ${file.reason}`),
+    context.slices?.omissions.length ? 'Omitted hunks:' : undefined,
+    ...(context.slices?.omissions ?? []).map((item) => `- ${item.file}: ${item.reason}`),
   ].filter(Boolean)
   return parts.join('\n')
 }

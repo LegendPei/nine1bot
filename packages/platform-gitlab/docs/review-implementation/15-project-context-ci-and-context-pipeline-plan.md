@@ -171,6 +171,10 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 3：冻结上下文包与 diff 切片
 
+**状态：已完成（2026-08-06）**
+
+已新增 hunk 边界切片器并接入 review context/runtime prompt；模型只消费 slices，裁剪的 hunk 会以 omission 形式显式呈现。既有 diff manifest、GitLab overflow 防护和 inline position 校验保持不变。
+
 **范围**
 
 - 新增 `packages/platform-gitlab/src/review/context-packet.ts` 和 `diff-slicer.ts`，将项目、CI、manifest 与 slice 组成确定性 packet。

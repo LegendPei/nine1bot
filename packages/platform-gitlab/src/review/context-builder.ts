@@ -1,4 +1,5 @@
 import { buildGitLabDiffManifest } from './diff-builder'
+import { sliceGitLabReviewDiff } from './diff-slicer'
 import { buildGitLabReviewIdempotencyKey } from './idempotency'
 import type { GitLabRawChangesResponse, GitLabReviewTrigger } from './types'
 
@@ -6,6 +7,7 @@ export type GitLabReviewContext = {
   trigger: GitLabReviewTrigger
   idempotencyKey: string
   diff: ReturnType<typeof buildGitLabDiffManifest>
+  slices?: ReturnType<typeof sliceGitLabReviewDiff>
   diagnostics?: string[]
   contextBlocks: Array<{
     id: string
@@ -31,10 +33,12 @@ export function buildGitLabReviewContext(input: {
     maxDiffBytes: input.maxDiffBytes,
     maxFiles: input.maxFiles,
   })
+  const slices = sliceGitLabReviewDiff(diff.files, input.maxDiffBytes ?? 240_000)
   return {
     trigger: input.trigger,
     idempotencyKey: buildGitLabReviewIdempotencyKey(input.trigger),
     diff,
+    slices,
     diagnostics: input.diagnostics ?? [],
     contextBlocks: [
       {
