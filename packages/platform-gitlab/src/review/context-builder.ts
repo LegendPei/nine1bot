@@ -6,6 +6,7 @@ export type GitLabReviewContext = {
   trigger: GitLabReviewTrigger
   idempotencyKey: string
   diff: ReturnType<typeof buildGitLabDiffManifest>
+  diagnostics?: string[]
   contextBlocks: Array<{
     id: string
     layer: 'platform'
@@ -23,6 +24,8 @@ export function buildGitLabReviewContext(input: {
   changes: GitLabRawChangesResponse
   maxDiffBytes?: number
   maxFiles?: number
+  additionalContextBlocks?: GitLabReviewContext['contextBlocks']
+  diagnostics?: string[]
 }): GitLabReviewContext {
   const diff = buildGitLabDiffManifest(input.changes, {
     maxDiffBytes: input.maxDiffBytes,
@@ -32,6 +35,7 @@ export function buildGitLabReviewContext(input: {
     trigger: input.trigger,
     idempotencyKey: buildGitLabReviewIdempotencyKey(input.trigger),
     diff,
+    diagnostics: input.diagnostics ?? [],
     contextBlocks: [
       {
         id: 'gitlab-review-trigger',
@@ -43,6 +47,7 @@ export function buildGitLabReviewContext(input: {
         visibility: 'system-required',
         content: renderTrigger(input.trigger),
       },
+      ...(input.additionalContextBlocks ?? []),
       {
         id: 'gitlab-review-diff-manifest',
         layer: 'platform',

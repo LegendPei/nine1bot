@@ -8,6 +8,7 @@ import {
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
   isGitLabReviewProjectInScope,
+  loadGitLabPipelineContext,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   resolveGitLabReviewProjectProfile,
@@ -17,7 +18,7 @@ import {
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
 } from '@nine1bot/platform-gitlab/review'
-import { ReviewRunStore } from './run-store'
+import { ReviewRunStore, type ReviewRunCiSummary } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -375,11 +376,34 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   }
 
   if (changes) {
+    const additionalContextBlocks: ReturnType<typeof buildGitLabReviewContext>['contextBlocks'] = []
+    const contextDiagnostics: string[] = []
+    let ci: ReviewRunCiSummary | undefined
+    if (projectResolution.project.ci.enabled && parsed.trigger.objectType === 'mr' && parsed.trigger.objectIid && parsed.trigger.headSha) {
+      const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
+      if (token) {
+        const pipelineContext = await loadGitLabPipelineContext({
+          client: new GitLabApiClient({ baseUrl: settings.baseUrl ?? `https://${parsed.trigger.host}`, token, fetch: input.fetch }),
+          projectId: parsed.trigger.projectId,
+          mrIid: parsed.trigger.objectIid,
+          headSha: parsed.trigger.headSha,
+          options: projectResolution.project.ci,
+        })
+        if (pipelineContext.contextBlock) additionalContextBlocks.push(pipelineContext.contextBlock)
+        contextDiagnostics.push(...pipelineContext.diagnostics)
+        ci = { pipeline: pipelineContext.pipeline, diagnostics: pipelineContext.diagnostics }
+      } else {
+        contextDiagnostics.push('pipeline_context_token_missing')
+        ci = { diagnostics: ['pipeline_context_token_missing'] }
+      }
+    }
     const context = buildGitLabReviewContext({
       trigger: parsed.trigger,
       changes,
       maxDiffBytes: settings.maxDiffBytes,
       maxFiles: settings.maxFiles,
+      additionalContextBlocks,
+      diagnostics: contextDiagnostics,
     })
     if (context.diff.blocked) {
       const publishWarning = await maybeWriteBlockedComment({
@@ -391,6 +415,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       })
       const warnings = [
         ...projectWarnings,
+        ...contextDiagnostics,
         context.diff.blockReason ?? 'GitLab diff blocked.',
         ...(publishWarning ? [publishWarning] : []),
       ]
@@ -398,6 +423,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         status: 'blocked',
         warnings,
         context,
+        ci,
       })
       return {
         accepted: true,
@@ -412,7 +438,8 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     ReviewRunStore.update(run.id, {
       status: settings.dryRun ? 'succeeded' : 'running',
       context,
-      warnings: projectWarnings,
+      warnings: [...projectWarnings, ...contextDiagnostics],
+      ci,
     })
     return {
       accepted: true,
@@ -421,7 +448,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       runId: run.id,
       trigger: parsed.trigger,
       context,
-      warnings: projectWarnings,
+      warnings: [...projectWarnings, ...contextDiagnostics],
     }
   }
 

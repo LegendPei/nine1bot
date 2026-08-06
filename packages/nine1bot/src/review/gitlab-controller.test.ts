@@ -392,6 +392,38 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('adds optional GitLab pipeline evidence without blocking the review', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: { id: 123, path_with_namespace: 'nine1/nine1bot', web_url: 'https://gitlab.example.com/nine1/nine1bot' },
+        object_attributes: { iid: 12, last_commit: { id: 'ci-head' } },
+        changes: { changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }] },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab.settings,
+        'review.baseUrl': 'https://gitlab.example.com',
+        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, enabled: true, ci: { enabled: true } }],
+      } } },
+      secrets: liveSecrets,
+      fetch: (async (url) => {
+        const value = String(url)
+        if (value.endsWith('/pipelines')) return Response.json([{ id: 55, sha: 'ci-head', status: 'failed' }])
+        if (value.endsWith('/pipelines/55/jobs')) return Response.json([{ id: 56, name: 'test', stage: 'verify', status: 'failed' }])
+        if (value.endsWith('/jobs/56/trace')) return new Response('FAILED test', { status: 200 })
+        throw new Error(`unexpected request: ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: [] })
+    expect(result.accepted && result.context?.contextBlocks.map((block) => block.id)).toContain('gitlab-review-pipeline')
+    expect(result.accepted && result.context?.contextBlocks.find((block) => block.id === 'gitlab-review-pipeline')?.content).toContain('FAILED test')
+    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      ci: { pipeline: { id: 55, sha: 'ci-head', status: 'failed' }, diagnostics: [] },
+    })
+  })
+
   test('rejects reviews for disabled project profiles before creating a run', async () => {
     const result = await handleGitLabReviewWebhook({
       payload: {

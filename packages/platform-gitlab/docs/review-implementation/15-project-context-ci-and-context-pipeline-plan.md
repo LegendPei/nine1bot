@@ -151,6 +151,10 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 2：可降级 CI/CD 上下文
 
+**状态：已完成（2026-08-06）**
+
+已接入 MR pipeline、pipeline jobs 与 job trace 的只读 API；仅精确匹配当前 HEAD SHA。异常 job trace 会脱敏并截断后注入 context，`ReviewRun.ci` 仅持久化 pipeline 摘要和 diagnostics。无 pipeline、token 缺失或 API 读取失败不会阻断 review。
+
 **范围**
 
 - 扩展 `packages/platform-gitlab/src/review/api-client.ts`，加入 pipeline、job 与 trace 的只读 API 和类型。

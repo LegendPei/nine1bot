@@ -37,6 +37,23 @@ export type GitLabProjectHook = {
   enable_ssl_verification?: boolean
 }
 
+export type GitLabPipelineSummary = {
+  id: number
+  sha?: string
+  status?: string
+  ref?: string
+  web_url?: string
+}
+
+export type GitLabPipelineJob = {
+  id: number
+  name?: string
+  stage?: string
+  status?: string
+  failure_reason?: string | null
+  web_url?: string
+}
+
 export type GitLabProjectSummary = {
   id: number
   path_with_namespace?: string
@@ -110,6 +127,22 @@ export class GitLabApiClient {
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/commits/${encodeURIComponent(String(commitSha))}/diff`,
     )
     return { changes: changes ?? [] }
+  }
+
+  async getMergeRequestPipelines(projectId: string | number, mrIid: string | number): Promise<GitLabPipelineSummary[]> {
+    return await this.request<GitLabPipelineSummary[]>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/pipelines`,
+    )
+  }
+
+  async getPipelineJobs(projectId: string | number, pipelineId: string | number): Promise<GitLabPipelineJob[]> {
+    return await this.request<GitLabPipelineJob[]>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/pipelines/${encodeURIComponent(String(pipelineId))}/jobs`,
+    )
+  }
+
+  async getJobTrace(projectId: string | number, jobId: string | number): Promise<string> {
+    return await this.requestText(`/api/v4/projects/${encodeURIComponent(String(projectId))}/jobs/${encodeURIComponent(String(jobId))}/trace`)
   }
 
   async getTokenSelf(): Promise<GitLabTokenSelf> {
@@ -251,6 +284,15 @@ export class GitLabApiClient {
     const text = await response.text()
     if (!text.trim()) return undefined as T
     return JSON.parse(text) as T
+  }
+
+  private async requestText(path: string, init: RequestInit = {}): Promise<string> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: { 'PRIVATE-TOKEN': this.token, ...(init.headers ?? {}) },
+    })
+    if (!response.ok) throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
+    return await response.text()
   }
 }
 

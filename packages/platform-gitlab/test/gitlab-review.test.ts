@@ -3,6 +3,7 @@ import {
   aggregateReviewFindings,
   buildGitLabDiffManifest,
   buildGitLabReviewContext,
+  loadGitLabPipelineContext,
   buildGitLabReviewIdempotencyKey,
   buildInitialGitLabReviewSubagentTasks,
   compileSubagentStageResults,
@@ -836,6 +837,62 @@ describe('GitLab review foundation', () => {
     expect(capturedBody).toContain('position%5Bbase_sha%5D=base')
     expect(capturedBody).toContain('position%5Bnew_line%5D=2')
     expect(capturedBody).not.toContain('position=%7B')
+  })
+
+  test('loads merge request pipeline evidence through read-only GitLab endpoints', async () => {
+    const urls: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        urls.push(String(url))
+        if (String(url).endsWith('/pipelines')) return Response.json([{ id: 7, sha: 'head', status: 'failed' }])
+        if (String(url).endsWith('/pipelines/7/jobs')) return Response.json([{ id: 8, name: 'test', status: 'failed' }])
+        return new Response('failed trace', { status: 200 })
+      }) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).resolves.toMatchObject([{ id: 7, sha: 'head', status: 'failed' }])
+    await expect(client.getPipelineJobs(3, 7)).resolves.toMatchObject([{ id: 8, name: 'test', status: 'failed' }])
+    await expect(client.getJobTrace(3, 8)).resolves.toBe('failed trace')
+    expect(urls).toEqual([
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines',
+      'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs',
+      'https://gitlab.example.com/api/v4/projects/3/jobs/8/trace',
+    ])
+  })
+
+  test('builds bounded failed-job pipeline context only for the review head SHA', async () => {
+    const context = await loadGitLabPipelineContext({
+      client: {
+        async getMergeRequestPipelines() {
+          return [
+            { id: 1, sha: 'old-head', status: 'success' },
+            { id: 2, sha: 'review-head', status: 'failed', web_url: 'https://gitlab.example.com/pipelines/2' },
+          ]
+        },
+        async getPipelineJobs() {
+          return [
+            { id: 3, name: 'unit', stage: 'test', status: 'failed', failure_reason: 'script_failure' },
+            { id: 4, name: 'lint', stage: 'test', status: 'success' },
+          ]
+        },
+        async getJobTrace() {
+          return 'token=abc123\nFAILED assertion\n'
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'review-head',
+      options: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 2, maxJobLogBytes: 120 },
+    })
+
+    expect(context.diagnostics).toEqual([])
+    expect(context.pipeline).toMatchObject({ id: 2, sha: 'review-head', status: 'failed' })
+    expect(context.contextBlock?.content).toContain('Pipeline status: failed')
+    expect(context.contextBlock?.content).toContain('unit (test): failed')
+    expect(context.contextBlock?.content).toContain('FAILED assertion')
+    expect(context.contextBlock?.content).not.toContain('abc123')
   })
 
   test('renders validated inline suggestions in GitLab discussion bodies', async () => {
