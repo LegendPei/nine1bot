@@ -147,6 +147,12 @@ export const gitlabPlatformDescriptor = {
             description: 'GitLab groups whose group hooks should be managed by Nine1Bot.',
           },
           {
+            key: 'review.projects',
+            type: 'json',
+            label: 'Project review profiles',
+            description: 'Per-project review context, focus, limits, and CI evidence policy.',
+          },
+          {
             key: 'review.webhookSecretRef',
             type: 'password',
             label: 'Webhook secret',

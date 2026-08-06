@@ -191,6 +191,10 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 4：配置页、运行记录与 GitLab 联调
 
+**状态：实现完成，真实 GitLab 联调待有效凭据（2026-08-06）**
+
+已复用现有 PlatformManager 动态设置保存通道，而非新增硬编码配置页：项目搜索结果可直接创建审查档案；档案支持启用状态、显示名称、审查关注点、私有 Markdown 上下文和 CI 证据开关/失败任务上限。Review Runs 现展示项目归属与 pipeline 摘要、诊断信息。`publicGitLabReviewRun` 对 `ci` 使用字段白名单，防止未来实现误将 trace 等重型或敏感字段带到浏览器。真实联调仅缺少有效 GitLab token 与可访问的测试 MR；不应以过期 token 或本地伪造凭据绕过该验证。
+
 **范围**
 
 - 定位当前 GitLab 配置页的数据源，复用已完成的 Feishu 平台配置模式；提供项目档案列表、搜索项目、编辑表单和 Markdown 上下文编辑器。

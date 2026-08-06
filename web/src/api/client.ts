@@ -700,6 +700,26 @@ export interface GitLabReviewRun {
   retryCount?: number
   lastRetryAt?: number
   warnings?: string[]
+  project?: {
+    id: string
+    host?: string
+    projectId: string | number
+    pathWithNamespace?: string
+    displayName?: string
+    enabled: boolean
+    source: 'configured' | 'unconfigured'
+    matchedAt: number
+  }
+  ci?: {
+    pipeline?: {
+      id: string | number
+      sha?: string
+      status?: string
+      ref?: string
+      web_url?: string
+    }
+    diagnostics: string[]
+  }
   trigger?: {
     eventName?: string
     mode?: string

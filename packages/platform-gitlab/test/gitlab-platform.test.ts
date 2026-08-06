@@ -34,6 +34,16 @@ function platformContext(resourceRoot = join(import.meta.dir, '..')): PlatformAd
 }
 
 describe('GitLab platform adapter package', () => {
+  test('declares the structured project profile settings field', () => {
+    const fields = gitlabPlatformContribution.descriptor.config?.sections.flatMap((section) => section.fields) ?? []
+
+    expect(fields).toContainEqual(expect.objectContaining({
+      key: 'review.projects',
+      type: 'json',
+      label: 'Project review profiles',
+    }))
+  })
+
   test('parses GitLab repository, file, tree, merge request, and issue URLs', () => {
     expect(parseGitLabUrl('https://gitlab.com/nine1/nine1bot')).toMatchObject({
       host: 'gitlab.com',

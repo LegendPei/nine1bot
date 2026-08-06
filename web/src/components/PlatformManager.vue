@@ -140,6 +140,7 @@ const gitLabIncludedProjectsFieldKey = 'review.includedProjects'
 const gitLabExcludedProjectsFieldKey = 'review.excludedProjects'
 const gitLabScopeModeFieldKey = 'review.scopeMode'
 const gitLabHookGroupsFieldKey = 'review.hookGroups'
+const gitLabProjectProfilesFieldKey = 'review.projects'
 type GitLabProjectRef = {
   id: string | number
   pathWithNamespace?: string
@@ -150,12 +151,32 @@ type GitLabGroupRef = {
   fullPath?: string
   webUrl?: string
 }
+type GitLabProjectProfile = {
+  id: string
+  projectId: string | number
+  pathWithNamespace?: string
+  displayName?: string
+  enabled: boolean
+  contextMarkdown?: string
+  reviewFocus: string[]
+  includePathPrefixes: string[]
+  excludePathPatterns: string[]
+  maxContextBytes?: number
+  maxFiles?: number
+  ci: {
+    enabled: boolean
+    includeFailedJobLogs: boolean
+    maxFailedJobs: number
+    maxJobLogBytes: number
+  }
+}
 const authenticatedModelCount = computed(() => {
   return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
 })
 const gitLabIncludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabIncludedProjectsFieldKey)))
 const gitLabExcludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabExcludedProjectsFieldKey)))
 const gitLabHookGroups = computed(() => parseGitLabGroupRefs(textValue(gitLabHookGroupsFieldKey)))
+const gitLabProjectProfiles = computed(() => parseGitLabProjectProfiles(textValue(gitLabProjectProfilesFieldKey)))
 const gitLabScopeMode = computed(() => textValue(gitLabScopeModeFieldKey) || 'all-received')
 const gitLabRuntimeWebhookUrl = computed(() => {
   const actionWebhookUrl = props.actionResult?.data?.webhookUrl
@@ -380,11 +401,15 @@ function isGitLabProjectScopeJsonField(field: PlatformConfigField) {
   )
 }
 
+function isGitLabProjectProfilesJsonField(field: PlatformConfigField) {
+  return isGitLabPlatform.value && field.key === gitLabProjectProfilesFieldKey
+}
+
 function shouldShowGitLabGenericField(field: PlatformConfigField) {
   if (!isGitLabPlatform.value) return true
   if (!gitLabAdvancedConfig.value) return false
   if (gitLabMvpFieldKeys.has(field.key)) return false
-  return !isGitLabReviewModelProviderField(field) && !isGitLabProjectScopeJsonField(field)
+  return !isGitLabReviewModelProviderField(field) && !isGitLabProjectScopeJsonField(field) && !isGitLabProjectProfilesJsonField(field)
 }
 
 function gitLabMvpFieldClass(field: PlatformConfigField) {
@@ -463,6 +488,103 @@ function parseGitLabProjectRefs(input: string): GitLabProjectRef[] {
 
 function setGitLabProjectRefs(key: string, projects: GitLabProjectRef[]) {
   formValues[key] = JSON.stringify(projects, null, 2)
+}
+
+function parseGitLabProjectProfiles(input: string): GitLabProjectProfile[] {
+  if (!input.trim()) return []
+  try {
+    const parsed = JSON.parse(input)
+    if (!Array.isArray(parsed)) return []
+    const ids = new Set<string>()
+    return parsed.flatMap((item): GitLabProjectProfile[] => {
+      if (!item || typeof item !== 'object') return []
+      const record = item as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id.trim() : ''
+      const projectId = record.projectId
+      if (!id || (typeof projectId !== 'string' && typeof projectId !== 'number') || ids.has(id)) return []
+      ids.add(id)
+      const ci = record.ci && typeof record.ci === 'object' ? record.ci as Record<string, unknown> : {}
+      return [{
+        id,
+        projectId,
+        pathWithNamespace: optionalProfileText(record.pathWithNamespace),
+        displayName: optionalProfileText(record.displayName),
+        enabled: record.enabled !== false,
+        contextMarkdown: optionalProfileText(record.contextMarkdown),
+        reviewFocus: profileTextList(record.reviewFocus),
+        includePathPrefixes: profileTextList(record.includePathPrefixes),
+        excludePathPatterns: profileTextList(record.excludePathPatterns),
+        maxContextBytes: optionalProfileNumber(record.maxContextBytes),
+        maxFiles: optionalProfileNumber(record.maxFiles),
+        ci: {
+          enabled: ci.enabled === true,
+          includeFailedJobLogs: ci.includeFailedJobLogs !== false,
+          maxFailedJobs: positiveProfileNumber(ci.maxFailedJobs, 3),
+          maxJobLogBytes: positiveProfileNumber(ci.maxJobLogBytes, 8000),
+        },
+      }]
+    })
+  } catch {
+    return []
+  }
+}
+
+function optionalProfileText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function profileTextList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
+}
+
+function optionalProfileNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function positiveProfileNumber(value: unknown, fallback: number) {
+  return optionalProfileNumber(value) ?? fallback
+}
+
+function setGitLabProjectProfiles(profiles: GitLabProjectProfile[]) {
+  formValues[gitLabProjectProfilesFieldKey] = JSON.stringify(profiles, null, 2)
+}
+
+function addGitLabProjectProfile(project: GitLabProjectRef) {
+  const profiles = gitLabProjectProfiles.value
+  if (profiles.some((profile) => String(profile.projectId) === String(project.id))) return
+  setGitLabProjectProfiles([...profiles, {
+    id: `project-${String(project.id)}`,
+    projectId: project.id,
+    pathWithNamespace: project.pathWithNamespace,
+    displayName: project.pathWithNamespace,
+    enabled: true,
+    reviewFocus: [],
+    includePathPrefixes: [],
+    excludePathPatterns: [],
+    ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
+  }])
+}
+
+function updateGitLabProjectProfile(id: string, patch: Partial<GitLabProjectProfile>) {
+  setGitLabProjectProfiles(gitLabProjectProfiles.value.map((profile) => profile.id === id ? {
+    ...profile,
+    ...patch,
+    ci: { ...profile.ci, ...patch.ci },
+  } : profile))
+}
+
+function removeGitLabProjectProfile(id: string) {
+  setGitLabProjectProfiles(gitLabProjectProfiles.value.filter((profile) => profile.id !== id))
+}
+
+function profileLines(value: string[]) {
+  return value.join('\n')
+}
+
+function parseProfileLines(value: string) {
+  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
 }
 
 function parseGitLabGroupRefs(input: string): GitLabGroupRef[] {
@@ -1135,6 +1257,9 @@ function actionResultDetails(result: PlatformActionResult) {
                     <span class="text-muted text-sm">ID {{ project.id }}</span>
                   </div>
                   <div class="gitlab-project-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabProjectProfile(project)">
+                      添加档案
+                    </button>
                     <button type="button" class="btn btn-ghost btn-sm" @click="addGitLabProject(gitLabIncludedProjectsFieldKey, project)">
                       加入包含
                     </button>
@@ -1178,6 +1303,96 @@ function actionResultDetails(result: PlatformActionResult) {
                   <span v-else class="text-muted text-sm">没有排除项目</span>
                 </div>
               </div>
+            </div>
+            <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
+              <div class="platform-section-heading-row">
+                <h5 class="platform-section-title">项目审查档案</h5>
+                <span class="gitlab-guide-text">档案为仓库提供稳定的业务上下文、审查重点和 CI 证据策略；未建档项目仍可按默认策略审查。</span>
+              </div>
+              <div v-if="gitLabProjectProfiles.length" class="gitlab-profile-list">
+                <article v-for="profile in gitLabProjectProfiles" :key="profile.id" class="gitlab-profile-card">
+                  <div class="gitlab-profile-heading">
+                    <div>
+                      <strong>{{ profile.displayName || profile.pathWithNamespace || profile.id }}</strong>
+                      <span class="text-muted text-sm">项目 ID {{ profile.projectId }}</span>
+                    </div>
+                    <div class="gitlab-project-actions">
+                      <label class="platform-switch inline">
+                        <input
+                          :checked="profile.enabled"
+                          type="checkbox"
+                          @change="updateGitLabProjectProfile(profile.id, { enabled: ($event.target as HTMLInputElement).checked })"
+                        />
+                        <span>启用</span>
+                      </label>
+                      <button type="button" class="btn btn-ghost btn-sm" @click="removeGitLabProjectProfile(profile.id)">
+                        <Trash2 :size="13" />
+                        <span>移除</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="gitlab-profile-grid">
+                    <label class="platform-field">
+                      <span class="platform-field-label">显示名称</span>
+                      <input
+                        :value="profile.displayName || ''"
+                        class="input platform-input"
+                        @input="updateGitLabProjectProfile(profile.id, { displayName: ($event.target as HTMLInputElement).value || undefined })"
+                      />
+                    </label>
+                    <label class="platform-field">
+                      <span class="platform-field-label">审查关注点</span>
+                      <textarea
+                        :value="profileLines(profile.reviewFocus)"
+                        class="input platform-input platform-textarea"
+                        rows="3"
+                        placeholder="每行一个关注点，例如：鉴权边界"
+                        @input="updateGitLabProjectProfile(profile.id, { reviewFocus: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
+                      />
+                    </label>
+                  </div>
+                  <label class="platform-field">
+                    <span class="platform-field-label">仓库上下文</span>
+                    <span class="platform-field-desc text-muted text-sm">只注入该仓库的 review 上下文，不会公开到运行记录列表。</span>
+                    <textarea
+                      :value="profile.contextMarkdown || ''"
+                      class="input platform-input platform-textarea"
+                      rows="5"
+                      placeholder="例如：UF 的模块边界、关键约束、不可回归的兼容性要求"
+                      @input="updateGitLabProjectProfile(profile.id, { contextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
+                    />
+                  </label>
+                  <div class="gitlab-profile-ci">
+                    <label class="platform-switch inline">
+                      <input
+                        :checked="profile.ci.enabled"
+                        type="checkbox"
+                        @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, enabled: ($event.target as HTMLInputElement).checked } })"
+                      />
+                      <span>将当前 MR 的 CI 状态作为审查上下文</span>
+                    </label>
+                    <label v-if="profile.ci.enabled" class="platform-switch inline">
+                      <input
+                        :checked="profile.ci.includeFailedJobLogs"
+                        type="checkbox"
+                        @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, includeFailedJobLogs: ($event.target as HTMLInputElement).checked } })"
+                      />
+                      <span>读取失败任务日志摘要</span>
+                    </label>
+                    <label v-if="profile.ci.enabled" class="platform-field gitlab-profile-number-field">
+                      <span class="platform-field-label">失败任务上限</span>
+                      <input
+                        :value="profile.ci.maxFailedJobs"
+                        type="number"
+                        min="1"
+                        class="input platform-input"
+                        @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxFailedJobs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
+                      />
+                    </label>
+                  </div>
+                </article>
+              </div>
+              <p v-else class="text-muted text-sm">先从上面的项目搜索结果添加档案。项目范围和项目档案相互独立：范围控制是否接收，档案控制如何审查。</p>
             </div>
             <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
               <div class="platform-section-heading-row">
@@ -1283,11 +1498,12 @@ function actionResultDetails(result: PlatformActionResult) {
               <div v-for="run in visibleGitLabRuns" :key="run.id" class="gitlab-run-row">
                 <div class="gitlab-run-main">
                   <span class="gitlab-run-title">{{ reviewRunObject(run) }}</span>
+                  <span v-if="run.project" class="gitlab-run-meta">{{ run.project.displayName || run.project.pathWithNamespace || run.project.id }}</span>
                   <span class="gitlab-run-meta">{{ run.id }} · {{ formatRunTime(run.updatedAt) }}</span>
                   <span class="gitlab-run-meta">{{ reviewRunDetail(run) }}</span>
                 </div>
                 <details
-                  v-if="run.error || run.warnings?.length || run.idempotencyKey"
+                  v-if="run.error || run.warnings?.length || run.idempotencyKey || run.ci?.pipeline || run.ci?.diagnostics?.length"
                   class="gitlab-run-details"
                 >
                   <summary>详情</summary>
@@ -1304,6 +1520,19 @@ function actionResultDetails(result: PlatformActionResult) {
                       <span>警告</span>
                       <ul>
                         <li v-for="warning in run.warnings" :key="warning">{{ warning }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="run.ci?.pipeline" class="gitlab-run-detail-line">
+                      <span>CI pipeline</span>
+                      <a v-if="run.ci.pipeline.web_url" :href="run.ci.pipeline.web_url" target="_blank" rel="noreferrer">
+                        #{{ run.ci.pipeline.id }} · {{ run.ci.pipeline.status || 'unknown' }}
+                      </a>
+                      <code v-else>#{{ run.ci.pipeline.id }} · {{ run.ci.pipeline.status || 'unknown' }}</code>
+                    </div>
+                    <div v-if="run.ci?.diagnostics?.length" class="gitlab-run-detail-line">
+                      <span>CI diagnostics</span>
+                      <ul>
+                        <li v-for="diagnostic in run.ci.diagnostics" :key="diagnostic">{{ diagnostic }}</li>
                       </ul>
                     </div>
                   </div>
@@ -1837,6 +2066,53 @@ function actionResultDetails(result: PlatformActionResult) {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
+}
+
+.gitlab-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.gitlab-profile-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.gitlab-profile-heading,
+.gitlab-profile-ci {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.gitlab-profile-heading > div:first-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gitlab-profile-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-sm);
+}
+
+.gitlab-profile-ci {
+  align-items: end;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  padding-top: var(--space-xs);
+}
+
+.gitlab-profile-number-field {
+  width: 132px;
 }
 
 .gitlab-project-row {

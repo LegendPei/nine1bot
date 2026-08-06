@@ -69,6 +69,18 @@ describe("webhook status URL selection", () => {
         source: "configured",
         matchedAt: 3,
       },
+      ci: {
+        pipeline: {
+          id: 41,
+          sha: "abc123",
+          status: "failed",
+          ref: "feature/review",
+          web_url: "https://gitlab.example.com/root/uftest/-/pipelines/41",
+          trace: "must never reach the browser",
+        },
+        diagnostics: ["failed_jobs_detected"],
+        trace: "must never reach the browser",
+      },
     } as any)).toEqual({
       id: "run_1",
       platform: "gitlab",
@@ -84,6 +96,16 @@ describe("webhook status URL selection", () => {
         enabled: true,
         source: "configured",
         matchedAt: 3,
+      },
+      ci: {
+        pipeline: {
+          id: 41,
+          sha: "abc123",
+          status: "failed",
+          ref: "feature/review",
+          web_url: "https://gitlab.example.com/root/uftest/-/pipelines/41",
+        },
+        diagnostics: ["failed_jobs_detected"],
       },
     })
   })

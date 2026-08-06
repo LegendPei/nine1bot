@@ -415,7 +415,7 @@ async function testWebhook(c: any) {
 }
 
 export function publicGitLabReviewRun(run: ReviewRunRecord) {
-  const { context: _context, project, ...publicRun } = run
+  const { context: _context, project, ci, ...publicRun } = run
   return {
     ...publicRun,
     ...(project ? {
@@ -428,6 +428,20 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
         enabled: project.enabled,
         source: project.source,
         matchedAt: project.matchedAt,
+      },
+    } : {}),
+    ...(ci ? {
+      ci: {
+        ...(ci.pipeline ? {
+          pipeline: {
+            id: ci.pipeline.id,
+            sha: ci.pipeline.sha,
+            status: ci.pipeline.status,
+            ref: ci.pipeline.ref,
+            web_url: ci.pipeline.web_url,
+          },
+        } : {}),
+        diagnostics: ci.diagnostics,
       },
     } : {}),
   }
