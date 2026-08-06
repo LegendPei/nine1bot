@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { getDataDir } from '../config/loader'
+import type { GitLabReviewProjectSnapshot } from '@nine1bot/platform-gitlab/review'
 
 export type ReviewRunStatus = 'accepted' | 'rejected' | 'blocked' | 'running' | 'succeeded' | 'failed'
 
@@ -13,6 +14,7 @@ export type ReviewRunRecord = {
   updatedAt: number
   error?: string
   trigger?: Record<string, unknown>
+  project?: GitLabReviewProjectSnapshot
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number

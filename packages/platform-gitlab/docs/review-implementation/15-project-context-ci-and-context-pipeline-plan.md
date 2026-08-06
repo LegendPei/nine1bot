@@ -131,6 +131,10 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 1：项目档案与 ReviewRun 归属
 
+**状态：已完成（2026-08-06）**
+
+已实现项目档案归一化与 `(host, projectId)` 匹配；`ReviewRun` 已持久化项目快照。未建档但在 scope 内的项目继续执行并记录 `project_profile_missing`，禁用项目档案会创建 rejected run；公开 run DTO 仅返回项目摘要，未暴露项目 Markdown 或策略字段。
+
 **范围**
 
 - 修改 `packages/platform-gitlab/src/review/types.ts`、`settings.ts`，定义、归一化并校验项目档案。

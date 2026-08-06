@@ -54,12 +54,37 @@ describe("webhook status URL selection", () => {
           files: [{ diff: "large diff" }],
         },
       },
+      project: {
+        id: "uftest",
+        host: "gitlab.example.com",
+        projectId: 3,
+        pathWithNamespace: "root/uftest",
+        displayName: "UFtest",
+        enabled: true,
+        contextMarkdown: "Internal architecture notes.",
+        reviewFocus: ["auth"],
+        includePathPrefixes: [],
+        excludePathPatterns: [],
+        ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
+        source: "configured",
+        matchedAt: 3,
+      },
     } as any)).toEqual({
       id: "run_1",
       platform: "gitlab",
       status: "succeeded",
       createdAt: 1,
       updatedAt: 2,
+      project: {
+        id: "uftest",
+        host: "gitlab.example.com",
+        projectId: 3,
+        pathWithNamespace: "root/uftest",
+        displayName: "UFtest",
+        enabled: true,
+        source: "configured",
+        matchedAt: 3,
+      },
     })
   })
 

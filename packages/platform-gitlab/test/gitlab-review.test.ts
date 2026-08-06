@@ -14,6 +14,7 @@ import {
   parseReviewStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
+  resolveGitLabReviewProjectProfile,
   renderBlockedDiffComment,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
@@ -329,6 +330,75 @@ describe('GitLab review foundation', () => {
       includedProjects: [{ id: 3, pathWithNamespace: 'root/uftest' }],
       excludedProjects: [{ id: 4, pathWithNamespace: 'root/legacy' }],
       hookGroups: [{ id: 9, fullPath: 'root' }],
+    })
+  })
+
+  test('matches a configured GitLab project profile by host and project id', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.projects': [{
+        id: 'uftest',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        pathWithNamespace: 'root/uftest',
+        displayName: 'UFtest',
+        enabled: true,
+        contextMarkdown: 'UF domain and architecture notes.',
+        reviewFocus: ['authorization', 'api'],
+      }],
+    })
+
+    expect(resolveGitLabReviewProjectProfile(settings, {
+      host: 'gitlab.example.com',
+      projectId: 3,
+      projectPath: 'root/uftest',
+    })).toEqual({
+      status: 'matched',
+      project: expect.objectContaining({
+        id: 'uftest',
+        projectId: 3,
+        pathWithNamespace: 'root/uftest',
+        displayName: 'UFtest',
+        contextMarkdown: 'UF domain and architecture notes.',
+        reviewFocus: ['authorization', 'api'],
+      }),
+    })
+  })
+
+  test('keeps in-scope projects reviewable when no project profile exists', () => {
+    const settings = normalizeGitLabReviewSettings({})
+
+    expect(resolveGitLabReviewProjectProfile(settings, {
+      host: 'gitlab.example.com',
+      projectId: 9,
+      projectPath: 'root/unconfigured',
+    }, 1_000)).toEqual({
+      status: 'missing',
+      warning: 'project_profile_missing',
+      project: expect.objectContaining({
+        id: 'unconfigured:gitlab.example.com:9',
+        source: 'unconfigured',
+        matchedAt: 1_000,
+        pathWithNamespace: 'root/unconfigured',
+      }),
+    })
+  })
+
+  test('marks disabled project profiles as unavailable for review', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.projects': [{
+        id: 'archived',
+        host: 'gitlab.example.com',
+        projectId: 4,
+        enabled: false,
+      }],
+    })
+
+    expect(resolveGitLabReviewProjectProfile(settings, {
+      host: 'gitlab.example.com',
+      projectId: 4,
+    })).toMatchObject({
+      status: 'disabled',
+      project: { id: 'archived', enabled: false, source: 'configured' },
     })
   })
 

@@ -54,6 +54,15 @@ const platforms = {
       'review.webhookAutoReview': true,
       allowedHosts: ['gitlab.example.com'],
       'review.allowedProjectIds': ['123'],
+      'review.projects': [{
+        id: 'nine1bot',
+        host: 'gitlab.example.com',
+        projectId: 123,
+        pathWithNamespace: 'nine1/nine1bot',
+        displayName: 'Nine1Bot',
+        enabled: true,
+        contextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
+      }],
     },
   },
 }
@@ -306,6 +315,15 @@ describe('GitLab review controller', () => {
       idempotencyKey: 'gitlab:gitlab.example.com:123:mr:10:head_sha:abc123:auto:merge_request',
     })
     expect(result.accepted && result.context?.diff.stats.includedFileCount).toBe(1)
+    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      project: {
+        id: 'nine1bot',
+        projectId: 123,
+        pathWithNamespace: 'nine1/nine1bot',
+        displayName: 'Nine1Bot',
+        contextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
+      },
+    })
   })
 
   test('returns dry-run when dry-run payload has no embedded changes', async () => {
@@ -335,6 +353,85 @@ describe('GitLab review controller', () => {
     expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
       status: 'succeeded',
     })
+  })
+
+  test('keeps unprofiled in-scope projects reviewable with a stored warning', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 11,
+          last_commit: { id: 'unprofiled-head' },
+        },
+        changes: {
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.projects': [],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: ['project_profile_missing'] })
+    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      project: { source: 'unconfigured', projectId: 123 },
+      warnings: ['project_profile_missing'],
+    })
+  })
+
+  test('rejects reviews for disabled project profiles before creating a run', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'disabled-profile-head' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.projects': [{
+              id: 'nine1bot',
+              host: 'gitlab.example.com',
+              projectId: 123,
+              enabled: false,
+            }],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      error: 'project_profile_disabled',
+      httpStatus: 202,
+    })
+    expect(ReviewRunStore.list()).toHaveLength(1)
+    expect(ReviewRunStore.list()[0]).toMatchObject({ status: 'rejected', error: 'project_profile_disabled' })
   })
 
   test('deduplicates accepted review triggers by idempotency key', async () => {

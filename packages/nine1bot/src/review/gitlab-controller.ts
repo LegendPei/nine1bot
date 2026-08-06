@@ -10,6 +10,7 @@ import {
   isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
+  resolveGitLabReviewProjectProfile,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
   type GitLabReviewSecretRef,
@@ -310,6 +311,15 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   }
 
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
+  const projectResolution = resolveGitLabReviewProjectProfile(settings, {
+    host: parsed.trigger.host,
+    projectId: parsed.trigger.projectId,
+    projectPath: parsed.trigger.projectPath,
+  })
+  if (projectResolution.status === 'disabled') {
+    return reject(202, 'project_profile_disabled', idempotencyKey, parsed.trigger as unknown as Record<string, unknown>)
+  }
+  const projectWarnings = projectResolution.status === 'missing' ? [projectResolution.warning] : []
   const duplicate = ReviewRunStore.findByIdempotencyKey(idempotencyKey)
   if (duplicate && duplicate.status !== 'failed') {
     return {
@@ -328,6 +338,8 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     idempotencyKey,
     status: 'accepted',
     trigger: parsed.trigger as unknown as Record<string, unknown>,
+    project: projectResolution.project,
+    warnings: projectWarnings,
   })
 
   const fixtureChanges = extractDryRunChanges(input.payload)
@@ -378,6 +390,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         reason: context.diff.blockReason ?? 'MR diff is too large or was truncated by GitLab.',
       })
       const warnings = [
+        ...projectWarnings,
         context.diff.blockReason ?? 'GitLab diff blocked.',
         ...(publishWarning ? [publishWarning] : []),
       ]
@@ -396,7 +409,11 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         warnings,
       }
     }
-    ReviewRunStore.update(run.id, { status: settings.dryRun ? 'succeeded' : 'running', context })
+    ReviewRunStore.update(run.id, {
+      status: settings.dryRun ? 'succeeded' : 'running',
+      context,
+      warnings: projectWarnings,
+    })
     return {
       accepted: true,
       status: settings.dryRun ? 'dry-run' : 'accepted',
@@ -404,15 +421,18 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       runId: run.id,
       trigger: parsed.trigger,
       context,
-      warnings: [],
+      warnings: projectWarnings,
     }
   }
 
   ReviewRunStore.update(run.id, {
     status: settings.dryRun ? 'succeeded' : 'running',
-    warnings: settings.dryRun
-      ? ['Dry-run payload did not include changes; live GitLab changes fetch is not wired for this trigger.']
-      : ['Runtime review execution is not wired yet.'],
+    warnings: [
+      ...projectWarnings,
+      settings.dryRun
+        ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
+        : 'Runtime review execution is not wired yet.',
+    ],
   })
   return {
     accepted: true,
@@ -420,9 +440,12 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     idempotencyKey,
     runId: run.id,
     trigger: parsed.trigger,
-    warnings: settings.dryRun
-      ? ['Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.']
-      : ['Runtime review execution is not wired yet.'],
+    warnings: [
+      ...projectWarnings,
+      settings.dryRun
+        ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
+        : 'Runtime review execution is not wired yet.',
+    ],
   }
 }
 

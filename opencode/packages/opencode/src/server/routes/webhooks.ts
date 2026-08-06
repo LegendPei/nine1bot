@@ -415,8 +415,22 @@ async function testWebhook(c: any) {
 }
 
 export function publicGitLabReviewRun(run: ReviewRunRecord) {
-  const { context: _context, ...publicRun } = run
-  return publicRun
+  const { context: _context, project, ...publicRun } = run
+  return {
+    ...publicRun,
+    ...(project ? {
+      project: {
+        id: project.id,
+        host: project.host,
+        projectId: project.projectId,
+        pathWithNamespace: project.pathWithNamespace,
+        displayName: project.displayName,
+        enabled: project.enabled,
+        source: project.source,
+        matchedAt: project.matchedAt,
+      },
+    } : {}),
+  }
 }
 
 async function triggerGitLabReviewWebhook(c: any) {
