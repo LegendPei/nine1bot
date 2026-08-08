@@ -17,7 +17,7 @@ export function resolveGitLabReviewProjectProfile(
   now = Date.now(),
 ): GitLabReviewProjectResolution {
   const profile = settings.projects.find((candidate) =>
-    String(candidate.projectId) === String(target.projectId) && (!candidate.host || candidate.host === target.host),
+    String(candidate.projectId) === String(target.projectId) && candidate.host === target.host,
   )
   if (!profile) {
     return {

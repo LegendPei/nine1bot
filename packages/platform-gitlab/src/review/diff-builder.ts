@@ -13,6 +13,8 @@ export type BuildGitLabDiffManifestOptions = {
   maxDiffBytes?: number
   maxFiles?: number
   blockOnOverflow?: boolean
+  includePathPrefixes?: string[]
+  excludePathPatterns?: string[]
 }
 
 export function buildGitLabDiffManifest(
@@ -35,8 +37,12 @@ export function buildGitLabDiffManifest(
   const skipped: GitLabSkippedFile[] = []
   let includedBytes = 0
 
-  for (const change of changes) {
+  for (const change of prioritizedChanges(changes, options.includePathPrefixes ?? [])) {
     const path = displayPath(change)
+    if (matchesAnyGlob(path, options.excludePathPatterns ?? [])) {
+      skipped.push({ path, reason: 'profile-excluded' })
+      continue
+    }
     if (change.generated_file) {
       skipped.push({ path, reason: 'generated' })
       continue
@@ -85,6 +91,42 @@ export function buildGitLabDiffManifest(
       truncated,
     },
   }
+}
+
+function prioritizedChanges(changes: GitLabRawChange[], includePathPrefixes: string[]) {
+  return changes
+    .map((change, index) => ({ change, index, priority: pathPriority(displayPath(change), includePathPrefixes) }))
+    .sort((left, right) => left.priority - right.priority || left.index - right.index)
+    .map((entry) => entry.change)
+}
+
+function pathPriority(path: string, includePathPrefixes: string[]) {
+  if (includePathPrefixes.some((prefix) => prefix && path.startsWith(prefix))) return 0
+  if (/(^|\/)(auth|security|permissions?|rbac|database|migrations?|config|ci|\.gitlab)(\/|\.|$)/i.test(path)) return 1
+  return 2
+}
+
+function matchesAnyGlob(path: string, patterns: string[]) {
+  return patterns.some((pattern) => globRegExp(pattern).test(path))
+}
+
+function globRegExp(pattern: string) {
+  const normalized = pattern.trim().replace(/\\/g, '/')
+  let source = ''
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index]
+    if (char === '*' && normalized[index + 1] === '*') {
+      source += '.*'
+      index += 1
+    } else if (char === '*') {
+      source += '[^/]*'
+    } else if (char === '?') {
+      source += '[^/]'
+    } else {
+      source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
+    }
+  }
+  return new RegExp(`^${source}$`)
 }
 
 export function isBlacklistedReviewPath(path: string) {

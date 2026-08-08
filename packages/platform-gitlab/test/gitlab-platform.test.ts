@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { PlatformAdapterContext } from '@nine1bot/platform-protocol'
+import type { PlatformAdapterContext, PlatformDescriptor } from '@nine1bot/platform-protocol'
 import {
   buildGitLabPageContextPayload,
   createGitLabPlatformAdapter,
@@ -35,7 +35,8 @@ function platformContext(resourceRoot = join(import.meta.dir, '..')): PlatformAd
 
 describe('GitLab platform adapter package', () => {
   test('declares the structured project profile settings field', () => {
-    const fields = gitlabPlatformContribution.descriptor.config?.sections.flatMap((section) => section.fields) ?? []
+    const descriptor: PlatformDescriptor = gitlabPlatformContribution.descriptor
+    const fields = descriptor.config?.sections.flatMap((section) => section.fields) ?? []
 
     expect(fields).toContainEqual(expect.objectContaining({
       key: 'review.projects',

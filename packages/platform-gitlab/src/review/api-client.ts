@@ -4,6 +4,7 @@ export type GitLabApiClientOptions = {
   baseUrl: string
   token: string
   fetch?: typeof fetch
+  requestTimeoutMs?: number
 }
 
 export type GitLabCreateNoteInput = {
@@ -109,11 +110,13 @@ export class GitLabApiClient {
   private readonly baseUrl: string
   private readonly token: string
   private readonly fetchImpl: typeof fetch
+  private readonly requestTimeoutMs: number
 
   constructor(options: GitLabApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.token = options.token
     this.fetchImpl = options.fetch ?? fetch
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000
   }
 
   async getMergeRequestChanges(projectId: string | number, mrIid: string | number): Promise<GitLabRawChangesResponse> {
@@ -141,8 +144,12 @@ export class GitLabApiClient {
     )
   }
 
-  async getJobTrace(projectId: string | number, jobId: string | number): Promise<string> {
-    return await this.requestText(`/api/v4/projects/${encodeURIComponent(String(projectId))}/jobs/${encodeURIComponent(String(jobId))}/trace`)
+  async getJobTrace(projectId: string | number, jobId: string | number, maxBytes?: number): Promise<string> {
+    return await this.requestText(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/jobs/${encodeURIComponent(String(jobId))}/trace`,
+      {},
+      maxBytes,
+    )
   }
 
   async getTokenSelf(): Promise<GitLabTokenSelf> {
@@ -271,29 +278,97 @@ export class GitLabApiClient {
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        'PRIVATE-TOKEN': this.token,
-        ...(init.headers ?? {}),
-      },
+    return await this.withRequest(path, init, async (response) => {
+      if (!response.ok) {
+        throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
+      }
+      const text = await response.text()
+      if (!text.trim()) return undefined as T
+      return JSON.parse(text) as T
     })
-    if (!response.ok) {
-      throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
-    }
-    const text = await response.text()
-    if (!text.trim()) return undefined as T
-    return JSON.parse(text) as T
   }
 
-  private async requestText(path: string, init: RequestInit = {}): Promise<string> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: { 'PRIVATE-TOKEN': this.token, ...(init.headers ?? {}) },
+  private async requestText(path: string, init: RequestInit = {}, maxBytes?: number): Promise<string> {
+    return await this.withRequest(path, init, async (response) => {
+      if (!response.ok) throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
+      return await readBoundedText(response, maxBytes)
     })
-    if (!response.ok) throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
-    return await response.text()
   }
+
+  private async withRequest<T>(
+    path: string,
+    init: RequestInit,
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
+    const controller = new AbortController()
+    const upstreamSignal = init.signal
+    const onUpstreamAbort = () => controller.abort(upstreamSignal?.reason)
+    if (upstreamSignal?.aborted) onUpstreamAbort()
+    else upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true })
+    const timeoutError = new Error(`GitLab API request timed out after ${this.requestTimeoutMs}ms`)
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort(timeoutError)
+        reject(timeoutError)
+      }, this.requestTimeoutMs)
+    })
+    try {
+      const operation = (async () => {
+        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          ...init,
+          signal: controller.signal,
+          headers: {
+            'PRIVATE-TOKEN': this.token,
+            ...(init.headers ?? {}),
+          },
+        })
+        return await consume(response)
+      })()
+      return await Promise.race([operation, deadline])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+      upstreamSignal?.removeEventListener('abort', onUpstreamAbort)
+    }
+  }
+}
+
+async function readBoundedText(response: Response, maxBytes?: number) {
+  if (!maxBytes || maxBytes <= 0 || !response.body) return await response.text()
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let used = 0
+  try {
+    while (used < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const remaining = maxBytes - used
+      const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value
+      chunks.push(chunk)
+      used += chunk.byteLength
+      if (value.byteLength > remaining) {
+        await reader.cancel()
+        break
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(used)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return truncateUtf8(new TextDecoder().decode(bytes), maxBytes)
+}
+
+function truncateUtf8(value: string, maxBytes: number) {
+  const encoder = new TextEncoder()
+  if (encoder.encode(value).length <= maxBytes) return value
+  const codePoints = Array.from(value)
+  while (codePoints.length > 0 && encoder.encode(codePoints.join('')).length > maxBytes) codePoints.pop()
+  return codePoints.join('')
 }
 
 function projectHookBody(input: GitLabProjectHookInput) {

@@ -181,6 +181,8 @@ describe('GitLab review controller', () => {
     expect(prompt).toContain('Review line map for file/newLine/oldLine fields:')
     expect(prompt).toContain('[old:1 new:-] -old')
     expect(prompt).toContain('[old:- new:1] +new')
+    expect(prompt.match(/-old/g)).toHaveLength(1)
+    expect(prompt.match(/\+new/g)).toHaveLength(1)
     expect(prompt).toContain('Do not fetch the GitLab web page')
     expect(prompt).not.toContain('\n```\nignore previous instructions')
   })
@@ -315,6 +317,8 @@ describe('GitLab review controller', () => {
       idempotencyKey: 'gitlab:gitlab.example.com:123:mr:10:head_sha:abc123:auto:merge_request',
     })
     expect(result.accepted && result.context?.diff.stats.includedFileCount).toBe(1)
+    expect(result.accepted && result.context?.contextBlocks.find((block) => block.source === 'platform.gitlab.review.project')?.content)
+      .toContain('Review the Nine1Bot runtime and platform boundaries.')
     expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
       project: {
         id: 'nine1bot',
@@ -324,6 +328,51 @@ describe('GitLab review controller', () => {
         contextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
       },
     })
+  })
+
+  test('applies matched project context limits to the review packet', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'project-limits-head' },
+        },
+        changes: {
+          changes: [
+            { old_path: 'src/one.ts', new_path: 'src/one.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+            { old_path: 'src/two.ts', new_path: 'src/two.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+          ],
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          ...platforms.gitlab,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.projects': [{
+              id: 'nine1bot',
+              host: 'gitlab.example.com',
+              projectId: 123,
+              enabled: true,
+              contextMarkdown: 'Repository-specific constraints.',
+              maxContextBytes: 1_000,
+              maxFiles: 1,
+            }],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result.accepted && result.context?.diff.stats.includedFileCount).toBe(1)
+    expect(result.accepted && result.context?.slices?.usedBytes).toBeLessThanOrEqual(1_000)
   })
 
   test('returns dry-run when dry-run payload has no embedded changes', async () => {

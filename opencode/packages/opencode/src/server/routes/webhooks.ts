@@ -831,7 +831,7 @@ export const WebhookRoutes = lazy(() =>
       async (c) => {
         const run = ReviewRunStore.get(c.req.valid("param").runId)
         if (!run) return c.json({ error: "review_run_not_found" }, 404)
-        return c.json(run)
+        return c.json(publicGitLabReviewRun(run))
       },
     )
     .post(

@@ -12,6 +12,7 @@ import {
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   resolveGitLabReviewProjectProfile,
+  renderGitLabReviewSliceEvidence,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
   type GitLabReviewSecretRef,
@@ -146,66 +147,13 @@ function renderGitLabDiffEvidence(context: ReturnType<typeof buildGitLabReviewCo
     `Skipped files: ${skipped.length}`,
     context.diff.diffRefs?.headSha ? `Diff head SHA: ${context.diff.diffRefs.headSha}` : undefined,
     '',
-    ...slices.flatMap((slice, index) => [
-      `### File ${index + 1}: ${slice.file}`,
-      '```diff',
-      slice.hunk,
-      '```',
-      '',
-      'Review line map for file/newLine/oldLine fields:',
-      '```text',
-      renderReviewLineMap(slice.hunk),
-      '```',
-      '',
-    ]),
+    ...slices.map(renderGitLabReviewSliceEvidence),
     skipped.length > 0 ? 'Skipped files:' : undefined,
     ...skipped.map((file) => `- ${file.path}: ${file.reason}`),
     context.slices?.omissions.length ? 'Omitted hunks:' : undefined,
     ...(context.slices?.omissions ?? []).map((item) => `- ${item.file}: ${item.reason}`),
   ].filter(Boolean)
   return parts.join('\n')
-}
-
-function renderReviewLineMap(diff: string) {
-  const rows: string[] = []
-  let oldLine = 0
-  let newLine = 0
-
-  for (const line of diffLines(diff)) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (hunk) {
-      oldLine = Number(hunk[1])
-      newLine = Number(hunk[2])
-      rows.push(line)
-      continue
-    }
-    if (!oldLine && !newLine) continue
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      rows.push(`${lineRef(undefined, newLine)} ${line}`)
-      newLine += 1
-      continue
-    }
-    if (line.startsWith('-') && !line.startsWith('---')) {
-      rows.push(`${lineRef(oldLine, undefined)} ${line}`)
-      oldLine += 1
-      continue
-    }
-    if (!line.startsWith('\\')) {
-      rows.push(`${lineRef(oldLine, newLine)} ${line}`)
-      oldLine += 1
-      newLine += 1
-    }
-  }
-
-  return rows.join('\n')
-}
-
-function lineRef(oldLine?: number, newLine?: number) {
-  return `[old:${oldLine ?? '-'} new:${newLine ?? '-'}]`
-}
-
-function diffLines(diff: string) {
-  return diff.endsWith('\n') ? diff.slice(0, -1).split('\n') : diff.split('\n')
 }
 
 export function extractGitLabReviewStageResultFromRuntimeText(text: string): unknown | undefined {
@@ -399,8 +347,15 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     const context = buildGitLabReviewContext({
       trigger: parsed.trigger,
       changes,
-      maxDiffBytes: settings.maxDiffBytes,
-      maxFiles: settings.maxFiles,
+      project: projectResolution.project,
+      maxDiffBytes: Math.min(
+        settings.maxDiffBytes,
+        projectResolution.project.maxContextBytes ?? settings.maxDiffBytes,
+      ),
+      maxFiles: Math.min(
+        settings.maxFiles,
+        projectResolution.project.maxFiles ?? settings.maxFiles,
+      ),
       additionalContextBlocks,
       diagnostics: contextDiagnostics,
     })

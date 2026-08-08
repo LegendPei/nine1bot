@@ -153,6 +153,7 @@ type GitLabGroupRef = {
 }
 type GitLabProjectProfile = {
   id: string
+  host?: string
   projectId: string | number
   pathWithNamespace?: string
   displayName?: string
@@ -506,6 +507,7 @@ function parseGitLabProjectProfiles(input: string): GitLabProjectProfile[] {
       const ci = record.ci && typeof record.ci === 'object' ? record.ci as Record<string, unknown> : {}
       return [{
         id,
+        host: optionalProfileText(record.host),
         projectId,
         pathWithNamespace: optionalProfileText(record.pathWithNamespace),
         displayName: optionalProfileText(record.displayName),
@@ -556,6 +558,7 @@ function addGitLabProjectProfile(project: GitLabProjectRef) {
   if (profiles.some((profile) => String(profile.projectId) === String(project.id))) return
   setGitLabProjectProfiles([...profiles, {
     id: `project-${String(project.id)}`,
+    host: gitLabProjectHost(project.webUrl),
     projectId: project.id,
     pathWithNamespace: project.pathWithNamespace,
     displayName: project.pathWithNamespace,
@@ -565,6 +568,15 @@ function addGitLabProjectProfile(project: GitLabProjectRef) {
     excludePathPatterns: [],
     ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
   }])
+}
+
+function gitLabProjectHost(webUrl?: string) {
+  if (!webUrl) return undefined
+  try {
+    return new URL(webUrl).host
+  } catch {
+    return undefined
+  }
 }
 
 function updateGitLabProjectProfile(id: string, patch: Partial<GitLabProjectProfile>) {

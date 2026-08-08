@@ -27,11 +27,18 @@ export async function loadGitLabPipelineContext(input: {
     const pipelines = await input.client.getMergeRequestPipelines(input.projectId, input.mrIid)
     const pipeline = pipelines.find((candidate) => candidate.sha === input.headSha)
     if (!pipeline) return { diagnostics: ['pipeline_not_found_for_head_sha'] }
-    const failing = isUnhealthy(pipeline.status) ? await failedJobs(input, pipeline.id) : []
+    let failing: Awaited<ReturnType<typeof failedJobs>> = { jobs: [], diagnostics: [] }
+    if (isUnhealthy(pipeline.status)) {
+      try {
+        failing = await failedJobs(input, pipeline.id)
+      } catch (error) {
+        failing.diagnostics.push(`pipeline_jobs_unavailable:${errorName(error)}`)
+      }
+    }
     return {
       pipeline,
-      diagnostics: [],
-      contextBlock: block(pipeline, failing),
+      diagnostics: failing.diagnostics,
+      contextBlock: block(pipeline, failing.jobs),
     }
   } catch (error) {
     return { diagnostics: [`pipeline_context_unavailable:${error instanceof Error ? error.name : 'unknown'}`] }
@@ -41,10 +48,19 @@ export async function loadGitLabPipelineContext(input: {
 async function failedJobs(input: Parameters<typeof loadGitLabPipelineContext>[0], pipelineId: number) {
   const jobs = await input.client.getPipelineJobs(input.projectId, pipelineId)
   const selected = jobs.filter((job) => isUnhealthy(job.status)).slice(0, input.options.maxFailedJobs)
-  return await Promise.all(selected.map(async (job) => ({
-    ...job,
-    trace: input.options.includeFailedJobLogs ? safeTrace(await input.client.getJobTrace(input.projectId, job.id), input.options.maxJobLogBytes) : undefined,
-  })))
+  const results = await Promise.all(selected.map(async (job) => {
+    if (!input.options.includeFailedJobLogs) return { job }
+    try {
+      const trace = await input.client.getJobTrace(input.projectId, job.id, input.options.maxJobLogBytes)
+      return { job: { ...job, trace: safeTrace(trace, input.options.maxJobLogBytes) } }
+    } catch (error) {
+      return { job, diagnostic: `job_trace_unavailable:${job.id}:${errorName(error)}` }
+    }
+  }))
+  return {
+    jobs: results.map((result) => result.job),
+    diagnostics: results.flatMap((result) => result.diagnostic ? [result.diagnostic] : []),
+  }
 }
 
 function block(pipeline: GitLabPipelineSummary, jobs: Array<GitLabPipelineJob & { trace?: string }>) {
@@ -64,8 +80,23 @@ function isUnhealthy(status: string | undefined) {
 }
 
 function safeTrace(trace: string, maxBytes: number) {
-  const sanitized = trace.replace(/(?:token|password|secret|api[_-]?key)\s*[:=]\s*[^\s]+/gi, (match) =>
-    match.replace(/[:=].*/, '=***'),
-  )
-  return sanitized.length > maxBytes ? `${sanitized.slice(0, maxBytes)}\n[trace truncated]` : sanitized
+  const sanitized = trace
+    .replace(/\u001B(?:[@-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/authorization\s*:\s*bearer\s+[^\s]+/gi, 'Authorization: Bearer ***')
+    .replace(/(?:token|password|secret|api[_-]?key)\s*[:=]\s*[^\s]+/gi, (match) =>
+      match.replace(/[:=].*/, '=***'),
+    )
+  return truncateUtf8(sanitized, maxBytes)
+}
+
+function truncateUtf8(value: string, maxBytes: number) {
+  const encoder = new TextEncoder()
+  if (encoder.encode(value).length <= maxBytes) return value
+  const codePoints = Array.from(value)
+  while (codePoints.length > 0 && encoder.encode(codePoints.join('')).length > maxBytes) codePoints.pop()
+  return codePoints.join('')
+}
+
+function errorName(error: unknown) {
+  return error instanceof Error ? error.name : 'unknown'
 }

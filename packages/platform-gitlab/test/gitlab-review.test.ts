@@ -17,6 +17,7 @@ import {
   publishGitLabReviewResult,
   sliceGitLabReviewDiff,
   resolveGitLabReviewProjectProfile,
+  renderGitLabReviewSliceEvidence,
   renderBlockedDiffComment,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
@@ -338,10 +339,136 @@ describe('GitLab review foundation', () => {
   test('slices review diff at hunk boundaries within a deterministic byte budget', () => {
     const slices = sliceGitLabReviewDiff([
       { oldPath: 'src/auth.ts', newPath: 'src/auth.ts', diff: '@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-c\n+d\n', added: false, renamed: false, deleted: false, generated: false },
-    ], 20)
+    ], 131)
 
     expect(slices.slices).toEqual([{ file: 'src/auth.ts', hunk: '@@ -1 +1 @@\n-a\n+b\n' }])
     expect(slices.omissions).toEqual([{ file: 'src/auth.ts', reason: 'budget-exceeded' }])
+  })
+
+  test('bounds the rendered diff evidence rather than only raw hunk bytes', () => {
+    const budget = 140
+    const slices = sliceGitLabReviewDiff([
+      { oldPath: 'src/auth.ts', newPath: 'src/auth.ts', diff: '@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-c\n+d\n', added: false, renamed: false, deleted: false, generated: false },
+    ], budget)
+    const rendered = slices.slices.map(renderGitLabReviewSliceEvidence).join('')
+
+    expect(new TextEncoder().encode(rendered).length).toBeLessThanOrEqual(budget)
+    expect(slices.omissions).toEqual([{ file: 'src/auth.ts', reason: 'budget-exceeded' }])
+  })
+
+  test('slices hunks from a file that is larger than the context budget', () => {
+    const context = buildGitLabReviewContext({
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 3,
+        projectPath: 'root/uftest',
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'head',
+        eventName: 'merge_request',
+        mode: 'webhook',
+      },
+      changes: {
+        changes: [{
+          old_path: 'src/large.ts',
+          new_path: 'src/large.ts',
+          diff: '@@ -1 +1 @@\n-old one\n+new one\n@@ -20 +20 @@\n-old two\n+new two\n',
+        }],
+      },
+      maxDiffBytes: 144,
+    })
+
+    expect(context.diff.files).toHaveLength(1)
+    expect(context.slices?.slices).toEqual([{
+      file: 'src/large.ts',
+      hunk: '@@ -1 +1 @@\n-old one\n+new one\n',
+    }])
+    expect(context.slices?.omissions).toEqual([{ file: 'src/large.ts', reason: 'budget-exceeded' }])
+  })
+
+  test('injects only the matched project profile context and path rules', () => {
+    const context = buildGitLabReviewContext({
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 3,
+        projectPath: 'root/uftest',
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'head',
+        eventName: 'merge_request',
+        mode: 'webhook',
+      },
+      project: {
+        id: 'uftest',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        pathWithNamespace: 'root/uftest',
+        displayName: 'UFtest',
+        enabled: true,
+        contextMarkdown: 'UF domain boundary notes.',
+        reviewFocus: ['authorization'],
+        includePathPrefixes: ['src/security/'],
+        excludePathPatterns: ['**/*.generated.ts'],
+        maxContextBytes: 2_000,
+        maxFiles: 2,
+        ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8_000 },
+        source: 'configured',
+        matchedAt: 1_000,
+      },
+      changes: {
+        changes: [
+          { old_path: 'src/normal.ts', new_path: 'src/normal.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+          { old_path: 'src/security/auth.ts', new_path: 'src/security/auth.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+          { old_path: 'src/security/client.generated.ts', new_path: 'src/security/client.generated.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
+        ],
+      },
+      maxDiffBytes: 2_000,
+      maxFiles: 2,
+    })
+
+    const projectBlock = context.contextBlocks.find((block) => block.source === 'platform.gitlab.review.project')
+    expect(projectBlock?.content).toContain('UF domain boundary notes.')
+    expect(projectBlock?.content).toContain('authorization')
+    expect(context.diff.files.map((file) => file.newPath)).toEqual([
+      'src/security/auth.ts',
+      'src/normal.ts',
+    ])
+    expect(context.diff.skipped).toContainEqual({
+      path: 'src/security/client.generated.ts',
+      reason: 'profile-excluded',
+    })
+  })
+
+  test('bounds project, CI, and rendered diff evidence within the context budget', () => {
+    const budget = 500
+    const context = buildGitLabReviewContext({
+      trigger: {
+        host: 'gitlab.example.com', projectId: 3, projectPath: 'root/uftest', objectType: 'mr', objectIid: 10,
+        headSha: 'head', eventName: 'merge_request', mode: 'webhook',
+      },
+      project: {
+        id: 'uftest', host: 'gitlab.example.com', projectId: 3, enabled: true,
+        contextMarkdown: 'architecture '.repeat(200), reviewFocus: ['security'],
+        includePathPrefixes: [], excludePathPatterns: [],
+        ci: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8_000 },
+        source: 'configured', matchedAt: 1_000,
+      },
+      changes: {
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+      },
+      additionalContextBlocks: [{
+        id: 'gitlab-review-pipeline', layer: 'platform', source: 'platform.gitlab.review.pipeline', enabled: true,
+        priority: 89, lifecycle: 'turn', visibility: 'system-required', content: 'pipeline trace '.repeat(100),
+      }],
+      maxDiffBytes: budget,
+    })
+    const optionalBlockBytes = context.contextBlocks
+      .filter((block) => block.source === 'platform.gitlab.review.project' || block.source === 'platform.gitlab.review.pipeline')
+      .reduce((total, block) => total + new TextEncoder().encode(block.content).length, 0)
+
+    expect(optionalBlockBytes + (context.slices?.usedBytes ?? 0)).toBeLessThanOrEqual(budget)
+    expect(context.contextBlocks.find((block) => block.source === 'platform.gitlab.review.project')?.content)
+      .toContain('[project context truncated]')
   })
 
   test('matches a configured GitLab project profile by host and project id', () => {
@@ -391,6 +518,21 @@ describe('GitLab review foundation', () => {
         matchedAt: 1_000,
         pathWithNamespace: 'root/unconfigured',
       }),
+    })
+  })
+
+  test('does not reuse a hostless project profile across GitLab hosts', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.projects': [{ id: 'project-3', projectId: 3, enabled: true }],
+    })
+
+    expect(resolveGitLabReviewProjectProfile(settings, {
+      host: 'other-gitlab.example.com',
+      projectId: 3,
+      projectPath: 'root/other',
+    })).toMatchObject({
+      status: 'missing',
+      warning: 'project_profile_missing',
     })
   })
 
@@ -872,6 +1014,45 @@ describe('GitLab review foundation', () => {
     ])
   })
 
+  test('times out stalled GitLab API requests', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      requestTimeoutMs: 10,
+      fetch: ((_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+      })) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).rejects.toThrow('timed out')
+  })
+
+  test('keeps the GitLab API timeout active while reading a stalled response body', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      requestTimeoutMs: 10,
+      fetch: (async () => new Response(new ReadableStream<Uint8Array>({
+        start() {},
+      }), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    await expect(client.getJobTrace(3, 8, 5)).rejects.toThrow('timed out')
+  })
+
+  test('bounds job trace response reads before returning content', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async () => new Response('1234567890', { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const trace = await client.getJobTrace(3, 8, 5)
+
+    expect(new TextEncoder().encode(trace).length).toBeLessThanOrEqual(5)
+    expect(trace).toBe('12345')
+  })
+
   test('builds bounded failed-job pipeline context only for the review head SHA', async () => {
     const context = await loadGitLabPipelineContext({
       client: {
@@ -903,6 +1084,82 @@ describe('GitLab review foundation', () => {
     expect(context.contextBlock?.content).toContain('unit (test): failed')
     expect(context.contextBlock?.content).toContain('FAILED assertion')
     expect(context.contextBlock?.content).not.toContain('abc123')
+  })
+
+  test('keeps pipeline evidence when one failed job trace is unavailable', async () => {
+    const context = await loadGitLabPipelineContext({
+      client: {
+        async getMergeRequestPipelines() {
+          return [{ id: 2, sha: 'review-head', status: 'failed' }]
+        },
+        async getPipelineJobs() {
+          return [{ id: 3, name: 'unit', stage: 'test', status: 'failed' }]
+        },
+        async getJobTrace() {
+          throw new Error('trace forbidden')
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'review-head',
+      options: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 2, maxJobLogBytes: 120 },
+    })
+
+    expect(context.pipeline).toMatchObject({ id: 2, sha: 'review-head', status: 'failed' })
+    expect(context.diagnostics).toEqual(['job_trace_unavailable:3:Error'])
+    expect(context.contextBlock?.content).toContain('unit (test): failed')
+  })
+
+  test('keeps failed trace diagnostics in GitLab job order', async () => {
+    const context = await loadGitLabPipelineContext({
+      client: {
+        async getMergeRequestPipelines() {
+          return [{ id: 2, sha: 'review-head', status: 'failed' }]
+        },
+        async getPipelineJobs() {
+          return [
+            { id: 3, name: 'first', stage: 'test', status: 'failed' },
+            { id: 4, name: 'second', stage: 'test', status: 'failed' },
+          ]
+        },
+        async getJobTrace(_projectId, jobId) {
+          if (jobId === 3) await new Promise((resolve) => setTimeout(resolve, 10))
+          throw new Error('trace unavailable')
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'review-head',
+      options: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 2, maxJobLogBytes: 120 },
+    })
+
+    expect(context.diagnostics).toEqual([
+      'job_trace_unavailable:3:Error',
+      'job_trace_unavailable:4:Error',
+    ])
+  })
+
+  test('removes ANSI control sequences from failed job traces', async () => {
+    const context = await loadGitLabPipelineContext({
+      client: {
+        async getMergeRequestPipelines() {
+          return [{ id: 2, sha: 'review-head', status: 'failed' }]
+        },
+        async getPipelineJobs() {
+          return [{ id: 3, name: 'unit', stage: 'test', status: 'failed' }]
+        },
+        async getJobTrace() {
+          return '\u001b[31mFAILED\u001b[0m'
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'review-head',
+      options: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 2, maxJobLogBytes: 120 },
+    })
+
+    expect(context.contextBlock?.content).toContain('FAILED')
+    expect(context.contextBlock?.content).not.toContain('\u001b[')
   })
 
   test('renders validated inline suggestions in GitLab discussion bodies', async () => {
