@@ -573,7 +573,7 @@ function addGitLabProjectProfile(project: GitLabProjectRef) {
 function gitLabProjectHost(webUrl?: string) {
   if (!webUrl) return undefined
   try {
-    return new URL(webUrl).host
+    return new URL(webUrl).host.toLowerCase()
   } catch {
     return undefined
   }

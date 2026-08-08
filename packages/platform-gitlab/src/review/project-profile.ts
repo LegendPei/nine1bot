@@ -1,4 +1,5 @@
 import type { GitLabReviewProjectProfile, GitLabReviewSettings, GitLabReviewProjectSnapshot } from './settings'
+import { normalizeGitLabAuthority } from './host'
 
 export type GitLabReviewProjectTarget = {
   host: string
@@ -16,8 +17,11 @@ export function resolveGitLabReviewProjectProfile(
   target: GitLabReviewProjectTarget,
   now = Date.now(),
 ): GitLabReviewProjectResolution {
+  const targetHost = normalizeGitLabAuthority(target.host)
   const profile = settings.projects.find((candidate) =>
-    String(candidate.projectId) === String(target.projectId) && candidate.host === target.host,
+    String(candidate.projectId) === String(target.projectId) &&
+    Boolean(candidate.host) &&
+    normalizeGitLabAuthority(candidate.host) === targetHost,
   )
   if (!profile) {
     return {

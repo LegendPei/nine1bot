@@ -5,6 +5,8 @@ export type GitLabApiClientOptions = {
   token: string
   fetch?: typeof fetch
   requestTimeoutMs?: number
+  maxJsonResponseBytes?: number
+  maxErrorResponseBytes?: number
 }
 
 export type GitLabCreateNoteInput = {
@@ -111,12 +113,16 @@ export class GitLabApiClient {
   private readonly token: string
   private readonly fetchImpl: typeof fetch
   private readonly requestTimeoutMs: number
+  private readonly maxJsonResponseBytes: number
+  private readonly maxErrorResponseBytes: number
 
   constructor(options: GitLabApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.token = options.token
     this.fetchImpl = options.fetch ?? fetch
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000
+    this.maxJsonResponseBytes = options.maxJsonResponseBytes ?? 16_000_000
+    this.maxErrorResponseBytes = options.maxErrorResponseBytes ?? 16_000
   }
 
   async getMergeRequestChanges(projectId: string | number, mrIid: string | number): Promise<GitLabRawChangesResponse> {
@@ -280,9 +286,12 @@ export class GitLabApiClient {
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
-        throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
+        const errorBody = await readBoundedText(response, this.maxErrorResponseBytes).catch(() => undefined)
+        throw new GitLabApiError(response.status, response.statusText, errorBody?.text)
       }
-      const text = await response.text()
+      const body = await readBoundedText(response, this.maxJsonResponseBytes)
+      if (body.truncated) throw new Error(`GitLab API response exceeded ${this.maxJsonResponseBytes} bytes`)
+      const text = body.text
       if (!text.trim()) return undefined as T
       return JSON.parse(text) as T
     })
@@ -290,8 +299,11 @@ export class GitLabApiClient {
 
   private async requestText(path: string, init: RequestInit = {}, maxBytes?: number): Promise<string> {
     return await this.withRequest(path, init, async (response) => {
-      if (!response.ok) throw new GitLabApiError(response.status, response.statusText, await response.text().catch(() => undefined))
-      return await readBoundedText(response, maxBytes)
+      if (!response.ok) {
+        const errorBody = await readBoundedText(response, this.maxErrorResponseBytes).catch(() => undefined)
+        throw new GitLabApiError(response.status, response.statusText, errorBody?.text)
+      }
+      return (await readBoundedText(response, maxBytes ?? this.maxJsonResponseBytes)).text
     })
   }
 
@@ -334,24 +346,37 @@ export class GitLabApiClient {
 }
 
 async function readBoundedText(response: Response, maxBytes?: number) {
-  if (!maxBytes || maxBytes <= 0 || !response.body) return await response.text()
+  if (!maxBytes || maxBytes <= 0) {
+    await response.body?.cancel().catch(() => undefined)
+    return { text: '', truncated: Boolean(response.body) }
+  }
+  if (!response.body) return { text: '', truncated: false }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let used = 0
+  let completed = false
+  let truncated = false
   try {
     while (used < maxBytes) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        completed = true
+        break
+      }
       const remaining = maxBytes - used
       const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value
       chunks.push(chunk)
       used += chunk.byteLength
       if (value.byteLength > remaining) {
-        await reader.cancel()
+        truncated = true
         break
       }
     }
   } finally {
+    if (!completed) {
+      truncated = true
+      await reader.cancel().catch(() => undefined)
+    }
     reader.releaseLock()
   }
   const bytes = new Uint8Array(used)
@@ -360,7 +385,7 @@ async function readBoundedText(response: Response, maxBytes?: number) {
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return truncateUtf8(new TextDecoder().decode(bytes), maxBytes)
+  return { text: truncateUtf8(new TextDecoder().decode(bytes), maxBytes), truncated }
 }
 
 function truncateUtf8(value: string, maxBytes: number) {

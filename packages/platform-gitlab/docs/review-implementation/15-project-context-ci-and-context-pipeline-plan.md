@@ -121,7 +121,7 @@ getJobTrace(projectId, jobId): Promise<string>
 
 - 先完整保留高优先级文件的 hunk，直到耗尽 diff 预算。
 - 单文件过大时，按 hunk 而不是按字符串中间位置截断；每片带稳定 `sliceId`、路径、行范围和 byte 数。
-- 若一个 hunk 本身超预算，保留首尾的带行号窗口，并生成明确的 `omittedLines` 标记；不得伪造中间内容。
+- 当前实现对单个超过剩余预算的 hunk 整体省略并记录 `budget-exceeded`，不会截断在半行或伪造行号。首尾带行号窗口仍是后续增强项，不能在验收结论中声称已经支持。
 - 被跳过的文件和 hunk 都进入 `omissions`，包括原因 `budget-exceeded`、`profile-excluded`、`large-hunk-truncated`。
 - 预算分配先预留项目层和 CI 层，再将剩余预算用于 diff；任何可选层超预算均先缩减自身，不能挤掉项目身份或 diff manifest。
 
@@ -208,6 +208,33 @@ getJobTrace(projectId, jobId): Promise<string>
 - 用户可以在 GitLab 配置页创建并保存 UFtest 项目档案，无需手改配置文件。
 - 一个 UFtest review 在页面、run API、runtime prompt 和 GitLab 回写中都可追溯到 UFtest。
 - CI 不存在或读取失败的真实 MR 仍能完成 review；存在失败 pipeline 时审查结果可辨认其证据状态。
+
+### Batch 5：合并前稳定性与安全加固
+
+**状态：已完成（2026-08-08）**
+
+分支基于最新 `origin/main` 重整后完成两轮代码审查，并修复最终审查发现的预算、实例身份、幂等、CI 降级和响应体边界问题。
+
+**完成项**
+
+- context builder 直接生成最终 `diffEvidence`；项目、CI、精简 manifest、实际渲染的 hunk、跳过项和 omission 摘要共享同一字节预算。跳过/省略详情有数量和路径长度上限，controller 不再从原始 manifest 二次展开。
+- diff 文件名、代码行、项目 Markdown、用户 mention 和 CI/job trace 均以明确的 untrusted JSON evidence 注入；原始用户指令不再重复进入 system-required trigger block。
+- GitLab authority 在后端与 Web 统一按小写 `host[:port]` 规范化；同主机不同端口保持隔离，旧的无 host 档案不会跨实例匹配。
+- 幂等检查先于项目禁用策略执行；禁用档案产生的 rejected run 保存项目快照，配置变化不会让同一已接受事件生成第二条 run。
+- CI token 读取和整个可选 CI 分支纳入独立降级边界；单 job trace 失败不丢失其他 pipeline 证据，CI 异常仍不阻断 review。
+- GitLab API 请求覆盖连接与响应体读取超时；JSON、错误正文和 trace 均流式限量读取，到达上限时取消未消费流。`**/` 排除规则同时匹配仓库根目录和嵌套目录。
+
+**验证结果**
+
+- `bun run ci:test`：410 个测试通过，0 失败。
+- `bun run ci:typecheck`：全部 package 及 Web 类型检查通过。
+- `bun run build:web`：生产构建通过；仅保留既有的大 chunk 提示。
+
+**仍保留的边界**
+
+- GitLab 返回 `overflow` 或 `too_large` 且无法提供可信 diff 时继续硬阻断，不会依据不完整页面内容猜测审查结果。
+- 单个 hunk 大于全部剩余预算时当前整体省略；尚未实现首尾窗口切片。
+- 本轮不提供仓库级语义检索、向量索引或跨 MR 长期记忆；大 PR 优化仍以文件优先级、hunk 边界切片、确定性预算和显式 omission 为主。
 
 ## 稳定性与安全约束
 

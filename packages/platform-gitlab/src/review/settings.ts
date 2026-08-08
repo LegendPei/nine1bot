@@ -1,3 +1,5 @@
+import { normalizeGitLabAuthority } from './host'
+
 export type GitLabReviewSettings = {
   enabled: boolean
   baseUrl?: string
@@ -106,7 +108,10 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     enabled: booleanValue(setting(record, 'review.enabled', 'enabled'), defaultGitLabReviewSettings.enabled),
     baseUrl: optionalString(setting(record, 'review.baseUrl', 'baseUrl')),
     botMention: stringValue(setting(record, 'review.botMention', 'botMention'), defaultGitLabReviewSettings.botMention),
-    allowedHosts: stringList(setting(record, 'allowedHosts')),
+    allowedHosts: stringList(setting(record, 'allowedHosts')).flatMap((host) => {
+      const normalized = normalizeGitLabAuthority(host)
+      return normalized ? [normalized] : []
+    }),
     allowedProjectIds: legacyAllowedProjectIds,
     scopeMode,
     includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
@@ -241,7 +246,7 @@ function projectProfileList(input: unknown): GitLabReviewProjectProfile[] {
     ids.add(id)
     return [{
       id,
-      host: optionalString(item.host),
+      host: normalizeGitLabAuthority(optionalString(item.host)),
       projectId,
       pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
       displayName: optionalString(item.displayName) ?? optionalString(item.display_name),

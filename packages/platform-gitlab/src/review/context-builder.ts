@@ -1,5 +1,5 @@
 import { buildGitLabDiffManifest } from './diff-builder'
-import { sliceGitLabReviewDiff } from './diff-slicer'
+import { buildGitLabReviewDiffEvidence } from './diff-slicer'
 import { buildGitLabReviewIdempotencyKey } from './idempotency'
 import type { GitLabReviewProjectSnapshot } from './settings'
 import type { GitLabRawChangesResponse, GitLabReviewTrigger } from './types'
@@ -9,7 +9,9 @@ export type GitLabReviewContext = {
   idempotencyKey: string
   project?: GitLabReviewProjectSnapshot
   diff: ReturnType<typeof buildGitLabDiffManifest>
-  slices?: ReturnType<typeof sliceGitLabReviewDiff>
+  slices?: ReturnType<typeof buildGitLabReviewDiffEvidence>
+  diffEvidence?: string
+  contextBudgetBytes?: number
   diagnostics?: string[]
   contextBlocks: Array<{
     id: string
@@ -49,7 +51,14 @@ export function buildGitLabReviewContext(input: {
     includePathPrefixes: input.project?.includePathPrefixes,
     excludePathPatterns: input.project?.excludePathPatterns,
   })
-  const slices = sliceGitLabReviewDiff(candidateDiff.files, remainingBudget)
+  const manifestBlock = remainingBudget > 0
+    ? boundedBlock(diffManifestBlock(candidateDiff), remainingBudget, '[diff manifest truncated]')
+    : undefined
+  if (manifestBlock) remainingBudget = Math.max(0, remainingBudget - byteLength(manifestBlock.content))
+  const slices = buildGitLabReviewDiffEvidence(candidateDiff.files, remainingBudget, {
+    skipped: candidateDiff.skipped,
+    headSha: candidateDiff.diffRefs?.headSha,
+  })
   const diff = manifestFromSlices(candidateDiff, slices)
   return {
     trigger: input.trigger,
@@ -57,6 +66,8 @@ export function buildGitLabReviewContext(input: {
     project: input.project,
     diff,
     slices,
+    diffEvidence: slices.evidence,
+    contextBudgetBytes: contextBudget,
     diagnostics: input.diagnostics ?? [],
     contextBlocks: [
       {
@@ -71,16 +82,7 @@ export function buildGitLabReviewContext(input: {
       },
       ...(projectBlock ? [projectBlock] : []),
       ...additionalContextBlocks,
-      {
-        id: 'gitlab-review-diff-manifest',
-        layer: 'platform',
-        source: 'platform.gitlab.review.diff',
-        enabled: true,
-        priority: 88,
-        lifecycle: 'turn',
-        visibility: 'system-required',
-        content: renderDiffManifest(diff),
-      },
+      ...(manifestBlock ? [manifestBlock] : []),
     ],
   }
 }
@@ -115,7 +117,7 @@ function byteLength(value: string) {
 
 function manifestFromSlices(
   candidate: ReturnType<typeof buildGitLabDiffManifest>,
-  slices: ReturnType<typeof sliceGitLabReviewDiff>,
+  slices: ReturnType<typeof buildGitLabReviewDiffEvidence>,
 ) {
   if (candidate.blocked) return candidate
   const hunksByFile = new Map<string, string[]>()
@@ -181,20 +183,27 @@ function renderTrigger(trigger: GitLabReviewTrigger) {
     trigger.commitSha ? `Commit: ${trigger.commitSha}` : undefined,
     trigger.headSha ? `Head SHA: ${trigger.headSha}` : undefined,
     trigger.noteId ? `Note: ${trigger.noteId}` : undefined,
-    trigger.userInstruction ? `User instruction: ${trigger.userInstruction}` : undefined,
     trigger.focusTags?.length ? `Focus tags: ${trigger.focusTags.join(', ')}` : undefined,
     trigger.instructionRisk ? `Instruction risk: ${trigger.instructionRisk}` : undefined,
     `Mode: ${trigger.mode}`,
   ].filter(Boolean).join('\n')
 }
 
-function renderDiffManifest(diff: GitLabReviewContext['diff']) {
-  if (diff.blocked) return `Blocked: ${diff.blockReason ?? 'diff blocked'}`
-  return [
-    `Files included: ${diff.stats.includedFileCount}/${diff.stats.fileCount}`,
-    `Skipped files: ${diff.stats.skippedFileCount}`,
-    `Included bytes: ${diff.stats.includedBytes}`,
-    '',
-    ...diff.files.map((file) => `- ${file.newPath}${file.renamed ? ` (renamed from ${file.oldPath})` : ''}`),
-  ].join('\n')
+function diffManifestBlock(diff: GitLabReviewContext['diff']): GitLabReviewContext['contextBlocks'][number] {
+  const content = diff.blocked
+    ? `Blocked: ${diff.blockReason ?? 'diff blocked'}`
+    : [
+        'GitLab diff manifest',
+        'Bounded diff evidence and selection counts are supplied in the current user review prompt.',
+      ].join('\n')
+  return {
+    id: 'gitlab-review-diff-manifest',
+    layer: 'platform',
+    source: 'platform.gitlab.review.diff',
+    enabled: true,
+    priority: 88,
+    lifecycle: 'turn',
+    visibility: 'system-required',
+    content,
+  }
 }

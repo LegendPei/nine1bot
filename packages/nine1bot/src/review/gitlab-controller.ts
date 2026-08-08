@@ -12,7 +12,7 @@ import {
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   resolveGitLabReviewProjectProfile,
-  renderGitLabReviewSliceEvidence,
+  buildGitLabReviewDiffEvidence,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
   type GitLabReviewSecretRef,
@@ -124,7 +124,7 @@ export function buildGitLabReviewRuntimePrompt(input: {
     'Use the declared GitLab review skills. Produce structured review findings only from the supplied diff context. If an inline position is uncertain, omit line fields and prefer a top-level finding without a guessed line.',
     'The diff evidence below is the source of truth. Do not fetch the GitLab web page or local repository files just to recover diff content.',
     '',
-    renderGitLabDiffEvidence(input.context),
+    runtimeDiffEvidence(input.context),
     '',
     input.trigger.userInstruction
       ? 'When the instruction highlights a risk domain such as RBAC, auth, permissions, secrets, SQL, tokens, privacy, frontend UX, performance, concurrency, or tests, bias subagent routing and checklist depth toward that domain while still scanning for obvious blockers.'
@@ -138,22 +138,13 @@ export function buildGitLabReviewRuntimePrompt(input: {
   ].filter(Boolean).join('\n')
 }
 
-function renderGitLabDiffEvidence(context: ReturnType<typeof buildGitLabReviewContext>) {
-  const slices = context.slices?.slices ?? context.diff.files.map((file) => ({ file: file.newPath, hunk: file.diff }))
-  const skipped = context.diff.skipped ?? []
-  const parts = [
-    'GitLab diff evidence:',
-    `Hunks included: ${slices.length}`,
-    `Skipped files: ${skipped.length}`,
-    context.diff.diffRefs?.headSha ? `Diff head SHA: ${context.diff.diffRefs.headSha}` : undefined,
-    '',
-    ...slices.map(renderGitLabReviewSliceEvidence),
-    skipped.length > 0 ? 'Skipped files:' : undefined,
-    ...skipped.map((file) => `- ${file.path}: ${file.reason}`),
-    context.slices?.omissions.length ? 'Omitted hunks:' : undefined,
-    ...(context.slices?.omissions ?? []).map((item) => `- ${item.file}: ${item.reason}`),
-  ].filter(Boolean)
-  return parts.join('\n')
+function runtimeDiffEvidence(context: ReturnType<typeof buildGitLabReviewContext>) {
+  if (context.diffEvidence !== undefined) return context.diffEvidence
+  return buildGitLabReviewDiffEvidence(
+    context.diff.files,
+    context.contextBudgetBytes ?? 240_000,
+    { skipped: context.diff.skipped, headSha: context.diff.diffRefs?.headSha },
+  ).evidence
 }
 
 export function extractGitLabReviewStageResultFromRuntimeText(text: string): unknown | undefined {
@@ -259,17 +250,17 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   }
 
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
-  const projectResolution = resolveGitLabReviewProjectProfile(settings, {
-    host: parsed.trigger.host,
-    projectId: parsed.trigger.projectId,
-    projectPath: parsed.trigger.projectPath,
-  })
-  if (projectResolution.status === 'disabled') {
-    return reject(202, 'project_profile_disabled', idempotencyKey, parsed.trigger as unknown as Record<string, unknown>)
-  }
-  const projectWarnings = projectResolution.status === 'missing' ? [projectResolution.warning] : []
   const duplicate = ReviewRunStore.findByIdempotencyKey(idempotencyKey)
   if (duplicate && duplicate.status !== 'failed') {
+    if (duplicate.status === 'rejected') {
+      return {
+        accepted: false,
+        status: 'rejected',
+        error: duplicate.error ?? 'duplicate_gitlab_review_trigger',
+        httpStatus: 202,
+        runId: duplicate.id,
+      }
+    }
     return {
       accepted: true,
       status: 'accepted',
@@ -280,6 +271,21 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       duplicateOf: duplicate.id,
     }
   }
+  const projectResolution = resolveGitLabReviewProjectProfile(settings, {
+    host: parsed.trigger.host,
+    projectId: parsed.trigger.projectId,
+    projectPath: parsed.trigger.projectPath,
+  })
+  if (projectResolution.status === 'disabled') {
+    return reject(
+      202,
+      'project_profile_disabled',
+      idempotencyKey,
+      parsed.trigger as unknown as Record<string, unknown>,
+      projectResolution.project,
+    )
+  }
+  const projectWarnings = projectResolution.status === 'missing' ? [projectResolution.warning] : []
 
   const run = ReviewRunStore.create({
     platform: 'gitlab',
@@ -327,21 +333,27 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     const contextDiagnostics: string[] = []
     let ci: ReviewRunCiSummary | undefined
     if (projectResolution.project.ci.enabled && parsed.trigger.objectType === 'mr' && parsed.trigger.objectIid && parsed.trigger.headSha) {
-      const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
-      if (token) {
-        const pipelineContext = await loadGitLabPipelineContext({
-          client: new GitLabApiClient({ baseUrl: settings.baseUrl ?? `https://${parsed.trigger.host}`, token, fetch: input.fetch }),
-          projectId: parsed.trigger.projectId,
-          mrIid: parsed.trigger.objectIid,
-          headSha: parsed.trigger.headSha,
-          options: projectResolution.project.ci,
-        })
-        if (pipelineContext.contextBlock) additionalContextBlocks.push(pipelineContext.contextBlock)
-        contextDiagnostics.push(...pipelineContext.diagnostics)
-        ci = { pipeline: pipelineContext.pipeline, diagnostics: pipelineContext.diagnostics }
-      } else {
-        contextDiagnostics.push('pipeline_context_token_missing')
-        ci = { diagnostics: ['pipeline_context_token_missing'] }
+      try {
+        const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
+        if (token) {
+          const pipelineContext = await loadGitLabPipelineContext({
+            client: new GitLabApiClient({ baseUrl: settings.baseUrl ?? `https://${parsed.trigger.host}`, token, fetch: input.fetch }),
+            projectId: parsed.trigger.projectId,
+            mrIid: parsed.trigger.objectIid,
+            headSha: parsed.trigger.headSha,
+            options: projectResolution.project.ci,
+          })
+          if (pipelineContext.contextBlock) additionalContextBlocks.push(pipelineContext.contextBlock)
+          contextDiagnostics.push(...pipelineContext.diagnostics)
+          ci = { pipeline: pipelineContext.pipeline, diagnostics: pipelineContext.diagnostics }
+        } else {
+          contextDiagnostics.push('pipeline_context_token_missing')
+          ci = { diagnostics: ['pipeline_context_token_missing'] }
+        }
+      } catch (error) {
+        const diagnostic = `pipeline_context_unavailable:${safeErrorName(error)}`
+        contextDiagnostics.push(diagnostic)
+        ci = { diagnostics: [diagnostic] }
       }
     }
     const context = buildGitLabReviewContext({
@@ -831,6 +843,7 @@ function reject(
   error: string,
   idempotencyKey?: string,
   trigger?: Record<string, unknown>,
+  project?: ReturnType<typeof resolveGitLabReviewProjectProfile>['project'],
 ): GitLabReviewWebhookResult {
   const run = ReviewRunStore.create({
     platform: 'gitlab',
@@ -838,6 +851,7 @@ function reject(
     status: 'rejected',
     error,
     ...(trigger ? { trigger } : {}),
+    ...(project ? { project } : {}),
   })
   return {
     accepted: false,
@@ -846,6 +860,10 @@ function reject(
     httpStatus,
     runId: run.id,
   }
+}
+
+function safeErrorName(error: unknown) {
+  return error instanceof Error && error.name ? error.name : 'unknown'
 }
 
 function rejectWithoutRun(httpStatus: number, error: string): GitLabReviewWebhookResult {

@@ -8,6 +8,6 @@ describe('GitLab project profile host identity', () => {
 
     expect(source).toContain('host: optionalProfileText(record.host)')
     expect(source).toContain('host: gitLabProjectHost(project.webUrl)')
-    expect(source).toContain('return new URL(webUrl).host')
+    expect(source).toContain('return new URL(webUrl).host.toLowerCase()')
   })
 })
