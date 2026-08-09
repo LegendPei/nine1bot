@@ -19,7 +19,7 @@
 | 5 | 已完成 | OpenCode wrapper tool 与首消息竞态修复（`0754bb7`） |
 | 6 | 已完成 | 删除 CI 预取并迁移 prompt/config/workflow（`f9bb243`） |
 | 7 | 已完成 | Web profile helper 与行为 round-trip（`216a10f`） |
-| 8 | 进行中 | 全量本地验证已通过；文档提交和远端推送收口中 |
+| 8 | 已完成 | 全量本地验证、中文文档和现有 PR 分支推送均已完成 |
 
 本计划的代码步骤均已完成。真实 GitLab UFtest 部署复验不计入本地完成状态，仍作为部署验收项保留；不得用 mock 测试替代。
 
@@ -729,7 +729,7 @@ git add -f packages/platform-gitlab/docs/review-implementation/15-project-contex
 git commit -m "docs(gitlab): record on-demand CI implementation"
 ```
 
-- [ ] **Step 7: 核对并推送 PR 分支**
+- [x] **Step 7: 核对并推送 PR 分支**
 
 Run: `git fetch origin`
 
