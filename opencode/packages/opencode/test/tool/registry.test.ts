@@ -86,7 +86,9 @@ describe("tool.registry", () => {
       directory: tmp.path,
       fn: async () => {
         clearBridgeServer()
-        expect(await ToolRegistry.ids()).not.toContain("browser_status")
+        const defaultIds = await ToolRegistry.ids()
+        expect(defaultIds).not.toContain("browser_status")
+        expect(defaultIds).toContain("gitlab_ci_inspect")
 
         setBridgeServer({} as any)
         const ids = await ToolRegistry.ids()

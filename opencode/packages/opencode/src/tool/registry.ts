@@ -8,6 +8,7 @@ import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { TodoWriteTool, TodoReadTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
+import { GitLabCiInspectTool } from "./gitlab-ci-inspect"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
@@ -156,6 +157,7 @@ export namespace ToolRegistry {
       WriteTool,
       TaskTool,
       WebFetchTool,
+      GitLabCiInspectTool,
       TodoWriteTool,
       TodoReadTool,
       WebSearchTool,

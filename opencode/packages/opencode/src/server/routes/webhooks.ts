@@ -591,10 +591,13 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       permissionDenyMessage: "GitLab review runs are non-interactive, so permission requests are denied.",
       questionDenyMessage: "Question request denied automatically in GitLab review run.",
     },
+    async onSessionCreated({ sessionID }) {
+      const updated = ReviewRunStore.update(result.runId, gitLabReviewSessionCreatedPatch(sessionID))
+      if (!updated) throw new Error("review_run_not_found")
+    },
     async onControllerResponse(response) {
       ReviewRunStore.update(result.runId, {
         status: response.accepted ? "running" : "failed",
-        sessionId: response.sessionID,
         turnSnapshotId: response.turnSnapshotId,
         ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
       })
@@ -647,6 +650,15 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       await reportStoredGitLabReviewFailure(result.runId, "runtime_finished", error)
     },
   })
+}
+
+export function gitLabReviewSessionCreatedPatch(sessionID: string) {
+  return {
+    status: "running" as const,
+    sessionId: sessionID,
+    turnSnapshotId: undefined,
+    error: undefined,
+  } satisfies Parameters<typeof ReviewRunStore.update>[1]
 }
 
 async function reportStoredGitLabReviewFailure(runId: string, phase: string, error: string) {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewRetryPatch,
+  gitLabReviewSessionCreatedPatch,
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
   resolveGitLabReviewRuntimeDirectory,
@@ -149,6 +150,15 @@ describe("webhook status URL selection", () => {
         "old warning",
         "Review run manually retried from stored GitLab context.",
       ],
+    })
+  })
+
+  test("binds a fresh review session before runtime message delivery", () => {
+    expect(gitLabReviewSessionCreatedPatch("session_new")).toEqual({
+      status: "running",
+      sessionId: "session_new",
+      turnSnapshotId: undefined,
+      error: undefined,
     })
   })
 

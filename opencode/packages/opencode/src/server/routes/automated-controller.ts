@@ -46,6 +46,7 @@ export type AutomatedControllerInput = {
   interactionPolicy: AutomatedInteractionPolicy
   timeoutMs: number
   timeoutMessage?: string
+  onSessionCreated?: (response: { sessionID: string }) => Promise<void>
   onControllerResponse?: (response: AutomatedControllerResponse) => Promise<void>
   onRuntimeOutput?: (output: AutomatedRuntimeOutput) => Promise<void>
   onFinished?: (result: { status: AutomatedRunStatus; error?: string }) => Promise<void>
@@ -59,24 +60,41 @@ export type AutomatedControllerInput = {
 
 export type AutomatedControllerRunner = typeof runAutomatedControllerSession
 
+export async function createAndSendAutomatedControllerTurn<
+  TSession extends { sessionId: string },
+  TMessage,
+>(input: {
+  createSession: () => Promise<TSession>
+  onSessionCreated?: (response: { sessionID: string }) => Promise<void>
+  sendMessage: (sessionID: string) => Promise<TMessage>
+}) {
+  const sessionResponse = await input.createSession()
+  await input.onSessionCreated?.({ sessionID: sessionResponse.sessionId })
+  const messageResponse = await input.sendMessage(sessionResponse.sessionId)
+  return { sessionResponse, messageResponse }
+}
+
 export async function runAutomatedControllerSession(input: AutomatedControllerInput): Promise<AutomatedControllerResponse> {
   return Instance.provide({
     directory: input.directory,
     init: InstanceBootstrap,
     async fn() {
-      const sessionResponse = await createControllerSession({
-        directory: input.directory,
-        title: input.title,
-        permission: input.permission,
-        sessionChoice: input.sessionChoice,
-        entry: input.entry,
-        clientCapabilities: input.clientCapabilities,
-      })
-      const messageResponse = await sendControllerMessage(sessionResponse.sessionId, {
-        parts: input.parts,
-        context: input.context,
-        entry: input.entry,
-        clientCapabilities: input.clientCapabilities,
+      const { sessionResponse, messageResponse } = await createAndSendAutomatedControllerTurn({
+        createSession: async () => await createControllerSession({
+          directory: input.directory,
+          title: input.title,
+          permission: input.permission,
+          sessionChoice: input.sessionChoice,
+          entry: input.entry,
+          clientCapabilities: input.clientCapabilities,
+        }),
+        onSessionCreated: input.onSessionCreated,
+        sendMessage: async (sessionID) => await sendControllerMessage(sessionID, {
+          parts: input.parts,
+          context: input.context,
+          entry: input.entry,
+          clientCapabilities: input.clientCapabilities,
+        }),
       })
       const response = {
         accepted: messageResponse.response.accepted,
