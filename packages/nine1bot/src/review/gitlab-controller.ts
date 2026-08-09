@@ -12,6 +12,7 @@ import {
   loadGitLabPipelineContext,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
+  resolveGitLabApiBaseUrl,
   resolveGitLabReviewProjectProfile,
   buildGitLabReviewDiffEvidence,
   validateGitLabWebhookToken,
@@ -250,6 +251,12 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     return reject(202, parsed.reason, undefined, summarizeGitLabWebhookEvent(input.payload, parsed.reason))
   }
 
+  const apiBaseUrl = resolveGitLabApiBaseUrl({
+    configuredBaseUrl: settings.baseUrl,
+    triggerHost: parsed.trigger.host,
+  })
+  if (!apiBaseUrl.ok) return rejectWithoutRun(400, apiBaseUrl.reason)
+
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
   const duplicate = ReviewRunStore.findByIdempotencyKey(idempotencyKey)
   if (duplicate && duplicate.status !== 'failed') {
@@ -346,8 +353,15 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       try {
         const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
         if (token) {
+          const resolvedClient = gitLabApiClientForHost({
+            settings,
+            host: parsed.trigger.host,
+            token,
+            fetch: input.fetch,
+          })
+          if (!resolvedClient.ok) throw new Error(resolvedClient.reason)
           const pipelineContext = await loadGitLabPipelineContext({
-            client: new GitLabApiClient({ baseUrl: settings.baseUrl ?? `https://${parsed.trigger.host}`, token, fetch: input.fetch }),
+            client: resolvedClient.client,
             projectId: parsed.trigger.projectId,
             mrIid: parsed.trigger.objectIid,
             headSha: parsed.trigger.headSha,
@@ -482,6 +496,15 @@ export async function publishGitLabReviewRunResult(input: {
     return { published: false, runId: input.runId, error: 'dry_run_enabled', warnings: [warning] }
   }
 
+  const apiBaseUrl = resolveGitLabApiBaseUrl({
+    configuredBaseUrl: settings.baseUrl,
+    triggerHost: trigger.host,
+  })
+  if (!apiBaseUrl.ok) {
+    ReviewRunStore.update(input.runId, { status: 'failed', error: apiBaseUrl.reason })
+    return { published: false, runId: input.runId, error: apiBaseUrl.reason }
+  }
+
   const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
   if (!token) {
     ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_token_missing' })
@@ -509,11 +532,7 @@ export async function publishGitLabReviewRunResult(input: {
     return { published: false, runId: input.runId, error: 'gitlab_review_object_missing' }
   }
 
-  const client = new GitLabApiClient({
-    baseUrl: settings.baseUrl ?? `https://${trigger.host}`,
-    token,
-    fetch: input.fetch,
-  })
+  const client = new GitLabApiClient({ baseUrl: apiBaseUrl.baseUrl, token, fetch: input.fetch })
   let published: Awaited<ReturnType<typeof publishGitLabReviewResult>>
   try {
     published = await publishGitLabReviewResult({
@@ -616,10 +635,15 @@ async function maybeWriteFailureComment(input: {
   if (!object) return false
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return false
-  const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
-  const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
+  const resolvedClient = gitLabApiClientForHost({
+    settings: input.settings,
+    host: input.trigger.host,
+    token,
+    fetch: input.fetch,
+  })
+  if (!resolvedClient.ok) return false
   try {
-    await client.createNote({
+    await resolvedClient.client.createNote({
       projectId: input.trigger.projectId,
       resource: object.resource,
       resourceId: object.resourceId,
@@ -680,13 +704,15 @@ async function writeRejectedMentionComment(input: {
 }): Promise<boolean> {
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return false
-  const client = new GitLabApiClient({
-    baseUrl: input.settings.baseUrl ?? `https://${input.request.target.host}`,
+  const resolvedClient = gitLabApiClientForHost({
+    settings: input.settings,
+    host: input.request.target.host,
     token,
     fetch: input.fetch,
   })
+  if (!resolvedClient.ok) return false
   try {
-    await client.createNote({
+    await resolvedClient.client.createNote({
       projectId: input.request.target.projectId,
       resource: input.request.target.resource,
       resourceId: input.request.target.resourceId,
@@ -809,10 +835,16 @@ async function loadLiveChanges(input: {
   fetch?: typeof fetch
 }): Promise<GitLabRawChangesResponse | undefined> {
   if (input.settings.dryRun) return undefined
-  const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return undefined
-  const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
+  const resolvedClient = gitLabApiClientForHost({
+    settings: input.settings,
+    host: input.trigger.host,
+    token,
+    fetch: input.fetch,
+  })
+  if (!resolvedClient.ok) throw new Error(resolvedClient.reason)
+  const client = resolvedClient.client
   if (input.trigger.objectType === 'mr' && input.trigger.objectIid) {
     return await client.getMergeRequestChanges(input.trigger.projectId, input.trigger.objectIid)
   }
@@ -832,10 +864,15 @@ async function maybeWriteBlockedComment(input: {
   if (input.settings.dryRun || input.trigger.objectType !== 'mr' || !input.trigger.objectIid) return
   const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
   if (!token) return
-  const baseUrl = input.settings.baseUrl ?? `https://${input.trigger.host}`
-  const client = new GitLabApiClient({ baseUrl, token, fetch: input.fetch })
+  const resolvedClient = gitLabApiClientForHost({
+    settings: input.settings,
+    host: input.trigger.host,
+    token,
+    fetch: input.fetch,
+  })
+  if (!resolvedClient.ok) return resolvedClient.reason
   try {
-    await client.createNote({
+    await resolvedClient.client.createNote({
       projectId: input.trigger.projectId,
       resource: 'merge_requests',
       resourceId: input.trigger.objectIid,
@@ -843,6 +880,23 @@ async function maybeWriteBlockedComment(input: {
     })
   } catch (error) {
     return gitLabApiFailureMessage('blocked_comment', error)
+  }
+}
+
+function gitLabApiClientForHost(input: {
+  settings: GitLabReviewSettings
+  host: string
+  token: string
+  fetch?: typeof fetch
+}) {
+  const resolved = resolveGitLabApiBaseUrl({
+    configuredBaseUrl: input.settings.baseUrl,
+    triggerHost: input.host,
+  })
+  if (!resolved.ok) return resolved
+  return {
+    ok: true as const,
+    client: new GitLabApiClient({ baseUrl: resolved.baseUrl, token: input.token, fetch: input.fetch }),
   }
 }
 

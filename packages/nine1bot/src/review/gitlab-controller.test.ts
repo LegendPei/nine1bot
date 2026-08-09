@@ -1314,6 +1314,126 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('rejects a webhook before loading changes when configured GitLab host differs from the trigger', async () => {
+    const calls: string[] = []
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab-b.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'host-mismatch-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            allowedHosts: ['gitlab-b.example.com'],
+            'review.baseUrl': 'https://gitlab-a.example.com',
+            'review.dryRun': false,
+            'review.projects': [{
+              id: 'nine1bot-b',
+              host: 'gitlab-b.example.com',
+              projectId: 123,
+              nine1botProjectID: 'project-nine1bot',
+              enabled: true,
+            }],
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request) => {
+        calls.push(String(url))
+        return Response.json({ changes: [] })
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      httpStatus: 400,
+      error: 'gitlab_host_mismatch',
+    })
+    expect(calls).toEqual([])
+  })
+
+  test('refuses to publish a review through a configured GitLab host that differs from the run trigger', async () => {
+    const calls: string[] = []
+    const fetchMock = (async (url: string | URL | Request) => {
+      calls.push(String(url))
+      return Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-host-sha' },
+        changes: [{
+          old_path: 'src/app.ts',
+          new_path: 'src/app.ts',
+          diff: '@@ -1 +1 @@\n-old\n+new\n',
+        }],
+      })
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'publish-host-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+    calls.length = 0
+
+    const published = await publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab-other.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: {
+        stage: 'closed',
+        status: 'ok',
+        summary: 'Review complete.',
+        findings: [],
+        nextActions: [],
+      },
+    })
+
+    expect(published).toMatchObject({ published: false, error: 'gitlab_host_mismatch' })
+    expect(calls).toEqual([])
+  })
+
   test('stores blocked runtime stage results as blocked after publishing summary', async () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {

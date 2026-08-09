@@ -19,6 +19,7 @@ import {
   resolveGitLabReviewProjectProfile,
   renderGitLabReviewSliceEvidence,
   renderBlockedDiffComment,
+  resolveGitLabApiBaseUrl,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
@@ -26,6 +27,21 @@ import {
 } from '../src'
 
 describe('GitLab review foundation', () => {
+  test('resolves GitLab API base URLs only for the trigger authority', () => {
+    expect(resolveGitLabApiBaseUrl({
+      configuredBaseUrl: 'https://gitlab-a.example.com',
+      triggerHost: 'gitlab-b.example.com',
+    })).toEqual({ ok: false, reason: 'gitlab_host_mismatch' })
+
+    expect(resolveGitLabApiBaseUrl({
+      configuredBaseUrl: 'http://gitlab.example.com:8443/root',
+      triggerHost: 'gitlab.example.com:8443',
+    })).toEqual({ ok: true, baseUrl: 'http://gitlab.example.com:8443/root' })
+
+    expect(resolveGitLabApiBaseUrl({ triggerHost: 'gitlab.example.com:8443' }))
+      .toEqual({ ok: true, baseUrl: 'https://gitlab.example.com:8443' })
+  })
+
   test('builds MR idempotency keys from head SHA and note id', () => {
     const base = {
       host: 'gitlab.example.com',
