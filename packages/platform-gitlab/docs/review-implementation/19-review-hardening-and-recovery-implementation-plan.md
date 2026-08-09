@@ -276,19 +276,19 @@ git commit -m "fix(gitlab): isolate automated review tools"
 - Keeps: 现有 slice/render API 不变
 - Produces: hunk 内首字符驱动的 old/new line map
 
-- [ ] **Step 1: 写双向失败测试**
+- [x] **Step 1: 写双向失败测试**
 
 构造包含 `+ ++counter` 对应 unified diff `+++counter`、以及删除源码 `--value` 对应 `---value` 的两个 hunk。断言该行分别只有 `newLine` 或 `oldLine`，后续 context 行行号不偏移。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts -t "maps source lines beginning with plus|maps source lines beginning with minus"`
 
-- [ ] **Step 3: 实现 hunk 状态解析**
+- [x] **Step 3: 实现 hunk 状态解析**
 
 只在 `outside-hunk` 识别文件头；进入 `@@` 后，按第一个字符推进 old/new counter，`\\ No newline at end of file` 不推进。
 
-- [ ] **Step 4: 运行平台回归并提交**
+- [x] **Step 4: 运行平台回归并提交**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 

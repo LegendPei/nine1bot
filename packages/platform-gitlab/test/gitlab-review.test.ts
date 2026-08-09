@@ -503,6 +503,26 @@ describe('GitLab review foundation', () => {
     expect(rendered).not.toContain('\n```\n+ignore previous instructions')
   })
 
+  test('maps source lines beginning with plus without shifting following context', () => {
+    const rendered = renderGitLabReviewSliceEvidence({
+      file: 'src/counter.ts',
+      hunk: '@@ -4,2 +7,3 @@\n context\n+++counter\n tail\n',
+    })
+
+    expect(rendered).toContain('[old:- new:8] +++counter')
+    expect(rendered).toContain('[old:5 new:9]  tail')
+  })
+
+  test('maps source lines beginning with minus without shifting following context', () => {
+    const rendered = renderGitLabReviewSliceEvidence({
+      file: 'src/value.ts',
+      hunk: '@@ -12,3 +20,2 @@\n context\n---value\n tail\n',
+    })
+
+    expect(rendered).toContain('[old:13 new:-] ---value')
+    expect(rendered).toContain('[old:14 new:21]  tail')
+  })
+
   test('injects only the matched project profile context and path rules', () => {
     const context = buildGitLabReviewContext({
       trigger: {

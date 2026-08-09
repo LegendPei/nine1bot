@@ -145,22 +145,24 @@ function renderReviewLineMap(diff: string) {
   const rows: string[] = []
   let oldLine = 0
   let newLine = 0
+  let inHunk = false
 
   for (const line of diffLines(diff)) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
     if (hunk) {
       oldLine = Number(hunk[1])
       newLine = Number(hunk[2])
+      inHunk = true
       rows.push(line)
       continue
     }
-    if (!oldLine && !newLine) continue
-    if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (!inHunk) continue
+    if (line.startsWith('+')) {
       rows.push(`${lineRef(undefined, newLine)} ${line}`)
       newLine += 1
       continue
     }
-    if (line.startsWith('-') && !line.startsWith('---')) {
+    if (line.startsWith('-')) {
       rows.push(`${lineRef(oldLine, undefined)} ${line}`)
       oldLine += 1
       continue
