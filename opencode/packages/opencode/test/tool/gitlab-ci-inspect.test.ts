@@ -16,10 +16,10 @@ const context: Tool.Context = {
 
 describe("gitlab_ci_inspect tool", () => {
   test("derives review identity from the tool session and exposes only bounded actions", async () => {
-    const calls: Array<{ sessionId: string; request: unknown }> = []
+    const calls: Array<{ sessionId: string; request: unknown; signal: AbortSignal }> = []
     const tool = createGitLabCiInspectTool({
-      async inspect(sessionId, request) {
-        calls.push({ sessionId, request })
+      async inspect(sessionId, request, signal) {
+        calls.push({ sessionId, request, signal })
         return {
           ok: true,
           action: "list",
@@ -33,6 +33,9 @@ describe("gitlab_ci_inspect tool", () => {
           pipeline: { id: 55, sha: "head-a", status: "success" },
           jobs: [{ id: 56, name: "build", status: "success" }],
           diagnostics: [],
+          truncated: false,
+          totalJobs: 1,
+          returnedJobs: 1,
         }
       },
     })
@@ -43,6 +46,7 @@ describe("gitlab_ci_inspect tool", () => {
     expect(calls).toEqual([{
       sessionId: "session-review-1",
       request: { action: "list" },
+      signal: context.abort,
     }])
     expect(result.title).toBe("GitLab CI inspection")
     expect(JSON.parse(result.output)).toMatchObject({
@@ -61,6 +65,36 @@ describe("gitlab_ci_inspect tool", () => {
       await expect(initialized.execute(forbidden as any, context)).rejects.toThrow("invalid arguments")
     }
     expect(calls).toHaveLength(1)
+  })
+
+  test("marks bounded list output as truncated when jobs were omitted", async () => {
+    const tool = createGitLabCiInspectTool({
+      async inspect() {
+        return {
+          ok: true,
+          action: "list",
+          observedAt: 1,
+          target: {
+            host: "gitlab.example.com",
+            projectId: 3,
+            mrIid: 10,
+            headSha: "head-a",
+          },
+          pipeline: { id: 55, sha: "head-a", status: "success" },
+          jobs: [{ id: 56, name: "build", status: "success" }],
+          diagnostics: ["ci_jobs_truncated"],
+          truncated: true,
+          totalJobs: 101,
+          returnedJobs: 1,
+        }
+      },
+    })
+    const initialized = await tool.init()
+
+    const result = await initialized.execute({ action: "list" }, context)
+
+    expect(result.metadata).toEqual({ truncated: true })
+    expect(result.metadata).not.toHaveProperty("outputPath")
   })
 
   test("marks bounded job-log output as already truncated so generic persistence is skipped", async () => {

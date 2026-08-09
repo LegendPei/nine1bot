@@ -23,6 +23,7 @@ import {
   renderGitLabReviewDiffEvidence,
   readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
+  sanitizeGitLabCiTrace,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
@@ -1297,6 +1298,127 @@ describe('GitLab review foundation', () => {
       'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs?per_page=100&page=1',
       'https://gitlab.example.com/api/v4/projects/3/jobs/8/trace',
     ])
+  })
+
+  test('projects GitLab CI API objects before returning them', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const pathname = new URL(String(url)).pathname
+        if (pathname.endsWith('/pipelines')) {
+          return Response.json([{
+            id: 55,
+            iid: 9,
+            project_id: 3,
+            sha: 'head-a',
+            status: 'success',
+            source: 'merge_request_event',
+            ref: 'refs/merge-requests/10/head',
+            web_url: 'https://gitlab.example.com/root/uftest/-/pipelines/55',
+            created_at: '2026-08-10T01:00:00Z',
+            updated_at: '2026-08-10T01:01:00Z',
+            user: { id: 99, private_email: 'secret@example.com' },
+            variables: [{ key: 'TOKEN', value: 'raw-secret' }],
+          }])
+        }
+        return Response.json([{
+          id: 56,
+          name: 'test',
+          stage: 'verify',
+          status: 'failed',
+          allow_failure: false,
+          web_url: 'https://gitlab.example.com/root/uftest/-/jobs/56',
+          started_at: '2026-08-10T01:00:00Z',
+          finished_at: '2026-08-10T01:01:00Z',
+          duration: 60,
+          runner: { id: 7, token: 'runner-secret' },
+          commit: { id: 'head-a', message: 'private commit message' },
+        }])
+      }) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 10)).resolves.toEqual([{
+      id: 55,
+      iid: 9,
+      project_id: 3,
+      sha: 'head-a',
+      status: 'success',
+      source: 'merge_request_event',
+      ref: 'refs/merge-requests/10/head',
+      web_url: 'https://gitlab.example.com/root/uftest/-/pipelines/55',
+      created_at: '2026-08-10T01:00:00Z',
+      updated_at: '2026-08-10T01:01:00Z',
+    }])
+    await expect(client.getPipelineJobs(3, 55)).resolves.toEqual([{
+      id: 56,
+      name: 'test',
+      stage: 'verify',
+      status: 'failed',
+      allow_failure: false,
+      web_url: 'https://gitlab.example.com/root/uftest/-/jobs/56',
+      started_at: '2026-08-10T01:00:00Z',
+      finished_at: '2026-08-10T01:01:00Z',
+      duration: 60,
+    }])
+  })
+
+  test('bounds projected GitLab CI job lists by count and serialized bytes', async () => {
+    const result = await inspectGitLabCi({
+      client: {
+        async getMergeRequestPipelines() {
+          return [{ id: 55, sha: 'head-a', status: 'success' }]
+        },
+        async getPipelineJobs() {
+          return Array.from({ length: 150 }, (_, index) => ({
+            id: index + 1,
+            name: `job-${index}-${'x'.repeat(700)}`,
+            stage: 'verify',
+            status: 'success',
+            runner: { token: 'runner-secret' },
+          }))
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'head-a',
+    })
+
+    expect(result.truncated).toBe(true)
+    expect(result.totalJobs).toBe(150)
+    expect(result.returnedJobs).toBe(result.jobs.length)
+    expect(result.jobs.length).toBeLessThanOrEqual(100)
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(32 * 1024)
+    expect(result.diagnostics).toContain('ci_jobs_truncated')
+    expect(JSON.stringify(result)).not.toContain('runner-secret')
+  })
+
+  test('sanitizes structured and standalone secrets from GitLab CI traces', () => {
+    const trace = [
+      'PASSWORD=correct horse battery staple',
+      'DATABASE_URL=postgres://user:password@db.internal/app',
+      'AWS_SECRET_ACCESS_KEY=AKIAEXAMPLEVALUE',
+      'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+      'eyJhbGciOiJIUzI1NiJ9.payload.signature',
+      '-----BEGIN PRIVATE KEY-----',
+      'private-key-material',
+      '-----END PRIVATE KEY-----',
+    ].join('\n')
+
+    const sanitized = sanitizeGitLabCiTrace(trace)
+
+    for (const secret of [
+      'correct horse battery staple',
+      'user:password@',
+      'AKIAEXAMPLEVALUE',
+      'dXNlcjpwYXNzd29yZA',
+      'payload.signature',
+      'private-key-material',
+    ]) {
+      expect(sanitized).not.toContain(secret)
+    }
+    expect(sanitized).toContain('PASSWORD=***')
+    expect(sanitized).toContain('DATABASE_URL=***')
   })
 
   test('rejects cross-authority redirects without forwarding the GitLab token', async () => {

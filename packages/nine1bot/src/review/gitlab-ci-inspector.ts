@@ -5,8 +5,8 @@ import {
   normalizeGitLabReviewSettings,
   readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
-  type GitLabPipelineJob,
-  type GitLabPipelineSummary,
+  type GitLabCiJob,
+  type GitLabCiPipeline,
 } from '@nine1bot/platform-gitlab/review'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 import type { PlatformManagerConfig } from '../platform/manager'
@@ -30,16 +30,19 @@ export type GitLabCiToolOutput =
       action: 'list'
       observedAt: number
       target: GitLabCiTarget
-      pipeline?: GitLabPipelineSummary
-      jobs: GitLabPipelineJob[]
+      pipeline?: GitLabCiPipeline
+      jobs: GitLabCiJob[]
       diagnostics: string[]
+      truncated: boolean
+      totalJobs: number
+      returnedJobs: number
     }
   | {
       ok: true
       action: 'read_job_log'
       observedAt: number
       target: GitLabCiTarget
-      job: GitLabPipelineJob
+      job: GitLabCiJob
       trace: string
       bytes: number
       truncated: boolean
@@ -57,6 +60,7 @@ export async function inspectGitLabCiForSession(input: {
   platforms: PlatformManagerConfig
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
+  signal?: AbortSignal
 }): Promise<GitLabCiToolOutput> {
   const run = ReviewRunStore.findBySessionId(input.sessionId)
   if (!run) return failure(input.request.action, 'gitlab_review_session_not_bound')
@@ -104,6 +108,7 @@ export async function inspectGitLabCiForSession(input: {
       projectId: target.projectId,
       mrIid: target.mrIid,
       headSha: target.headSha,
+      signal: input.signal,
     })
     const observedAt = Date.now()
     updateCiSummary(run.id, (current) => ({
@@ -113,7 +118,7 @@ export async function inspectGitLabCiForSession(input: {
       observedAt,
       queryCount: (current.queryCount ?? 0) + 1,
     }))
-    return {
+    return boundListToolOutput({
       ok: true,
       action: 'list',
       observedAt,
@@ -121,7 +126,10 @@ export async function inspectGitLabCiForSession(input: {
       pipeline: result.pipeline,
       jobs: result.jobs,
       diagnostics: result.diagnostics,
-    }
+      truncated: result.truncated,
+      totalJobs: result.totalJobs,
+      returnedJobs: result.returnedJobs,
+    })
   }
 
   const pipelineResult = await inspectGitLabCi({
@@ -129,6 +137,7 @@ export async function inspectGitLabCiForSession(input: {
     projectId: target.projectId,
     mrIid: target.mrIid,
     headSha: target.headSha,
+    signal: input.signal,
   })
   if (!pipelineResult.pipeline) {
     const diagnostic = pipelineResult.diagnostics[0] ?? 'ci_pipeline_not_found_for_head_sha'
@@ -145,6 +154,7 @@ export async function inspectGitLabCiForSession(input: {
     pipelineId: pipelineResult.pipeline.id,
     jobId: input.request.jobId,
     maxBytes: jobLogByteLimit(run),
+    signal: input.signal,
   })
   const observedAt = Date.now()
   updateCiSummary(run.id, (current) => ({
@@ -197,7 +207,36 @@ function mergeRequestUrl(baseUrl: string, run: ReviewRunRecord, target: GitLabCi
   if (!path) return undefined
   const encodedPath = path.split('/').filter(Boolean).map(encodeURIComponent).join('/')
   if (!encodedPath) return undefined
-  return `${baseUrl.replace(/\/+$/, '')}/${encodedPath}/-/merge_requests/${encodeURIComponent(String(target.mrIid))}`
+  const url = `${baseUrl.replace(/\/+$/, '')}/${encodedPath}/-/merge_requests/${encodeURIComponent(String(target.mrIid))}`
+  return url.length <= 4_096 ? url : undefined
+}
+
+function boundListToolOutput(
+  output: Extract<GitLabCiToolOutput, { ok: true; action: 'list' }>,
+): Extract<GitLabCiToolOutput, { ok: true; action: 'list' }> {
+  const jobs = [...output.jobs]
+  let next = { ...output, jobs }
+  while (toolOutputBytes(next) > 32 * 1024 && jobs.length > 0) {
+    jobs.pop()
+    next = {
+      ...next,
+      jobs,
+      diagnostics: mergeDiagnostics(next.diagnostics, ['ci_jobs_truncated']),
+      truncated: true,
+      returnedJobs: jobs.length,
+    }
+  }
+  if (toolOutputBytes(next) <= 32 * 1024 || !next.target.mrUrl) return next
+  return {
+    ...next,
+    target: { ...next.target, mrUrl: undefined },
+    diagnostics: mergeDiagnostics(next.diagnostics, ['ci_target_url_omitted']),
+    truncated: true,
+  }
+}
+
+function toolOutputBytes(output: GitLabCiToolOutput) {
+  return new TextEncoder().encode(JSON.stringify(output)).length
 }
 
 function reserveJobLogRead(runId: string, sessionId: string, jobId: number) {
@@ -237,14 +276,14 @@ function updateCiSummary(runId: string, update: (current: ReviewRunCiSummary) =>
 function jobLogReadLimit(run: ReviewRunRecord) {
   const configured = run.project?.ci.maxJobLogs
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-    ? Math.floor(configured)
+    ? Math.min(10, Math.floor(configured))
     : 3
 }
 
 function jobLogByteLimit(run: ReviewRunRecord) {
   const configured = run.project?.ci.maxJobLogBytes
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-    ? Math.floor(configured)
+    ? Math.min(16_384, Math.floor(configured))
     : 8_000
 }
 

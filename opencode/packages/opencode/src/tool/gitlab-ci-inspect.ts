@@ -9,7 +9,7 @@ import { readPlatformManagerConfig } from "../../../../../packages/nine1bot/src/
 import { FilePlatformSecretStore } from "../../../../../packages/nine1bot/src/platform/secrets"
 
 type GitLabCiInspectDependencies = {
-  inspect: (sessionId: string, request: GitLabCiSessionRequest) => Promise<GitLabCiToolOutput>
+  inspect: (sessionId: string, request: GitLabCiSessionRequest, signal: AbortSignal) => Promise<GitLabCiToolOutput>
 }
 
 const parameters = z.discriminatedUnion("action", [
@@ -24,17 +24,17 @@ export function createGitLabCiInspectTool(dependencies: GitLabCiInspectDependenc
   return Tool.define("gitlab_ci_inspect", {
     description: [
       "Inspect CI for the GitLab merge request bound to the current review session.",
-      "Call list first to see the HEAD pipeline and all jobs, then read selected job logs only when needed.",
+      "Call list first to see the HEAD pipeline and bounded job list, then read selected job logs only when needed.",
       "Logs are available for any job status and are bounded and sanitized by the server.",
     ].join(" "),
     parameters,
     async execute(args, context) {
-      const result = await dependencies.inspect(context.sessionID, args)
+      const result = await dependencies.inspect(context.sessionID, args, context.abort)
       return {
         title: "GitLab CI inspection",
-        output: JSON.stringify(result, null, 2),
+        output: JSON.stringify(result),
         metadata: {
-          truncated: result.ok && result.action === "read_job_log" ? result.truncated : false,
+          truncated: result.ok ? result.truncated : false,
         },
       }
     },
@@ -42,13 +42,14 @@ export function createGitLabCiInspectTool(dependencies: GitLabCiInspectDependenc
 }
 
 export const GitLabCiInspectTool = createGitLabCiInspectTool({
-  async inspect(sessionId, request) {
+  async inspect(sessionId, request, signal) {
     try {
       return await inspectGitLabCiForSession({
         sessionId,
         request,
         platforms: await readPlatformManagerConfig(),
         secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+        signal,
       })
     } catch (error) {
       return {

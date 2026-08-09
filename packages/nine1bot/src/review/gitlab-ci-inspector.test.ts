@@ -266,6 +266,96 @@ describe('GitLab CI session inspector', () => {
     expect(serialized).not.toContain('server-side-token')
   })
 
+  test('enforces hard job-log count and byte limits even when project settings are huge', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    ReviewRunStore.update(run.id, {
+      project: {
+        ...run.project!,
+        ci: {
+          maxJobLogs: 1_000_000_000,
+          maxJobLogBytes: 1_000_000_000,
+        },
+      },
+    })
+    let traceCalls = 0
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/merge_requests/10/pipelines')) {
+        return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+      }
+      if (url.includes('/pipelines/55/jobs')) {
+        return Response.json([{ id: 56, name: 'test', status: 'success' }])
+      }
+      if (url.includes('/jobs/56/trace')) {
+        traceCalls += 1
+        return new Response('x'.repeat(20_000))
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    const results = []
+    for (let index = 0; index < 11; index += 1) {
+      results.push(await inspectGitLabCiForSession({
+        sessionId: 'session-a',
+        request: { action: 'read_job_log', jobId: 56 },
+        platforms,
+        secrets,
+        fetch: fetchMock,
+      }))
+    }
+
+    expect(results.slice(0, 10).every((result) => result.ok)).toBe(true)
+    for (const result of results.slice(0, 10)) {
+      expect(result).toMatchObject({
+        ok: true,
+        action: 'read_job_log',
+        bytes: 16_384,
+        truncated: true,
+      })
+    }
+    expect(results[10]).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_job_log_limit_reached',
+    })
+    expect(traceCalls).toBe(10)
+  })
+
+  test('bounds the complete CI session list payload including its review target', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    ReviewRunStore.update(run.id, {
+      trigger: {
+        ...run.trigger,
+        projectPath: `root/${'very-long-segment/'.repeat(350)}uftest`,
+      },
+    })
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/merge_requests/10/pipelines')) {
+          return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+        }
+        if (url.includes('/pipelines/55/jobs')) {
+          return Response.json(Array.from({ length: 150 }, (_, index) => ({
+            id: index + 1,
+            name: `job-${index}-${'x'.repeat(700)}`,
+            stage: 'verify',
+            status: 'success',
+          })))
+        }
+        throw new Error(`unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ ok: true, action: 'list', truncated: true })
+    expect(result.ok && result.action === 'list' ? result.target.mrUrl : undefined).toBeUndefined()
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(32 * 1024)
+  })
+
   test('refreshes CI through the newly bound session after a retry', async () => {
     const run = createReviewRun('session-old', 3, 10, 'head-a')
     let pipelineId = 55

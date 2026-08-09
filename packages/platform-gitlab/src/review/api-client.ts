@@ -4,6 +4,8 @@ const GITLAB_PAGE_SIZE = 100
 const MAX_PAGINATED_PAGES = 5
 const MAX_REDIRECTS = 3
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const MAX_CI_TEXT_LENGTH = 512
+const MAX_CI_URL_LENGTH = 4_096
 
 export type GitLabRequestOptions = {
   signal?: AbortSignal
@@ -56,10 +58,15 @@ export type GitLabProjectHook = {
 
 export type GitLabPipelineSummary = {
   id: number
+  iid?: number
+  project_id?: number
   sha?: string
   status?: string
+  source?: string
   ref?: string
   web_url?: string
+  created_at?: string
+  updated_at?: string
 }
 
 export type GitLabPipelineJob = {
@@ -67,8 +74,11 @@ export type GitLabPipelineJob = {
   name?: string
   stage?: string
   status?: string
-  failure_reason?: string | null
+  allow_failure?: boolean
   web_url?: string
+  started_at?: string | null
+  finished_at?: string | null
+  duration?: number | null
 }
 
 export type GitLabProjectSummary = {
@@ -164,10 +174,14 @@ export class GitLabApiClient {
     mrIid: string | number,
     options: GitLabRequestOptions = {},
   ): Promise<GitLabPipelineSummary[]> {
-    return await this.requestPaginated<GitLabPipelineSummary>(
+    const values = await this.requestPaginated<unknown>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/pipelines`,
       options,
     )
+    return values.flatMap((value) => {
+      const projected = projectPipelineSummary(value)
+      return projected ? [projected] : []
+    })
   }
 
   async getPipelineJobs(
@@ -175,10 +189,14 @@ export class GitLabApiClient {
     pipelineId: string | number,
     options: GitLabRequestOptions = {},
   ): Promise<GitLabPipelineJob[]> {
-    return await this.requestPaginated<GitLabPipelineJob>(
+    const values = await this.requestPaginated<unknown>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/pipelines/${encodeURIComponent(String(pipelineId))}/jobs`,
       options,
     )
+    return values.flatMap((value) => {
+      const projected = projectPipelineJob(value)
+      return projected ? [projected] : []
+    })
   }
 
   async getJobTrace(
@@ -447,6 +465,67 @@ function parseHttpUrl(input: string, base?: URL) {
   } catch {
     return undefined
   }
+}
+
+function projectPipelineSummary(input: unknown): GitLabPipelineSummary | undefined {
+  const record = objectRecord(input)
+  const id = finiteNumber(record?.id)
+  if (id === undefined) return undefined
+  return compactObject({
+    id,
+    iid: finiteNumber(record?.iid),
+    project_id: finiteNumber(record?.project_id),
+    sha: boundedString(record?.sha, MAX_CI_TEXT_LENGTH),
+    status: boundedString(record?.status, MAX_CI_TEXT_LENGTH),
+    source: boundedString(record?.source, MAX_CI_TEXT_LENGTH),
+    ref: boundedString(record?.ref, MAX_CI_TEXT_LENGTH),
+    web_url: boundedString(record?.web_url, MAX_CI_URL_LENGTH),
+    created_at: boundedString(record?.created_at, MAX_CI_TEXT_LENGTH),
+    updated_at: boundedString(record?.updated_at, MAX_CI_TEXT_LENGTH),
+  }) as GitLabPipelineSummary
+}
+
+function projectPipelineJob(input: unknown): GitLabPipelineJob | undefined {
+  const record = objectRecord(input)
+  const id = finiteNumber(record?.id)
+  if (id === undefined) return undefined
+  return compactObject({
+    id,
+    name: boundedString(record?.name, MAX_CI_TEXT_LENGTH),
+    stage: boundedString(record?.stage, MAX_CI_TEXT_LENGTH),
+    status: boundedString(record?.status, MAX_CI_TEXT_LENGTH),
+    allow_failure: typeof record?.allow_failure === 'boolean' ? record.allow_failure : undefined,
+    web_url: boundedString(record?.web_url, MAX_CI_URL_LENGTH),
+    started_at: nullableBoundedString(record?.started_at, MAX_CI_TEXT_LENGTH),
+    finished_at: nullableBoundedString(record?.finished_at, MAX_CI_TEXT_LENGTH),
+    duration: nullableFiniteNumber(record?.duration),
+  }) as GitLabPipelineJob
+}
+
+function objectRecord(input: unknown): Record<string, unknown> | undefined {
+  return typeof input === 'object' && input !== null && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : undefined
+}
+
+function finiteNumber(input: unknown) {
+  return typeof input === 'number' && Number.isFinite(input) ? input : undefined
+}
+
+function nullableFiniteNumber(input: unknown) {
+  return input === null ? null : finiteNumber(input)
+}
+
+function boundedString(input: unknown, maxLength: number) {
+  return typeof input === 'string' ? input.slice(0, maxLength) : undefined
+}
+
+function nullableBoundedString(input: unknown, maxLength: number) {
+  return input === null ? null : boundedString(input, maxLength)
+}
+
+function compactObject(input: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
 }
 
 function redirectedRequestInit(init: RequestInit, status: number): RequestInit {

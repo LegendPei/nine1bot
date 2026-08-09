@@ -135,15 +135,15 @@ git commit -m "fix(gitlab): contain token-bearing redirects"
 - Produces: `GitLabCiListResult.truncated`、`totalJobs`、`returnedJobs`
 - Produces: `clampGitLabCiLimits(profile)`，硬上限为 10 logs、16 KiB/log
 
-- [ ] **Step 1: 写原始字段泄漏与 list 超限失败测试**
+- [x] **Step 1: 写原始字段泄漏与 list 超限失败测试**
 
 API fixture 注入 `runner`、`user`、`commit`、`variables` 和额外嵌套字段，构造 101 个大 job。断言 tool JSON 不包含这些字段、最多 100 个 job、序列化不超过 32 KiB，并包含 `ci_jobs_truncated`。
 
-- [ ] **Step 2: 写服务端硬上限失败测试**
+- [x] **Step 2: 写服务端硬上限失败测试**
 
 配置 `maxJobLogs: 1_000_000_000`、`maxJobLogBytes: 1_000_000_000`，断言有效值仍分别为 10 和 16_384。
 
-- [ ] **Step 3: 写日志秘密样本失败测试**
+- [x] **Step 3: 写日志秘密样本失败测试**
 
 ```ts
 const trace = [
@@ -156,11 +156,11 @@ const trace = [
 expect(sanitizeGitLabCiTrace(trace)).not.toMatch(/battery|password@|AKIAEXAMPLE|payload|PRIVATE KEY/)
 ```
 
-- [ ] **Step 4: 运行目标测试并确认失败**
+- [x] **Step 4: 运行目标测试并确认失败**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/nine1bot/src/review/gitlab-ci-inspector.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts -t "projects CI DTO|bounds CI list|sanitizes CI trace|hard CI limits"`
 
-- [ ] **Step 5: 实现运行时投影和有界 list**
+- [x] **Step 5: 实现运行时投影和有界 list**
 
 API client 对 pipeline/job 建立新对象，只复制文档允许字段。`ci-inspector.ts` 再投影成 camelCase tool DTO；稳定排序后先按 100 条截断，再按 32 KiB 预算逐条装入。
 
@@ -175,11 +175,11 @@ export type GitLabCiListResult = {
 }
 ```
 
-- [ ] **Step 6: 实现分层脱敏和限制 clamp**
+- [x] **Step 6: 实现分层脱敏和限制 clamp**
 
 按 ANSI、PEM block、Authorization、credential URL、secret assignment、JWT-like、access-key pattern 顺序替换。截断基于脱敏后的 UTF-8，同时用原始/脱敏长度决定 `truncated`。
 
-- [ ] **Step 7: 让 tool 始终返回自有截断元数据并传递 abort**
+- [x] **Step 7: 让 tool 始终返回自有截断元数据并传递 abort**
 
 依赖签名调整为：
 
@@ -189,7 +189,7 @@ inspect(sessionId: string, request: GitLabCiSessionRequest, signal: AbortSignal)
 
 list 和 log 都设置 `metadata.truncated`，但 output 必须已经在服务端受限，不产生完整输出文件。
 
-- [ ] **Step 8: 运行三层回归并提交**
+- [x] **Step 8: 运行三层回归并提交**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/nine1bot/src/review/gitlab-ci-inspector.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts`
 

@@ -451,7 +451,7 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
             sha: ci.pipeline.sha,
             status: ci.pipeline.status,
             ref: ci.pipeline.ref,
-            web_url: ci.pipeline.web_url,
+            web_url: ci.pipeline.webUrl,
           },
         } : {}),
         diagnostics: ci.diagnostics,

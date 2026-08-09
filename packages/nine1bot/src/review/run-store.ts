@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { getDataDir } from '../config/loader'
-import type { GitLabPipelineSummary, GitLabReviewProjectSnapshot } from '@nine1bot/platform-gitlab/review'
+import type { GitLabCiPipeline, GitLabReviewProjectSnapshot } from '@nine1bot/platform-gitlab/review'
 
 export type ReviewRunStatus = 'accepted' | 'rejected' | 'blocked' | 'running' | 'succeeded' | 'failed'
 
 export type ReviewRunCiSummary = {
-  pipeline?: GitLabPipelineSummary
+  pipeline?: GitLabCiPipeline
   diagnostics: string[]
   observedAt?: number
   queryCount?: number
