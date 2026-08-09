@@ -460,6 +460,14 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
   }
 }
 
+export function publicGitLabReviewWebhookResult(
+  result: Awaited<ReturnType<typeof handleGitLabReviewWebhook>>,
+) {
+  if (!result.accepted) return result
+  const { context: _context, ...publicResult } = result
+  return publicResult
+}
+
 async function triggerGitLabReviewWebhook(c: any) {
   const contentType = c.req.header("content-type") || ""
   if (!contentType.toLowerCase().includes("application/json")) {
@@ -496,7 +504,7 @@ async function triggerGitLabReviewWebhook(c: any) {
     })
   }
 
-  return c.json(result, result.accepted ? 202 : result.httpStatus as never)
+  return c.json(publicGitLabReviewWebhookResult(result), result.accepted ? 202 : result.httpStatus as never)
 }
 
 async function validateGitLabDedicatedWebhookSecret(c: any, platforms: Awaited<ReturnType<typeof readPlatformManagerConfig>>) {

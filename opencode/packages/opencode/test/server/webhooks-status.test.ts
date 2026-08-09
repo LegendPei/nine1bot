@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewRetryPatch,
+  publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
   resolveGitLabReviewRuntimeDirectory,
   webhookLocalOrigin,
@@ -148,6 +149,28 @@ describe("webhook status URL selection", () => {
         "old warning",
         "Review run manually retried from stored GitLab context.",
       ],
+    })
+  })
+
+  test("omits GitLab review context from the public webhook response", () => {
+    expect(publicGitLabReviewWebhookResult({
+      accepted: true,
+      status: "accepted",
+      idempotencyKey: "gitlab:mr:3:4:head",
+      runId: "run_1",
+      trigger: { host: "gitlab.example.com", projectId: 3, objectType: "mr", objectIid: 4, eventName: "note", mode: "mention" },
+      warnings: [],
+      context: {
+        contextBlocks: [{ content: "FAILED secret trace" }],
+        diff: { files: [{ diff: "private diff" }] },
+      },
+    } as any)).toEqual({
+      accepted: true,
+      status: "accepted",
+      idempotencyKey: "gitlab:mr:3:4:head",
+      runId: "run_1",
+      trigger: { host: "gitlab.example.com", projectId: 3, objectType: "mr", objectIid: 4, eventName: "note", mode: "mention" },
+      warnings: [],
     })
   })
 
