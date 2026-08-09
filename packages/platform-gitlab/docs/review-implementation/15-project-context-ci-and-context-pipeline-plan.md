@@ -255,13 +255,15 @@ getJobTrace(projectId, jobId): Promise<string>
 - Diff evidence 会先保留首个可审查 hunk 的完整渲染预算；CI block 只存在于当次 Runtime 输入，落盘 context 删除 job trace，仅保留 pipeline 摘要和 diagnostics。
 - Pipeline/job 列表固定 `per_page=100` 且最多读取 5 页；响应体恰好等于 byte limit 时会继续确认 EOF，不再误报超限。
 - Web 项目档案已补齐 Nine1Bot Project 绑定、review overlay、include/exclude、上下文预算、文件上限、失败 job 数和 job log 预算；原始 `review.projects` JSON 继续隐藏。
-- 新增和修改按 TDD 完成，分为 `716b51d`、`54b4204`、`5b29dc5` 三个独立实现提交，便于 PR 审阅和必要时逐批回退。
+- 专用 GitLab webhook 的内部结果仍携带完整 context 启动 Runtime，但公网 HTTP 响应会剥离 context，避免 diff 或当次 CI trace 进入调用方及中间代理日志。
+- 新增和修改按 TDD 完成，分为 `716b51d`、`54b4204`、`5b29dc5`、`1da9852` 四个独立实现提交，便于 PR 审阅和必要时逐批回退。
 
 **验证结果**
 
 - `bun run ci:test`：421 个测试通过，0 失败，覆盖 58 个测试文件。
 - `bun run ci:typecheck`：platform-protocol、platform-feishu、platform-gitlab、nine1bot、browser-extension、browser-mcp-server 与 Web 全部通过。
 - `bun run build:web`：生产构建通过；仅有既有的大 chunk 警告。
+- `bun test opencode/packages/opencode/test/server/webhooks-status.test.ts`：10 个测试通过，0 失败；`bun run --cwd opencode/packages/opencode typecheck` 通过。
 - `git diff --check origin/main...HEAD`：通过后方可推送；该命令在最终文档提交后重新执行。
 
 **后续环境验收**
