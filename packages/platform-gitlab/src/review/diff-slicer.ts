@@ -118,10 +118,10 @@ export function renderGitLabReviewDiffEvidence(input: {
     '',
     ...input.slices.map(renderGitLabReviewSliceEvidence),
     skipped.length > 0 ? 'Skipped file details:' : undefined,
-    ...skipped.map((file) => `- ${boundedPath(file.path)}: ${file.reason}`),
+    ...skipped.map((file) => evidenceDetail(boundedPath(file.path), file.reason)),
     input.skipped.length > skipped.length ? `- ${input.skipped.length - skipped.length} more skipped files` : undefined,
     omissions.length > 0 ? 'Omitted hunk file details:' : undefined,
-    ...omissions.map((item) => `- ${boundedPath(item.file)}: ${item.reason}`),
+    ...omissions.map((item) => evidenceDetail(boundedPath(item.file), item.reason)),
     input.omissions.length > omissions.length ? `- ${input.omissions.length - omissions.length} more omitted hunk files` : undefined,
   ].filter(Boolean).join('\n')
 }
@@ -210,6 +210,10 @@ function omittedFiles(files: GitLabChangedFile[], slices: GitLabReviewDiffSlice[
 
 function boundedPath(path: string) {
   return truncateUtf8(path, 160)
+}
+
+function evidenceDetail(file: string, reason: string) {
+  return JSON.stringify({ file, reason })
 }
 
 function byteLength(input: string) {

@@ -4,8 +4,6 @@ import { buildGitLabReviewIdempotencyKey } from './idempotency'
 import type { GitLabReviewProjectSnapshot } from './settings'
 import type { GitLabRawChangesResponse, GitLabReviewTrigger } from './types'
 
-const MIN_SUPPLEMENTAL_CONTEXT_BYTES = 64
-
 export type GitLabReviewContext = {
   trigger: GitLabReviewTrigger
   idempotencyKey: string
@@ -47,9 +45,7 @@ export function buildGitLabReviewContext(input: {
     skipped: candidateDiff.skipped,
     headSha: candidateDiff.diffRefs?.headSha,
   })
-  const hasSupplementalContext = Boolean(input.project || input.additionalContextBlocks?.length)
-  const supplementalFloor = hasSupplementalContext ? MIN_SUPPLEMENTAL_CONTEXT_BYTES : 0
-  const reservedDiffBudget = minimumDiffBudget > 0 && minimumDiffBudget + supplementalFloor <= contextBudget
+  const reservedDiffBudget = minimumDiffBudget > 0 && minimumDiffBudget <= contextBudget
     ? minimumDiffBudget
     : 0
   let remainingSupplementalBudget = Math.max(0, contextBudget - reservedDiffBudget)
