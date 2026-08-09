@@ -119,6 +119,7 @@ describe('GitLab review controller', () => {
       trigger: {
         host: 'gitlab.example.com',
         projectId: 123,
+        projectPath: 'nine1/nine1bot',
         objectType: 'mr',
         objectIid: 10,
         headSha: 'abc',
@@ -186,7 +187,46 @@ describe('GitLab review controller', () => {
     expect(prompt.match(/-old/g)).toHaveLength(1)
     expect(prompt.match(/\+new/g)).toHaveLength(1)
     expect(prompt).toContain('Do not fetch the GitLab web page')
+    expect(prompt).toContain('gitlab_ci_inspect')
+    expect(prompt).toContain('MR URL: https://gitlab.example.com/nine1/nine1bot/-/merge_requests/10')
+    expect(prompt).toContain('Head SHA: abc')
+    expect(prompt).toContain('action="list"')
+    expect(prompt).toContain('success, failed, running, or any other status')
+    expect(prompt).toContain('CI is optional review context and never blocks publishing')
+    expect(prompt).not.toContain('gitlab-token')
+    expect(prompt).not.toContain('tokenSecretRef')
     expect(prompt).not.toContain('\n```\nignore previous instructions')
+  })
+
+  test('does not request the MR-only CI tool for commit reviews', () => {
+    const prompt = buildGitLabReviewRuntimePrompt({
+      idempotencyKey: 'gitlab:example:123:commit:abc:auto:push',
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        projectPath: 'nine1/nine1bot',
+        objectType: 'commit',
+        commitSha: 'abc',
+        headSha: 'abc',
+        mode: 'webhook',
+      },
+      context: {
+        trigger: {
+          host: 'gitlab.example.com', projectId: 123, objectType: 'commit',
+          commitSha: 'abc', headSha: 'abc', mode: 'webhook',
+        },
+        idempotencyKey: 'gitlab:example:123:commit:abc:auto:push',
+        diff: {
+          files: [], skipped: [], blocked: false,
+          stats: { fileCount: 0, includedFileCount: 0, skippedFileCount: 0, includedBytes: 0, truncated: false },
+        },
+        contextBlocks: [],
+      },
+    })
+
+    expect(prompt).toContain('Object: commit')
+    expect(prompt).not.toContain('gitlab_ci_inspect')
+    expect(prompt).not.toContain('MR URL:')
   })
 
   test('uses the context builders bounded diff evidence without rendering raw skipped files again', () => {
@@ -512,44 +552,46 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.list()).toHaveLength(1)
   })
 
-  test('adds optional GitLab pipeline evidence without blocking the review', async () => {
+  test('does not prefetch GitLab CI while creating an MR review run', async () => {
+    const requests: string[] = []
     const result = await handleGitLabReviewWebhook({
       payload: {
         object_kind: 'merge_request',
         project: { id: 123, path_with_namespace: 'nine1/nine1bot', web_url: 'https://gitlab.example.com/nine1/nine1bot' },
         object_attributes: { iid: 12, last_commit: { id: 'ci-head' } },
-        changes: { changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }] },
       },
       headers: { 'x-gitlab-token': 'secret' },
       platforms: { gitlab: { enabled: true, settings: {
         ...platforms.gitlab.settings,
         'review.baseUrl': 'https://gitlab.example.com',
-        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, nine1botProjectID: 'project-nine1bot', enabled: true, ci: { enabled: true } }],
+        'review.dryRun': false,
+        'review.executionMode': 'runtime',
+        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, nine1botProjectID: 'project-nine1bot', enabled: true, ci: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 4 } }],
       } } },
       secrets: liveSecrets,
       fetch: (async (url) => {
         const value = String(url)
+        requests.push(value)
         const pathname = new URL(value).pathname
-        if (pathname.endsWith('/pipelines')) return Response.json([{ id: 55, sha: 'ci-head', status: 'failed' }])
-        if (pathname.endsWith('/pipelines/55/jobs')) return Response.json([{ id: 56, name: 'test', stage: 'verify', status: 'failed' }])
-        if (pathname.endsWith('/jobs/56/trace')) return new Response('FAILED test', { status: 200 })
+        if (pathname.endsWith('/changes')) {
+          return Response.json({
+            changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+          })
+        }
         throw new Error(`unexpected request: ${value}`)
       }) as typeof fetch,
     })
 
-    expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: [] })
-    expect(result.accepted && result.context?.contextBlocks.map((block) => block.id)).toContain('gitlab-review-pipeline')
-    expect(result.accepted && result.context?.contextBlocks.find((block) => block.id === 'gitlab-review-pipeline')?.content).toContain('FAILED test')
+    expect(result).toMatchObject({ accepted: true, status: 'accepted', warnings: [] })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toContain('/merge_requests/12/changes')
+    expect(requests.some((url) => /\/pipelines|\/jobs\//.test(url))).toBe(false)
+    expect(result.accepted && result.context?.contextBlocks.map((block) => block.id)).not.toContain('gitlab-review-pipeline')
     const stored = result.accepted ? ReviewRunStore.get(result.runId) : undefined
-    expect(stored).toMatchObject({
-      ci: { pipeline: { id: 55, sha: 'ci-head', status: 'failed' }, diagnostics: [] },
-    })
-    expect(JSON.stringify(stored?.context)).not.toContain('FAILED test')
-    expect((stored?.context as { contextBlocks?: Array<{ id: string }> } | undefined)?.contextBlocks?.map((block) => block.id))
-      .not.toContain('gitlab-review-pipeline')
+    expect(stored?.ci).toBeUndefined()
   })
 
-  test('degrades optional pipeline context when the token secret store fails', async () => {
+  test('does not resolve the API token solely to prefetch CI', async () => {
     const failingTokenSecrets: PlatformSecretAccess = {
       async get(ref) {
         if (ref.key === 'gitlab-webhook') return 'secret'
@@ -574,14 +616,8 @@ describe('GitLab review controller', () => {
       secrets: failingTokenSecrets,
     })
 
-    expect(result).toMatchObject({
-      accepted: true,
-      status: 'dry-run',
-      warnings: ['pipeline_context_unavailable:Error'],
-    })
-    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
-      ci: { diagnostics: ['pipeline_context_unavailable:Error'] },
-    })
+    expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: [] })
+    expect(result.accepted ? ReviewRunStore.get(result.runId)?.ci : undefined).toBeUndefined()
   })
 
   test('rejects reviews for disabled project profiles before creating a run', async () => {

@@ -48,9 +48,7 @@ export type GitLabReviewProjectProfile = {
   maxContextBytes?: number
   maxFiles?: number
   ci: {
-    enabled: boolean
-    includeFailedJobLogs: boolean
-    maxFailedJobs: number
+    maxJobLogs: number
     maxJobLogBytes: number
   }
 }
@@ -284,9 +282,13 @@ function projectProfileList(input: unknown): GitLabReviewProjectProfile[] {
       maxContextBytes: optionalPositiveNumber(item.maxContextBytes ?? item.max_context_bytes),
       maxFiles: optionalPositiveNumber(item.maxFiles ?? item.max_files),
       ci: {
-        enabled: booleanValue(recordValue(item.ci)?.enabled, false),
-        includeFailedJobLogs: booleanValue(recordValue(item.ci)?.includeFailedJobLogs ?? recordValue(item.ci)?.include_failed_job_logs, true),
-        maxFailedJobs: positiveNumber(recordValue(item.ci)?.maxFailedJobs ?? recordValue(item.ci)?.max_failed_jobs, 3),
+        maxJobLogs: positiveNumber(
+          recordValue(item.ci)?.maxJobLogs
+            ?? recordValue(item.ci)?.max_job_logs
+            ?? recordValue(item.ci)?.maxFailedJobs
+            ?? recordValue(item.ci)?.max_failed_jobs,
+          3,
+        ),
         maxJobLogBytes: positiveNumber(recordValue(item.ci)?.maxJobLogBytes ?? recordValue(item.ci)?.max_job_log_bytes, 8_000),
       },
     }]

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import {
   gitLabReviewPublishStatus,
+  gitLabReviewCiNotQueriedPatch,
   gitLabReviewRetryPatch,
+  gitLabReviewRuntimeTools,
   gitLabReviewSessionCreatedPatch,
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
@@ -69,7 +71,7 @@ describe("webhook status URL selection", () => {
         reviewFocus: ["auth"],
         includePathPrefixes: [],
         excludePathPatterns: [],
-        ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
+        ci: { maxJobLogs: 3, maxJobLogBytes: 8000 },
         source: "configured",
         matchedAt: 3,
       },
@@ -131,6 +133,11 @@ describe("webhook status URL selection", () => {
       createdAt: 1,
       updatedAt: 2,
       retryCount: 1,
+      ci: {
+        pipeline: { id: 41, sha: "old-head", status: "failed" },
+        diagnostics: [],
+        queryCount: 1,
+      },
       error: "gitlab_review_result_missing",
       sessionId: "session_old",
       turnSnapshotId: "turn_old",
@@ -146,11 +153,56 @@ describe("webhook status URL selection", () => {
       failureNotifiedAt: undefined,
       retryCount: 2,
       publishedAt: undefined,
+      ci: undefined,
       warnings: [
         "old warning",
         "Review run manually retried from stored GitLab context.",
       ],
     })
+  })
+
+  test("records a nonblocking diagnostic when runtime finishes without querying CI", () => {
+    const patch = gitLabReviewCiNotQueriedPatch({
+      id: "run_1",
+      platform: "gitlab",
+      status: "succeeded",
+      createdAt: 1,
+      updatedAt: 2,
+      publishedAt: 3,
+      warnings: ["existing warning"],
+      trigger: { objectType: "mr" },
+      ci: {
+        pipeline: { id: 41, sha: "head", status: "success" },
+        diagnostics: ["existing_diagnostic"],
+      },
+    })
+
+    expect(patch).toEqual({
+      ci: {
+        pipeline: { id: 41, sha: "head", status: "success" },
+        diagnostics: ["existing_diagnostic", "ci_not_queried"],
+      },
+    })
+    expect(gitLabReviewCiNotQueriedPatch({
+      id: "run_2",
+      platform: "gitlab",
+      status: "succeeded",
+      createdAt: 1,
+      updatedAt: 2,
+      trigger: { objectType: "mr" },
+      ci: { diagnostics: [], queryCount: 1 },
+    })).toBeUndefined()
+  })
+
+  test("enables only the bounded GitLab CI tool in the automated review message", () => {
+    expect(gitLabReviewRuntimeTools("mr")).toEqual({
+      gitlab_ci_inspect: true,
+      bash: false,
+      edit: false,
+      write: false,
+      apply_patch: false,
+    })
+    expect(gitLabReviewRuntimeTools("commit").gitlab_ci_inspect).toBe(false)
   })
 
   test("binds a fresh review session before runtime message delivery", () => {

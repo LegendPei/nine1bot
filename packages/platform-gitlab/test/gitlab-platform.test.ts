@@ -670,6 +670,7 @@ describe('GitLab platform adapter package', () => {
 
     const pm = await readFile(join(reviewAgentsDir, 'pm-coordinator.agent.md'), 'utf8')
     expect(pm).toEqual(expect.stringContaining('task:'))
+    expect(pm).toEqual(expect.stringContaining('gitlab_ci_inspect: allow'))
     expect(pm).toEqual(expect.stringContaining('platform.gitlab.tech-architect'))
     expect(pm).toEqual(expect.stringContaining('platform.gitlab.frontend-designer'))
     expect(pm).toEqual(expect.stringContaining('platform.gitlab.risk-qa'))

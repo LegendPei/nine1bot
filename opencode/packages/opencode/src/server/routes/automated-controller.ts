@@ -43,6 +43,7 @@ export type AutomatedControllerInput = {
   clientCapabilities: RuntimeControllerProtocol.ClientCapabilities
   parts: RuntimeControllerProtocol.MessageSendRequest["parts"]
   context?: RuntimeControllerProtocol.MessageSendRequest["context"]
+  tools?: RuntimeControllerProtocol.MessageSendRequest["tools"]
   interactionPolicy: AutomatedInteractionPolicy
   timeoutMs: number
   timeoutMessage?: string
@@ -92,6 +93,7 @@ export async function runAutomatedControllerSession(input: AutomatedControllerIn
         sendMessage: async (sessionID) => await sendControllerMessage(sessionID, {
           parts: input.parts,
           context: input.context,
+          tools: input.tools,
           entry: input.entry,
           clientCapabilities: input.clientCapabilities,
         }),

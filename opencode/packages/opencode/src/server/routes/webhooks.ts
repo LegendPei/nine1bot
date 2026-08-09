@@ -582,6 +582,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
     context: {
       blocks: result.context.contextBlocks,
     },
+    tools: gitLabReviewRuntimeTools(result.trigger.objectType),
     timeoutMs: RUN_MONITOR_TIMEOUT_MS,
     timeoutMessage: "GitLab review run monitor timed out.",
     interactionPolicy: {
@@ -626,6 +627,9 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       }
     },
     async onFinished(finished) {
+      const beforeCiDiagnostic = ReviewRunStore.get(result.runId)
+      const ciDiagnosticPatch = beforeCiDiagnostic && gitLabReviewCiNotQueriedPatch(beforeCiDiagnostic)
+      if (ciDiagnosticPatch) ReviewRunStore.update(result.runId, ciDiagnosticPatch)
       if (publishAttempted) return
       const current = ReviewRunStore.get(result.runId)
       if (current?.publishedAt) return
@@ -658,6 +662,29 @@ export function gitLabReviewSessionCreatedPatch(sessionID: string) {
     sessionId: sessionID,
     turnSnapshotId: undefined,
     error: undefined,
+  } satisfies Parameters<typeof ReviewRunStore.update>[1]
+}
+
+export function gitLabReviewRuntimeTools(objectType: "mr" | "commit") {
+  return {
+    gitlab_ci_inspect: objectType === "mr",
+    bash: false,
+    edit: false,
+    write: false,
+    apply_patch: false,
+  }
+}
+
+export function gitLabReviewCiNotQueriedPatch(run: ReviewRunRecord) {
+  if (run.trigger?.objectType !== "mr" || (run.ci?.queryCount ?? 0) > 0) return undefined
+  return {
+    ci: {
+      ...run.ci,
+      diagnostics: uniqueStrings([
+        ...(run.ci?.diagnostics ?? []),
+        "ci_not_queried",
+      ]),
+    },
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
 }
 
@@ -703,6 +730,7 @@ export function gitLabReviewRetryPatch(run: ReviewRunRecord) {
       "Review run manually retried from stored GitLab context.",
     ]),
     publishedAt: undefined,
+    ci: undefined,
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
 }
 

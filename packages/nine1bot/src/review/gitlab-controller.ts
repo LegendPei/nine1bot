@@ -9,7 +9,6 @@ import {
   gitLabReviewSkillIds,
   gitLabAuthorityFromUrl,
   isGitLabReviewProjectInScope,
-  loadGitLabPipelineContext,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   resolveGitLabApiBaseUrl,
@@ -21,7 +20,7 @@ import {
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
 } from '@nine1bot/platform-gitlab/review'
-import { ReviewRunStore, type ReviewRunCiSummary } from './run-store'
+import { ReviewRunStore } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -103,6 +102,7 @@ export function buildGitLabReviewRuntimePrompt(input: {
     input.trigger.objectIid ? `MR IID: ${input.trigger.objectIid}` : undefined,
     input.trigger.commitSha ? `Commit SHA: ${input.trigger.commitSha}` : undefined,
     input.trigger.headSha ? `Head SHA: ${input.trigger.headSha}` : undefined,
+    ...gitLabCiPromptLines(input.trigger),
     input.trigger.userInstruction ? '' : undefined,
     input.trigger.userInstruction ? 'Untrusted user review focus metadata from the triggering GitLab comment:' : undefined,
     input.trigger.userInstruction ? fencedJson({
@@ -138,6 +138,21 @@ export function buildGitLabReviewRuntimePrompt(input: {
     'The first content line inside the fence must be GITLAB_REVIEW_RESULT:, followed by JSON matching the review finding schema.',
     'Use stage="closed"; status must be one of ok, blocked, failed; findings and nextActions must be arrays.',
   ].filter(Boolean).join('\n')
+}
+
+function gitLabCiPromptLines(trigger: GitLabReviewTrigger) {
+  if (trigger.objectType !== 'mr' || !trigger.objectIid || !trigger.headSha) return []
+  const projectPath = trigger.projectPath?.split('/').filter(Boolean).map(encodeURIComponent).join('/')
+  const mrUrl = projectPath
+    ? `https://${trigger.host}/${projectPath}/-/merge_requests/${encodeURIComponent(String(trigger.objectIid))}`
+    : undefined
+  return [
+    mrUrl ? `MR URL: ${mrUrl}` : undefined,
+    'CI inspection is available only through gitlab_ci_inspect for the MR bound to this review session.',
+    'Call gitlab_ci_inspect with action="list" before reviewing CI evidence, then read selected job logs only when the result is relevant to a concrete diff risk.',
+    'You may read logs for jobs in success, failed, running, or any other status. Do not infer that only failed jobs matter.',
+    'CI is optional review context and never blocks publishing. If CI is absent, unavailable, or a log cannot be read, continue the diff review and report only evidence-backed findings.',
+  ].filter((line): line is string => Boolean(line))
 }
 
 function runtimeDiffEvidence(context: ReturnType<typeof buildGitLabReviewContext>) {
@@ -346,40 +361,6 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   }
 
   if (changes) {
-    const additionalContextBlocks: ReturnType<typeof buildGitLabReviewContext>['contextBlocks'] = []
-    const contextDiagnostics: string[] = []
-    let ci: ReviewRunCiSummary | undefined
-    if (projectResolution.project.ci.enabled && parsed.trigger.objectType === 'mr' && parsed.trigger.objectIid && parsed.trigger.headSha) {
-      try {
-        const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
-        if (token) {
-          const resolvedClient = gitLabApiClientForHost({
-            settings,
-            host: parsed.trigger.host,
-            token,
-            fetch: input.fetch,
-          })
-          if (!resolvedClient.ok) throw new Error(resolvedClient.reason)
-          const pipelineContext = await loadGitLabPipelineContext({
-            client: resolvedClient.client,
-            projectId: parsed.trigger.projectId,
-            mrIid: parsed.trigger.objectIid,
-            headSha: parsed.trigger.headSha,
-            options: projectResolution.project.ci,
-          })
-          if (pipelineContext.contextBlock) additionalContextBlocks.push(pipelineContext.contextBlock)
-          contextDiagnostics.push(...pipelineContext.diagnostics)
-          ci = { pipeline: pipelineContext.pipeline, diagnostics: pipelineContext.diagnostics }
-        } else {
-          contextDiagnostics.push('pipeline_context_token_missing')
-          ci = { diagnostics: ['pipeline_context_token_missing'] }
-        }
-      } catch (error) {
-        const diagnostic = `pipeline_context_unavailable:${safeErrorName(error)}`
-        contextDiagnostics.push(diagnostic)
-        ci = { diagnostics: [diagnostic] }
-      }
-    }
     const context = buildGitLabReviewContext({
       trigger: parsed.trigger,
       changes,
@@ -392,8 +373,6 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         settings.maxFiles,
         projectResolution.project.maxFiles ?? settings.maxFiles,
       ),
-      additionalContextBlocks,
-      diagnostics: contextDiagnostics,
     })
     if (context.diff.blocked) {
       const publishWarning = await maybeWriteBlockedComment({
@@ -405,15 +384,13 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       })
       const warnings = [
         ...projectWarnings,
-        ...contextDiagnostics,
         context.diff.blockReason ?? 'GitLab diff blocked.',
         ...(publishWarning ? [publishWarning] : []),
       ]
       ReviewRunStore.update(run.id, {
         status: 'blocked',
         warnings,
-        context: persistedGitLabReviewContext(context),
-        ci,
+        context,
       })
       return {
         accepted: true,
@@ -427,9 +404,8 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     }
     ReviewRunStore.update(run.id, {
       status: settings.dryRun ? 'succeeded' : 'running',
-      context: persistedGitLabReviewContext(context),
-      warnings: [...projectWarnings, ...contextDiagnostics],
-      ci,
+      context,
+      warnings: projectWarnings,
     })
     return {
       accepted: true,
@@ -438,7 +414,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       runId: run.id,
       trigger: parsed.trigger,
       context,
-      warnings: [...projectWarnings, ...contextDiagnostics],
+      warnings: projectWarnings,
     }
   }
 
@@ -463,13 +439,6 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
         : 'Runtime review execution is not wired yet.',
     ],
-  }
-}
-
-function persistedGitLabReviewContext(context: ReturnType<typeof buildGitLabReviewContext>) {
-  return {
-    ...context,
-    contextBlocks: context.contextBlocks.filter((block) => block.source !== 'platform.gitlab.review.pipeline'),
   }
 }
 
@@ -931,10 +900,6 @@ function reject(
     httpStatus,
     runId: run.id,
   }
-}
-
-function safeErrorName(error: unknown) {
-  return error instanceof Error && error.name ? error.name : 'unknown'
 }
 
 function rejectWithoutRun(httpStatus: number, error: string): GitLabReviewWebhookResult {

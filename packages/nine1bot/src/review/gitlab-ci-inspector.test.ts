@@ -265,6 +265,55 @@ describe('GitLab CI session inspector', () => {
     expect(serialized).not.toContain('secret-value')
     expect(serialized).not.toContain('server-side-token')
   })
+
+  test('refreshes CI through the newly bound session after a retry', async () => {
+    const run = createReviewRun('session-old', 3, 10, 'head-a')
+    let pipelineId = 55
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/merge_requests/10/pipelines')) {
+        return Response.json([{ id: pipelineId, sha: 'head-a', status: pipelineId === 55 ? 'failed' : 'success' }])
+      }
+      if (url.includes(`/pipelines/${pipelineId}/jobs`)) return Response.json([])
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    const first = await inspectGitLabCiForSession({
+      sessionId: 'session-old',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    expect(first).toMatchObject({ ok: true, pipeline: { id: 55, status: 'failed' } })
+
+    ReviewRunStore.update(run.id, { sessionId: undefined, ci: undefined })
+    ReviewRunStore.update(run.id, { sessionId: 'session-new', status: 'running' })
+    pipelineId = 77
+
+    const staleSession = await inspectGitLabCiForSession({
+      sessionId: 'session-old',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    const refreshed = await inspectGitLabCiForSession({
+      sessionId: 'session-new',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+
+    expect(staleSession).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'gitlab_review_session_not_bound',
+    })
+    expect(refreshed).toMatchObject({ ok: true, pipeline: { id: 77, status: 'success' } })
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ pipeline: { id: 77 }, queryCount: 1 })
+  })
 })
 
 function createReviewRun(sessionId: string, projectId: number, mrIid: number, headSha: string) {
@@ -292,9 +341,7 @@ function createReviewRun(sessionId: string, projectId: number, mrIid: number, he
       includePathPrefixes: [],
       excludePathPatterns: [],
       ci: {
-        enabled: false,
-        includeFailedJobLogs: false,
-        maxFailedJobs: 2,
+        maxJobLogs: 2,
         maxJobLogBytes: 80,
       },
       source: 'configured',

@@ -63,9 +63,7 @@ function unconfiguredProfile(target: GitLabReviewProjectTarget): GitLabReviewPro
     includePathPrefixes: [],
     excludePathPatterns: [],
     ci: {
-      enabled: false,
-      includeFailedJobLogs: true,
-      maxFailedJobs: 3,
+      maxJobLogs: 3,
       maxJobLogBytes: 8_000,
     },
   }

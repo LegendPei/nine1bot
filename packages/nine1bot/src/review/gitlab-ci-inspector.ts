@@ -235,7 +235,7 @@ function updateCiSummary(runId: string, update: (current: ReviewRunCiSummary) =>
 }
 
 function jobLogReadLimit(run: ReviewRunRecord) {
-  const configured = run.project?.ci.maxFailedJobs
+  const configured = run.project?.ci.maxJobLogs
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
     ? Math.floor(configured)
     : 3
