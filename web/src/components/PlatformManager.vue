@@ -12,6 +12,16 @@ import type {
   Provider,
 } from '../api/client'
 import { copyText } from '../utils/clipboard'
+import {
+  createGitLabProjectProfile,
+  gitLabProjectIdentityKey,
+  optionalGitLabProfileNumber as optionalProfileNumber,
+  parseGitLabProjectProfiles,
+  positiveGitLabProfileNumber as positiveProfileNumber,
+  serializeGitLabProjectProfiles,
+  type GitLabProjectProfile,
+  type GitLabProjectRef,
+} from '../lib/gitlab-project-profiles'
 
 const props = defineProps<{
   platforms: PlatformSummary[]
@@ -143,36 +153,10 @@ const gitLabExcludedProjectsFieldKey = 'review.excludedProjects'
 const gitLabScopeModeFieldKey = 'review.scopeMode'
 const gitLabHookGroupsFieldKey = 'review.hookGroups'
 const gitLabProjectProfilesFieldKey = 'review.projects'
-type GitLabProjectRef = {
-  id: string | number
-  pathWithNamespace?: string
-  webUrl?: string
-}
 type GitLabGroupRef = {
   id: string | number
   fullPath?: string
   webUrl?: string
-}
-type GitLabProjectProfile = {
-  id: string
-  host?: string
-  projectId: string | number
-  nine1botProjectID: string
-  pathWithNamespace?: string
-  displayName?: string
-  enabled: boolean
-  reviewContextMarkdown?: string
-  reviewFocus: string[]
-  includePathPrefixes: string[]
-  excludePathPatterns: string[]
-  maxContextBytes?: number
-  maxFiles?: number
-  ci: {
-    enabled: boolean
-    includeFailedJobLogs: boolean
-    maxFailedJobs: number
-    maxJobLogBytes: number
-  }
 }
 const authenticatedModelCount = computed(() => {
   return props.providers.filter((provider) => provider.authenticated).reduce((total, provider) => total + provider.models.length, 0)
@@ -494,101 +478,16 @@ function setGitLabProjectRefs(key: string, projects: GitLabProjectRef[]) {
   formValues[key] = JSON.stringify(projects, null, 2)
 }
 
-function parseGitLabProjectProfiles(input: string): GitLabProjectProfile[] {
-  if (!input.trim()) return []
-  try {
-    const parsed = JSON.parse(input)
-    if (!Array.isArray(parsed)) return []
-    const ids = new Set<string>()
-    return parsed.flatMap((item): GitLabProjectProfile[] => {
-      if (!item || typeof item !== 'object') return []
-      const record = item as Record<string, unknown>
-      const id = typeof record.id === 'string' ? record.id.trim() : ''
-      const projectId = record.projectId
-      if (!id || (typeof projectId !== 'string' && typeof projectId !== 'number') || ids.has(id)) return []
-      ids.add(id)
-      const ci = record.ci && typeof record.ci === 'object' ? record.ci as Record<string, unknown> : {}
-      return [{
-        id,
-        host: optionalProfileText(record.host),
-        projectId,
-        nine1botProjectID: optionalProfileText(record.nine1botProjectID) ?? '',
-        pathWithNamespace: optionalProfileText(record.pathWithNamespace),
-        displayName: optionalProfileText(record.displayName),
-        enabled: record.enabled !== false,
-        reviewContextMarkdown: optionalProfileText(record.reviewContextMarkdown) ?? optionalProfileText(record.contextMarkdown),
-        reviewFocus: profileTextList(record.reviewFocus),
-        includePathPrefixes: profileTextList(record.includePathPrefixes),
-        excludePathPatterns: profileTextList(record.excludePathPatterns),
-        maxContextBytes: optionalProfileNumber(record.maxContextBytes),
-        maxFiles: optionalProfileNumber(record.maxFiles),
-        ci: {
-          enabled: ci.enabled === true,
-          includeFailedJobLogs: ci.includeFailedJobLogs !== false,
-          maxFailedJobs: positiveProfileNumber(ci.maxFailedJobs, 3),
-          maxJobLogBytes: positiveProfileNumber(ci.maxJobLogBytes, 8000),
-        },
-      }]
-    })
-  } catch {
-    return []
-  }
-}
-
-function optionalProfileText(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
-}
-
-function profileTextList(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
-    : []
-}
-
-function optionalProfileNumber(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
-}
-
-function positiveProfileNumber(value: unknown, fallback: number) {
-  return optionalProfileNumber(value) ?? fallback
-}
-
 function setGitLabProjectProfiles(profiles: GitLabProjectProfile[]) {
-  formValues[gitLabProjectProfilesFieldKey] = JSON.stringify(profiles, null, 2)
+  formValues[gitLabProjectProfilesFieldKey] = serializeGitLabProjectProfiles(profiles)
 }
 
 function addGitLabProjectProfile(project: GitLabProjectRef) {
   const profiles = gitLabProjectProfiles.value
-  const host = gitLabProjectHost(project.webUrl) ?? gitLabProjectHost(textValue('review.baseUrl'))
-  if (profiles.some((profile) => profile.host === host && String(profile.projectId) === String(project.id))) return
-  setGitLabProjectProfiles([...profiles, {
-    id: gitLabProjectProfileId(host, project.id),
-    host,
-    projectId: project.id,
-    nine1botProjectID: '',
-    pathWithNamespace: project.pathWithNamespace,
-    displayName: project.pathWithNamespace,
-    enabled: true,
-    reviewFocus: [],
-    includePathPrefixes: [],
-    excludePathPatterns: [],
-    ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
-  }])
-}
-
-function gitLabProjectProfileId(host: string | undefined, projectId: string | number) {
-  const authority = (host || 'gitlab').replace(/[^a-z0-9.-]/gi, '-')
-  const id = String(projectId).replace(/[^a-z0-9.-]/gi, '-')
-  return `project-${authority}-${id}`
-}
-
-function gitLabProjectHost(webUrl?: string) {
-  if (!webUrl) return undefined
-  try {
-    return new URL(webUrl).host.toLowerCase()
-  } catch {
-    return undefined
-  }
+  const profile = createGitLabProjectProfile(project, textValue('review.baseUrl'))
+  const identity = gitLabProjectIdentityKey(profile.host, profile.projectId)
+  if (profiles.some((candidate) => gitLabProjectIdentityKey(candidate.host, candidate.projectId) === identity)) return
+  setGitLabProjectProfiles([...profiles, profile])
 }
 
 function updateGitLabProjectProfile(id: string, patch: Partial<GitLabProjectProfile>) {
@@ -1498,38 +1397,20 @@ function actionResultDetails(result: PlatformActionResult) {
                     </label>
                   </div>
                   <div class="gitlab-profile-ci">
-                    <div class="gitlab-profile-toggle-row">
-                      <label class="platform-switch inline">
-                        <input
-                          :checked="profile.ci.enabled"
-                          type="checkbox"
-                          @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, enabled: ($event.target as HTMLInputElement).checked } })"
-                        />
-                        <span>将当前 MR 的 CI 状态作为审查上下文</span>
-                      </label>
-                      <label v-if="profile.ci.enabled" class="platform-switch inline">
-                        <input
-                          :checked="profile.ci.includeFailedJobLogs"
-                          type="checkbox"
-                          @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, includeFailedJobLogs: ($event.target as HTMLInputElement).checked } })"
-                        />
-                        <span>读取失败任务日志摘要</span>
-                      </label>
-                    </div>
-                    <div v-if="profile.ci.enabled" class="gitlab-profile-limit-grid">
+                    <div class="gitlab-profile-limit-grid">
                       <label class="platform-field">
-                        <span class="platform-field-label">失败任务上限</span>
+                        <span class="platform-field-label">单次审查最多读取日志数</span>
                         <input
-                          :value="profile.ci.maxFailedJobs"
+                          :value="profile.ci.maxJobLogs"
                           type="number"
                           min="1"
                           step="1"
                           class="input platform-input"
-                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxFailedJobs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
+                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxJobLogs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
                         />
                       </label>
-                      <label v-if="profile.ci.includeFailedJobLogs" class="platform-field">
-                        <span class="platform-field-label">单任务日志上限（字节）</span>
+                      <label class="platform-field">
+                        <span class="platform-field-label">单个任务日志最大字节数</span>
                         <input
                           :value="profile.ci.maxJobLogBytes"
                           type="number"
@@ -2235,8 +2116,7 @@ function actionResultDetails(result: PlatformActionResult) {
   background: var(--bg-primary);
 }
 
-.gitlab-profile-heading,
-.gitlab-profile-toggle-row {
+.gitlab-profile-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2265,11 +2145,6 @@ function actionResultDetails(result: PlatformActionResult) {
   align-items: stretch;
   gap: var(--space-sm);
   padding-top: var(--space-xs);
-}
-
-.gitlab-profile-toggle-row {
-  justify-content: flex-start;
-  flex-wrap: wrap;
 }
 
 .gitlab-profile-limit-grid {
