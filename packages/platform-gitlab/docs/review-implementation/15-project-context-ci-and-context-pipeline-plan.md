@@ -18,7 +18,7 @@
 - 不让模型直接执行 GitLab CLI 或 API；读取 GitLab 仍经 `GitLabApiClient`，上下文组装仍由 platform-gitlab 的纯函数完成。
 - 长上下文采用“冻结、分层、受预算控制的 context packet”，借鉴 `best-copilot` 的 bounded packet 与渐进加载原则，但不引入其多代理运行时和仓库记忆文件模型。[参考仓库](https://github.com/funky-eyes/best-copilot)
 
-## 当前差距
+## 立项时差距
 
 | 领域 | 当前状态 | 本轮补齐 |
 | --- | --- | --- |
@@ -51,7 +51,7 @@ GitLab webhook / @Nine1bot
 3. **变更清单层**：全部变更文件、过滤原因、切片与裁剪统计。
 4. **Diff 证据层**：按排序后的文件和 hunk 生成的可审查片段，带文件路径、old/new line 范围和被省略标记。
 
-模型提示只能依据实际提供的 diff slice 形成代码 finding；CI 日志只作为失败症状和验证线索，不能替代代码证据。所有层的来源、字节数、截断原因和 API 读取错误都写入可展示的 `contextDiagnostics`，而不是被静默丢弃。
+模型提示只能依据实际提供的 diff slice 形成代码 finding；CI 日志只作为失败症状和验证线索，不能替代代码证据。最终 packet 通过 `contextBudgetBytes`、diff stats、skipped/omissions 和 CI diagnostics 暴露预算与降级结果；当前实现不宣称提供逐层字节审计。
 
 ## 数据模型与配置
 
@@ -124,11 +124,11 @@ getJobTrace(projectId, jobId): Promise<string>
 ### 文件内 hunk 切片
 
 - 先完整保留高优先级文件的 hunk，直到耗尽 diff 预算。
-- 单文件过大时，按 hunk 而不是按字符串中间位置截断；每片带稳定 `sliceId`、路径、行范围和 byte 数。
+- 单文件过大时，按 hunk 而不是按字符串中间位置截断；每片保存文件路径和完整 hunk，渲染时生成稳定序号及 old/new line map，总体记录 `usedBytes`。
 - 当前实现对单个超过剩余预算的 hunk 整体省略并记录 `budget-exceeded`，不会截断在半行或伪造行号。首尾带行号窗口仍是后续增强项，不能在验收结论中声称已经支持。
-- 被跳过的文件和 hunk 都进入 `omissions`，包括原因 `budget-exceeded`、`profile-excluded`、`large-hunk-truncated`。
-- 预算分配先预留项目层和 CI 层，再将剩余预算用于 diff；任何可选层超预算均先缩减自身，不能挤掉项目身份或 diff manifest。
-- 只要存在可用 diff hunk，就必须为 diff evidence 预留明确的最低预算；CI 与其他可选 block 不得把 hunk 数压到 0。
+- 被过滤的文件进入 `skipped`，原因包括 `profile-excluded`、`generated`、`blacklisted`、`too-large` 和 `budget-exceeded`；预算内无法提供的 hunk 文件进入 `omissions`，原因为 `budget-exceeded`。
+- 预算分配先计算首个 diff hunk 的完整 evidence 成本；总预算足以同时容纳该 hunk 和最小补充空间时先做预留，再让项目 overlay、CI 与 manifest 共享剩余预算。
+- CI 与其他可选 block 不得把本来可容纳的 hunk 数压到 0；若总预算连一个完整 hunk evidence 都无法容纳，则保留明确的 omission，而不是截断 hunk。
 
 第一版不做向量检索、代码库全量索引或跨 MR 长期记忆；这些会引入索引一致性、权限和成本问题，且不满足当前 MR diff review 的最小闭环。
 
@@ -182,7 +182,7 @@ getJobTrace(projectId, jobId): Promise<string>
 
 **范围**
 
-- 新增 `packages/platform-gitlab/src/review/context-packet.ts` 和 `diff-slicer.ts`，将项目、CI、manifest 与 slice 组成确定性 packet。
+- 扩展 `context-builder.ts` 并新增 `diff-slicer.ts`，将项目、CI、manifest 与 slice 组成确定性 packet。
 - 让 `context-builder.ts` 从全量文件 diff 改为消费 packet，保持 `buildGitLabReviewContext` 的调用边界尽量稳定。
 - 修改 `gitlab-controller.ts` 的 runtime prompt：渲染 slice 与 omissions，禁止模型声称审查了未提供的内容。
 - 对已有 `diff-builder.ts` 的 global blacklist、overflow 和 inline position 依赖做回归保护；切片只影响模型输入，不破坏发布定位。
@@ -196,9 +196,9 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 4：配置页、运行记录与 GitLab 联调
 
-**状态：实现完成，真实 GitLab 联调待有效凭据（2026-08-06）**
+**状态：实现完成，真实 GitLab 部署复验待执行（2026-08-06）**
 
-已复用现有 PlatformManager 动态设置保存通道，而非新增硬编码配置页：项目搜索结果可直接创建审查档案；档案支持启用状态、显示名称、审查关注点、私有 Markdown 上下文和 CI 证据开关/失败任务上限。Review Runs 现展示项目归属与 pipeline 摘要、诊断信息。`publicGitLabReviewRun` 对 `ci` 使用字段白名单，防止未来实现误将 trace 等重型或敏感字段带到浏览器。真实联调仅缺少有效 GitLab token 与可访问的测试 MR；不应以过期 token 或本地伪造凭据绕过该验证。
+已复用现有 PlatformManager 动态设置保存通道，而非新增硬编码配置页：项目搜索结果可直接创建审查档案；档案支持启用状态、显示名称、审查关注点、私有 Markdown 上下文和 CI 证据开关/失败任务上限。Review Runs 现展示项目归属与 pipeline 摘要、诊断信息。`publicGitLabReviewRun` 对 `ci` 使用字段白名单，防止未来实现误将 trace 等重型或敏感字段带到浏览器。部署候选版本仍需使用隔离测试项目完成真实 webhook、pipeline 和评论回写复验；不得以本地 mock 结果替代该验证。
 
 **范围**
 
@@ -243,25 +243,31 @@ getJobTrace(projectId, jobId): Promise<string>
 
 ### Batch 6：PR Review 收敛修正
 
-**状态：进行中（2026-08-09）**
+**状态：已完成（2026-08-09）**
 
 本批次只修复 PR #52 已确认的领域边界、安全和稳定性问题，不再增加 GitLab 能力面。
 
-**实施顺序**
+**完成项**
 
-1. 为项目档案增加 `nine1botProjectID`，将历史 `contextMarkdown` 兼容迁移为 `reviewContextMarkdown`；配置页从现有 Nine1Bot Project 列表选择绑定项目。
-2. 在 controller/server 边界解析绑定 Project，并以其 `rootDirectory/worktree` 启动 Runtime；未建档、未绑定或绑定失效均使用稳定错误码 fail closed。
-3. 区分未配置 `allowedHosts` 与非法 allowlist，拒绝重复 `(host, projectId)` 档案，并统一所有 GitLab identity 路径使用 `host[:port]` authority helper。
-4. 为 diff evidence 预留最低预算；CI block 只作为当次 Runtime 输入，持久化 context 删除 job trace，仅保留安全摘要和 diagnostics。
-5. pipeline/job 列表采用显式有界分页，修复 response body 恰好等于 byte limit 时的误截断边界。
-6. 补齐 include/exclude、上下文预算、文件上限和 job log 预算的 Web 编辑入口，并覆盖配置 round-trip、项目绑定和错误态。
+- 项目档案已增加 `nine1botProjectID`，历史 `contextMarkdown` 只在读取时迁移为 `reviewContextMarkdown`；配置页可从现有 Nine1Bot Project 列表选择绑定项目。
+- Controller/server 在启动 Runtime 前解析绑定 Project，并使用其 `rootDirectory/worktree`；未建档、未绑定、重复映射或绑定失效均 fail closed，不再回退到进程目录。
+- 非法 `allowedHosts` 与未配置状态已区分；重复 `(host, projectId)` 被拒绝，GitLab identity 全程保留 `host[:port]`。
+- Diff evidence 会先保留首个可审查 hunk 的完整渲染预算；CI block 只存在于当次 Runtime 输入，落盘 context 删除 job trace，仅保留 pipeline 摘要和 diagnostics。
+- Pipeline/job 列表固定 `per_page=100` 且最多读取 5 页；响应体恰好等于 byte limit 时会继续确认 EOF，不再误报超限。
+- Web 项目档案已补齐 Nine1Bot Project 绑定、review overlay、include/exclude、上下文预算、文件上限、失败 job 数和 job log 预算；原始 `review.projects` JSON 继续隐藏。
+- 新增和修改按 TDD 完成，分为 `716b51d`、`54b4204`、`5b29dc5` 三个独立实现提交，便于 PR 审阅和必要时逐批回退。
 
-**验收门槛**
+**验证结果**
 
-- 每项行为修复先增加会失败的回归测试，再实现最小修复。
-- ReviewRun 可追溯 GitLab identity 与 Nine1Bot Project ID，但落盘数据不含 CI trace、项目本地路径或 secret。
-- 大 CI + 小总预算时仍至少包含一个可用 diff hunk；无可用 hunk 时必须有明确 omission/blocked 诊断。
-- `bun run ci:test`、`bun run ci:typecheck`、`bun run build:web` 和 `git diff --check origin/main...HEAD` 全部通过后才能推送。
+- `bun run ci:test`：421 个测试通过，0 失败，覆盖 58 个测试文件。
+- `bun run ci:typecheck`：platform-protocol、platform-feishu、platform-gitlab、nine1bot、browser-extension、browser-mcp-server 与 Web 全部通过。
+- `bun run build:web`：生产构建通过；仅有既有的大 chunk 警告。
+- `git diff --check origin/main...HEAD`：通过后方可推送；该命令在最终文档提交后重新执行。
+
+**后续环境验收**
+
+- 本批次没有把 mock API 测试标记为真实 GitLab 联调。部署候选版本后仍需在隔离测试项目验证一次项目绑定、MR HEAD pipeline、无 CI 降级、评论回写和幂等重放。
+- 单 hunk 大于全部可用预算时仍会整体省略并明确记录 omission；首尾窗口切片继续属于后续增强，不阻塞本批次合并。
 
 ## 稳定性与安全约束
 
