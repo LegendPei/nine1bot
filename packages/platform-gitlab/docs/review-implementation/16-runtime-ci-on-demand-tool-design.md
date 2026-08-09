@@ -6,6 +6,19 @@
 >
 > 关联 PR：`contrueCT/nine1bot#52`
 
+## 0. 实施状态
+
+**状态：代码与本地验证已完成，真实 GitLab 部署复验待执行（2026-08-10）。**
+
+| 批次 | 状态 | 提交 |
+| --- | --- | --- |
+| Batch A：host、diff 与 prompt 边界 | 已完成 | `b8d1f5b`、`a532cb6`、`216a10f` |
+| Batch B：CI inspector、session 服务与 wrapper tool | 已完成 | `576db37`、`bc92bfb`、`0754bb7` |
+| Batch C：移除预取、迁移 prompt/config/workflow | 已完成 | `f9bb243`、`216a10f` |
+| Batch D：全量验证与文档收口 | 本地验证已完成；部署复验待执行 | 本文档提交 |
+
+本地验证结果：`bun run ci:test` 通过 432 个测试、0 失败、59 个测试文件；根目录 typecheck、OpenCode typecheck 和 Web 生产构建均通过；`git diff --check origin/main...HEAD` 无输出。生产构建仅保留仓库已有的大 chunk warning。以上结果不等同于真实 GitLab 联调。
+
 ## 1. 背景
 
 当前 GitLab Review 在 controller 接收 webhook 后立即读取 MR HEAD 对应的 pipeline、job 和可选失败日志，再把这些内容组装成 `gitlab-review-pipeline` context block 交给模型。该方式能够在模型运行前冻结输入，但存在三个问题：
@@ -303,12 +316,16 @@ PR 描述还应补充本次架构变化、测试方式、已知边界和真实 G
 
 ### Batch A：先关闭现有 PR blocker
 
+**状态：已完成。**
+
 - 统一 trigger host/API base URL。
 - 修复 diff budget 窄边界。
 - JSON 编码 skipped/omitted paths。
 - 补 Web profile 行为 round-trip 测试。
 
 ### Batch B：建立 run 级 CI tool
+
+**状态：已完成。**
 
 - 新增 session 创建前绑定回调和 `findBySessionId()`。
 - 在 `platform-gitlab` 实现按需 CI 查询服务。
@@ -317,6 +334,8 @@ PR 描述还应补充本次架构变化、测试方式、已知边界和真实 G
 
 ### Batch C：替换预取管线
 
+**状态：已完成。**
+
 - 删除 controller CI 预取和 CI context block 注入。
 - 更新 runtime prompt、MR review skill 和 ReviewRun CI 摘要。
 - 迁移 profile CI 配置与 Web UI。
@@ -324,8 +343,10 @@ PR 描述还应补充本次架构变化、测试方式、已知边界和真实 G
 
 ### Batch D：完整验证与 PR 收口
 
+**状态：本地验证与文档已完成；真实 GitLab 部署复验待执行。**
+
 - 执行全部单元测试、类型检查和 Web 构建。
-- 在隔离 GitLab 测试项目验证成功/失败 pipeline、成功/失败 job 日志和回写。
+- 部署候选版本后，在隔离 GitLab 测试项目验证成功/失败/运行中 pipeline、任意状态 job 日志和回写。
 - 更新计划文档与 PR 描述。
 - 对照每条 review comment 复查，不自动回复或解决 GitHub thread，除非用户明确要求。
 
@@ -348,3 +369,10 @@ PR 描述还应补充本次架构变化、测试方式、已知边界和真实 G
 - 不将 MR diff 改为模型动态读取。
 - 不实现 CI 日志缓存、向量索引或跨 MR 长期记忆。
 - 不引入 MCP。
+
+## 17. 已知边界与部署验收
+
+- 单个 hunk 大于全部可用 diff 预算时仍整体省略并记录 omission；首尾窗口切片未在本批实现。
+- CI tool 不提供任意 API path、pipeline 写操作、job 重跑或日志缓存。
+- 本地 mock 覆盖 host、HEAD pipeline、分页、日志归属、限额、脱敏、retry 和非 review session 拒绝；尚未在本次代码版本的隔离 GitLab 部署上复测。
+- 部署验收必须从 secret store 读取最小权限 token，不在命令、文档、PR 评论或 ReviewRun 中记录凭证和完整 trace。

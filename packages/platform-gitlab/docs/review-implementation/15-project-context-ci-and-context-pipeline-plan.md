@@ -1,12 +1,12 @@
 # GitLab Review 项目归属、CI/CD 与上下文管线实施计划
 
-> 本文记录 2026-08-06 确认的改进方案，并在 2026-08-09 根据 PR review 修正项目领域边界。它是实施计划，不改变已经稳定的 webhook、MR review、回写和幂等行为。
+> 本文记录 2026-08-06 确认的改进方案，并在 2026-08-09 根据 PR review 修正项目领域边界。2026-08-10 的 Batch 7 已将 CI 从 controller 预取改为运行时按需工具；本文保留早期批次的演进记录，并以 Batch 7 的边界作为当前实现。
 
 ## 目标
 
 将 GitLab Review 从“按一次 webhook 创建的通用审查任务”升级为“隶属于明确 GitLab 项目的审查任务”。以 `root/uftest` 为第一个项目档案：该仓库的说明、架构知识、审查重点和上下文预算只用于该仓库触发的 review。
 
-同时，将 GitLab CI/CD 作为可选的审查证据接入：存在与可读取的 pipeline 时注入状态、失败 job 和受控日志摘要；不存在、尚未完成、无权限读取或 API 失败时记录降级状态，但不得阻断 review 创建、运行、发布或重试。
+同时，将 GitLab CI/CD 作为可选的审查证据接入：MR Runtime 可先查询当前 HEAD pipeline 和全部状态的 job，再按需读取受限日志；不存在、尚未完成、无权限读取或 API 失败时记录降级状态，但不得阻断 review 创建、运行、发布或重试。
 
 ## 已确认决策
 
@@ -15,8 +15,8 @@
 - 配置了 GitLab 项目档案却没有有效 Nine1Bot Project 绑定时必须 fail closed，不得静默回退到 `NINE1BOT_PROJECT_DIR` 或 `process.cwd()`。
 - 每个 `ReviewRun` 必须固化项目身份和项目配置快照，历史 run 不因后续编辑项目配置而改变归属或证据。
 - CI/CD 仅是增强上下文，第一版不作为 review 发布门禁，也不触发、重跑、取消或修改 GitLab pipeline。
-- 不让模型直接执行 GitLab CLI 或 API；读取 GitLab 仍经 `GitLabApiClient`，上下文组装仍由 platform-gitlab 的纯函数完成。
-- 长上下文采用“冻结、分层、受预算控制的 context packet”，借鉴 `best-copilot` 的 bounded packet 与渐进加载原则，但不引入其多代理运行时和仓库记忆文件模型。[参考仓库](https://github.com/funky-eyes/best-copilot)
+- 不让模型直接执行 GitLab CLI、`curl` 或任意 API；CI 只能通过 `gitlab_ci_inspect` wrapper tool 读取，host、项目、MR、token 和请求路径均由服务端绑定。
+- 长上下文采用“冻结 diff、分层、受预算控制的 context packet + CI 渐进加载”，借鉴 `best-copilot` 的 bounded packet 与渐进加载原则，但不引入其多代理运行时和仓库记忆文件模型。[参考仓库](https://github.com/funky-eyes/best-copilot)
 
 ## 立项时差距
 
@@ -24,9 +24,9 @@
 | --- | --- | --- |
 | 项目归属 | webhook trigger 含 `projectId/projectPath`，`ReviewRun` 未有稳定项目实体 | 新增项目档案匹配、配置快照和对外展示字段 |
 | 项目知识 | 仅有全局 scope 和 review 参数 | 项目专属 Markdown 说明、审查重点、路径规则与预算 |
-| CI/CD | 未调用 pipeline/job API | 读取 MR HEAD 对应 pipeline，摘要失败 job 和受限日志 |
+| CI/CD | 立项时未调用 pipeline/job API | Runtime 查询 MR HEAD pipeline，并按需读取任意状态 job 的受限日志 |
 | 长 diff | `maxFiles/maxDiffBytes` 后按文件整体取舍 | 文件优先级、hunk 切片、摘要和裁剪清单 |
-| 上下文边界 | trigger 和 diff manifest 为固定 context blocks | 增加项目、CI、diff slices 四层上下文包，并冻结到 run |
+| 上下文边界 | trigger 和 diff manifest 为固定 context blocks | 冻结项目 overlay、manifest 与 diff slices；CI 不进入初始 packet |
 | Web 管理 | GitLab 设置偏全局 | 项目档案列表、编辑、校验和 run 项目筛选/展示 |
 
 ## 目标架构
@@ -38,9 +38,10 @@ GitLab webhook / @Nine1bot
   -> project profile 提供 opaque nine1botProjectID
   -> controller/server 边界解析 Nine1Bot Project
   -> ReviewRun 创建并持久化 GitLab identity + project binding snapshot
-  -> GitLabApiClient 读取 MR diff 与可选 CI/CD 证据
-  -> ReviewContextPacketBuilder 受预算组装：review overlay -> bounded CI -> diff manifest -> diff slices
-  -> Runtime 在绑定 Project 的 rootDirectory/worktree 中执行既有 GitLab review workflow
+  -> GitLabApiClient 读取 MR diff
+  -> ReviewContextPacketBuilder 受预算组装：review overlay -> diff manifest -> diff slices
+  -> Runtime session 与 ReviewRun 绑定后执行既有 GitLab review workflow
+  -> bot 通过 gitlab_ci_inspect 按需读取当前 HEAD pipeline/job 与受限日志
   -> ReviewRun 和 GitLab 回写都保留项目归属与证据摘要
 ```
 
@@ -51,7 +52,7 @@ GitLab webhook / @Nine1bot
 3. **变更清单层**：全部变更文件、过滤原因、切片与裁剪统计。
 4. **Diff 证据层**：按排序后的文件和 hunk 生成的可审查片段，带文件路径、old/new line 范围和被省略标记。
 
-模型提示只能依据实际提供的 diff slice 形成代码 finding；CI 日志只作为失败症状和验证线索，不能替代代码证据。最终 packet 通过 `contextBudgetBytes`、diff stats、skipped/omissions 和 CI diagnostics 暴露预算与降级结果；当前实现不宣称提供逐层字节审计。
+模型提示只能依据实际提供的 diff slice 形成代码 finding；CI 日志只作为运行症状和验证线索，不能替代代码证据。冻结 packet 通过 `contextBudgetBytes`、diff stats 和 skipped/omissions 暴露预算与降级结果；CI 查询状态由 ReviewRun 安全摘要另行记录。当前实现不宣称提供逐层字节审计。
 
 ## 数据模型与配置
 
@@ -75,9 +76,7 @@ type GitLabReviewProjectProfile = {
   maxContextBytes?: number
   maxFiles?: number
   ci: {
-    enabled: boolean
-    includeFailedJobLogs: boolean
-    maxFailedJobs: number
+    maxJobLogs: number
     maxJobLogBytes: number
   }
 }
@@ -102,9 +101,9 @@ getPipelineJobs(projectId, pipelineId): Promise<GitLabPipelineJob[]>
 getJobTrace(projectId, jobId): Promise<string>
 ```
 
-选择规则：优先 `sha === trigger.headSha` 的最新 pipeline；若 GitLab API 未返回 sha 匹配项，则不猜测关联关系，标记 `pipeline_not_found_for_head_sha`。pipeline 与 job 列表使用显式、有限的分页策略。只读取失败、取消或手动阻塞的前 N 个 job；日志先清除 ANSI 控制符和可能的密钥形式，再截断到项目预算。日志只保留在当次 Runtime 输入内，`ReviewRunStore` 仅持久化 pipeline/job 摘要和 diagnostics。
+选择规则：`gitlab_ci_inspect(action=list)` 只选择 `sha === trigger.headSha` 的最新 pipeline；若 GitLab API 未返回 sha 匹配项，则不猜测关联关系，标记 `pipeline_not_found_for_head_sha`。pipeline 与 job 列表使用显式、有限的分页策略。模型可针对任意状态的 job 调用 `read_job_log`，服务端先验证 job 确属当前 HEAD pipeline，再清除 ANSI 控制符和可能的密钥形式，并按 `maxJobLogBytes` 截断。日志只存在于当次 tool output，`ReviewRunStore` 仅持久化 pipeline/job 摘要、查询次数和 diagnostics。
 
-所有以下情况均返回“CI 证据不可用/不完整”诊断并继续 review：无 MR、无 HEAD SHA、无 pipeline、pipeline running、token 缺失、403/404、超时、单个 job trace 读取失败。只有 diff 自身的既有硬阻断仍可阻断 review。
+所有以下情况均返回稳定的“CI 证据不可用/不完整”诊断并继续 review：无 MR、无 HEAD SHA、无 pipeline、token 缺失、403/404、超时、单个 job trace 读取失败。pipeline running 仍可正常列出，模型可按需查看其 job；只有 diff 自身的既有硬阻断仍可阻断 review。
 
 ## 长上下文切片策略
 
@@ -154,11 +153,11 @@ getJobTrace(projectId, jobId): Promise<string>
 - 同项目的后续配置修改不改变历史 run 的项目快照。
 - 未建档兼容行为仅记录为历史实现；Batch 6 完成后，未建档、未绑定和禁用档案的项目均被确定性拒绝。
 
-### Batch 2：可降级 CI/CD 上下文
+### Batch 2：可降级 CI/CD 上下文（历史预取实现）
 
-**状态：已完成（2026-08-06）**
+**状态：历史批次已完成，controller 预取已由 Batch 7 替代（2026-08-10）**
 
-已接入 MR pipeline、pipeline jobs 与 job trace 的只读 API；仅精确匹配当前 HEAD SHA。异常 job trace 会脱敏并截断后注入 context，`ReviewRun.ci` 仅持久化 pipeline 摘要和 diagnostics。无 pipeline、token 缺失或 API 读取失败不会阻断 review。
+该批次曾接入 MR pipeline、pipeline jobs 与 job trace 的 controller 预取；仅精确匹配当前 HEAD SHA。其 GitLab API 能力和日志清理规则继续复用，但 `pipeline-context.ts`、初始 CI context block 和提前选择失败日志的流程已删除，当前行为见 Batch 7。
 
 **范围**
 
@@ -198,12 +197,12 @@ getJobTrace(projectId, jobId): Promise<string>
 
 **状态：实现完成，真实 GitLab 部署复验待执行（2026-08-06）**
 
-已复用现有 PlatformManager 动态设置保存通道，而非新增硬编码配置页：项目搜索结果可直接创建审查档案；档案支持启用状态、显示名称、审查关注点、私有 Markdown 上下文和 CI 证据开关/失败任务上限。Review Runs 现展示项目归属与 pipeline 摘要、诊断信息。`publicGitLabReviewRun` 对 `ci` 使用字段白名单，防止未来实现误将 trace 等重型或敏感字段带到浏览器。部署候选版本仍需使用隔离测试项目完成真实 webhook、pipeline 和评论回写复验；不得以本地 mock 结果替代该验证。
+已复用现有 PlatformManager 动态设置保存通道，而非新增硬编码配置页：项目搜索结果可直接创建审查档案；档案支持启用状态、显示名称、审查关注点、私有 Markdown 上下文、单次审查最多读取日志数和单个任务日志最大字节数。旧 CI 启用开关、失败日志开关和 `maxFailedJobs` 已迁移，不再控制 Runtime。Review Runs 展示项目归属与 pipeline 摘要、诊断信息。`publicGitLabReviewRun` 对 `ci` 使用字段白名单，防止未来实现误将 trace 等重型或敏感字段带到浏览器。部署候选版本仍需使用隔离测试项目完成真实 webhook、pipeline 和评论回写复验；不得以本地 mock 结果替代该验证。
 
 **范围**
 
 - 定位当前 GitLab 配置页的数据源，复用已完成的 Feishu 平台配置模式；提供项目档案列表、搜索项目、编辑表单和 Markdown 上下文编辑器。
-- 表单字段包括项目、启用状态、显示名、审查重点、include/exclude 路径、总上下文预算、CI 开关、失败 job 数、日志预算与项目说明。
+- 表单字段包括项目、启用状态、显示名、审查重点、include/exclude 路径、总上下文预算、单次日志读取上限、单日志字节上限与项目说明。
 - 在 review runs 列表和详情中展示项目归属、pipeline 摘要、context diagnostics、切片/省略统计；默认不展示 Markdown 全文或原始日志。
 - 为前端状态、配置 round-trip、路由 DTO 与空/错误态补测试。
 - 使用有效 GitLab token 在 UFtest 完成真实 MR 联调：项目匹配、pipeline 可用与不可用、手动 mention、自动 webhook、结果回写、重试与幂等。
@@ -254,7 +253,7 @@ getJobTrace(projectId, jobId): Promise<string>
 - 非法 `allowedHosts` 与未配置状态已区分；重复 `(host, projectId)` 被拒绝，GitLab identity 全程保留 `host[:port]`。
 - Diff evidence 会先保留首个可审查 hunk 的完整渲染预算；CI block 只存在于当次 Runtime 输入，落盘 context 删除 job trace，仅保留 pipeline 摘要和 diagnostics。
 - Pipeline/job 列表固定 `per_page=100` 且最多读取 5 页；响应体恰好等于 byte limit 时会继续确认 EOF，不再误报超限。
-- Web 项目档案已补齐 Nine1Bot Project 绑定、review overlay、include/exclude、上下文预算、文件上限、失败 job 数和 job log 预算；原始 `review.projects` JSON 继续隐藏。
+- Web 项目档案已补齐 Nine1Bot Project 绑定、review overlay、include/exclude、上下文预算、文件上限和 job log 预算；原始 `review.projects` JSON 继续隐藏。该批次的失败 job 数字段已由 Batch 7 迁移为状态无关的 `maxJobLogs`。
 - 专用 GitLab webhook 的内部结果仍携带完整 context 启动 Runtime，但公网 HTTP 响应会剥离 context，避免 diff 或当次 CI trace 进入调用方及中间代理日志。
 - 新增和修改按 TDD 完成，分为 `716b51d`、`54b4204`、`5b29dc5`、`1da9852` 四个独立实现提交，便于 PR 审阅和必要时逐批回退。
 
@@ -271,6 +270,34 @@ getJobTrace(projectId, jobId): Promise<string>
 - 本批次没有把 mock API 测试标记为真实 GitLab 联调。部署候选版本后仍需在隔离测试项目验证一次项目绑定、MR HEAD pipeline、无 CI 降级、评论回写和幂等重放。
 - 单 hunk 大于全部可用预算时仍会整体省略并明确记录 omission；首尾窗口切片继续属于后续增强，不阻塞本批次合并。
 
+### Batch 7：运行时按需 CI 工具与 PR 收口
+
+**状态：代码与本地验证已完成，真实 GitLab 部署复验待执行（2026-08-10）**
+
+**完成项**
+
+- 所有 MR API 读写统一绑定 webhook trigger host；配置 authority 不一致时 fail closed，并保留自定义端口。
+- 修复窄上下文预算边界，只要总预算可容纳首个完整 hunk 就优先保留；skipped/omitted 路径使用 JSON evidence，避免文件名突破 prompt 数据边界。
+- 新增状态无关的纯 CI inspector、ReviewRun session 服务和 OpenCode `gitlab_ci_inspect` wrapper tool；工具输入仅允许 `list` 或携带 `jobId` 的 `read_job_log`。
+- Runtime session 在首条消息发送前绑定 ReviewRun；非 review session、重复 session、host 不匹配、token 缺失或 job 越界均确定性拒绝。
+- 删除 controller CI 预取与 `pipeline-context.ts`。MR prompt 只提供 MR URL、HEAD 和受控工具使用规则；commit review 不暴露 CI 工具。
+- CI 对所有 pipeline/job 状态开放，日志按需读取；每 run 有日志数量与字节预算，retry 使用新 session 重新读取最新状态。
+- Web profile 迁移为 `maxJobLogs`/`maxJobLogBytes`，并抽出可单测的 parse/serialize helper；配置测试改为真实 save/reload round-trip。
+- ReviewRun 与公网 DTO 只保存/返回安全摘要、查询计数和稳定诊断，不持久化 trace、token、secret ref 或原始 GitLab 错误正文。
+
+**验证结果**
+
+- `bun run ci:test`：432 个测试通过，0 失败，覆盖 59 个测试文件。
+- `bun run ci:typecheck`：platform-protocol、platform-feishu、platform-gitlab、nine1bot、browser-extension、browser-mcp-server 与 Web 全部通过。
+- `bun run --cwd opencode/packages/opencode typecheck`：通过。
+- `bun run build:web`：生产构建通过；仅保留既有的大 chunk 警告。
+- `git diff --check origin/main...HEAD`：通过；敏感信息扫描未发现新增凭证。
+
+**后续环境验收**
+
+- 本批次未把 mock API 或本地测试标记为真实 GitLab 联调。部署候选版本后仍需在隔离测试项目验证 `list`、成功/失败/运行中 job 日志、无 CI 降级、评论回写和 retry 新鲜度。
+- GitHub PR 的 5 条 review thread 仍由 reviewer/维护者确认后处理；当前代码已逐条增加对应行为回归，本次不自动回复或解决 thread。
+
 ## 稳定性与安全约束
 
 - 项目档案匹配只信任 GitLab webhook 解析出的 host/project ID，不信任用户评论中的项目文字。
@@ -286,7 +313,7 @@ getJobTrace(projectId, jobId): Promise<string>
 | --- | --- |
 | 纯函数 | 项目匹配、配置归一化、无档案/未绑定拒绝、禁用拒绝、排序、hunk 切片、预算和 omission |
 | GitLab API client | pipeline/job/trace 路径、分页/空响应、非 2xx、日志内容读取 |
-| Controller | run 快照、CI 成功/失败/缺失、CI 降级不阻断、prompt 内容、幂等与 retry |
+| Controller/session service | run 快照、session 绑定、CI 成功/失败/缺失、CI 降级不阻断、prompt/tool 边界、幂等与 retry |
 | Store/路由 | 旧 run 兼容、脱敏 DTO、项目和诊断展示 |
 | Web | 表单保存/重载、项目编辑、空态、错误态、run 归属展示 |
 | 真实联调 | UFtest MR 的有 CI、无 CI、失败 CI，以及真实 comment 回写 |
