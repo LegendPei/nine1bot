@@ -1,5 +1,6 @@
 export * from './api-client'
 export * from './comment-renderer'
+export * from './ci-inspector'
 export * from './context-builder'
 export * from './diff-builder'
 export * from './diff-slicer'

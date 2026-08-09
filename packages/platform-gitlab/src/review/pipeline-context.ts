@@ -1,4 +1,5 @@
 import type { GitLabApiClient, GitLabPipelineJob, GitLabPipelineSummary } from './api-client'
+import { sanitizeGitLabCiTrace } from './ci-inspector'
 
 export type GitLabPipelineContext = {
   pipeline?: GitLabPipelineSummary
@@ -52,7 +53,7 @@ async function failedJobs(input: Parameters<typeof loadGitLabPipelineContext>[0]
     if (!input.options.includeFailedJobLogs) return { job }
     try {
       const trace = await input.client.getJobTrace(input.projectId, job.id, input.options.maxJobLogBytes)
-      return { job: { ...job, trace: safeTrace(trace, input.options.maxJobLogBytes) } }
+      return { job: { ...job, trace: truncateUtf8(sanitizeGitLabCiTrace(trace), input.options.maxJobLogBytes) } }
     } catch (error) {
       return { job, diagnostic: `job_trace_unavailable:${job.id}:${errorName(error)}` }
     }
@@ -94,16 +95,6 @@ function block(pipeline: GitLabPipelineSummary, jobs: Array<GitLabPipelineJob & 
 
 function isUnhealthy(status: string | undefined) {
   return status === 'failed' || status === 'canceled' || status === 'manual'
-}
-
-function safeTrace(trace: string, maxBytes: number) {
-  const sanitized = trace
-    .replace(/\u001B(?:[@-_]|\[[0-?]*[ -/]*[@-~])/g, '')
-    .replace(/authorization\s*:\s*bearer\s+[^\s]+/gi, 'Authorization: Bearer ***')
-    .replace(/(?:token|password|secret|api[_-]?key)\s*[:=]\s*[^\s]+/gi, (match) =>
-      match.replace(/[:=].*/, '=***'),
-    )
-  return truncateUtf8(sanitized, maxBytes)
 }
 
 function truncateUtf8(value: string, maxBytes: number) {

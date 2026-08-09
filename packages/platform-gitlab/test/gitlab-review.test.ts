@@ -10,6 +10,7 @@ import {
   defaultGitLabReviewSettings,
   GitLabApiError,
   GitLabApiClient,
+  inspectGitLabCi,
   minimumGitLabReviewDiffEvidenceBytes,
   normalizeGitLabReviewSettings,
   parseSubagentStageResult,
@@ -21,6 +22,7 @@ import {
   renderGitLabReviewSliceEvidence,
   renderBlockedDiffComment,
   renderGitLabReviewDiffEvidence,
+  readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
@@ -1274,6 +1276,81 @@ describe('GitLab review foundation', () => {
       'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs?per_page=100&page=1',
       'https://gitlab.example.com/api/v4/projects/3/jobs/8/trace',
     ])
+  })
+
+  test('inspects all GitLab CI job statuses for the review HEAD', async () => {
+    const result = await inspectGitLabCi({
+      client: {
+        async getMergeRequestPipelines() {
+          return [
+            { id: 54, sha: 'old-head', status: 'failed' },
+            { id: 55, sha: 'review-head', status: 'success', ref: 'feat/review' },
+          ]
+        },
+        async getPipelineJobs() {
+          return [
+            { id: 56, name: 'build', stage: 'build', status: 'success' },
+            { id: 57, name: 'test', stage: 'verify', status: 'failed' },
+            { id: 58, name: 'deploy', stage: 'deploy', status: 'running' },
+          ]
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'review-head',
+    })
+
+    expect(result.pipeline).toMatchObject({ id: 55, sha: 'review-head', status: 'success' })
+    expect(result.jobs.map((job) => job.status)).toEqual(['success', 'failed', 'running'])
+    expect(result.diagnostics).toEqual([])
+  })
+
+  test('reads bounded logs for any job status and rejects jobs outside the pipeline', async () => {
+    const traceCalls: Array<string | number> = []
+    const client = {
+      async getPipelineJobs() {
+        return [
+          { id: 56, name: 'build', status: 'success' },
+          { id: 57, name: 'test', status: 'failed' },
+        ]
+      },
+      async getJobTrace(_projectId: string | number, jobId: string | number) {
+        traceCalls.push(jobId)
+        return jobId === 56 ? '\u001b[32mbuild complete\u001b[0m' : 'token=secret-value\nFAILED assertion'
+      },
+    }
+
+    const success = await readGitLabCiJobLog({
+      client,
+      projectId: 3,
+      pipelineId: 55,
+      jobId: 56,
+      maxBytes: 80,
+    })
+    const failed = await readGitLabCiJobLog({
+      client,
+      projectId: 3,
+      pipelineId: 55,
+      jobId: 57,
+      maxBytes: 80,
+    })
+    const unrelated = await readGitLabCiJobLog({
+      client,
+      projectId: 3,
+      pipelineId: 55,
+      jobId: 99,
+      maxBytes: 80,
+    })
+
+    expect(success).toMatchObject({ job: { id: 56, status: 'success' }, trace: 'build complete', diagnostics: [] })
+    expect(failed).toMatchObject({ job: { id: 57, status: 'failed' }, diagnostics: [] })
+    expect(failed.trace).toContain('token=***')
+    expect(failed.trace).not.toContain('secret-value')
+    expect(unrelated).toMatchObject({
+      trace: undefined,
+      diagnostics: ['ci_job_not_in_head_pipeline'],
+    })
+    expect(traceCalls).toEqual([56, 57])
   })
 
   test('loads at most five pages of merge request pipelines', async () => {
