@@ -585,6 +585,10 @@ export interface Project {
   sandboxes: string[]
 }
 
+export type Nine1BotProjectOption = Pick<Project, 'id' | 'name' | 'worktree'> & {
+  rootDirectory?: string
+}
+
 export interface ProjectEnvironmentResponse {
   keys: string[]
   variables: Record<string, string>
@@ -704,6 +708,7 @@ export interface GitLabReviewRun {
     id: string
     host?: string
     projectId: string | number
+    nine1botProjectID: string
     pathWithNamespace?: string
     displayName?: string
     enabled: boolean

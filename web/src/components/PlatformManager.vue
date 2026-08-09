@@ -8,6 +8,7 @@ import type {
   PlatformDetail,
   PlatformSummary,
   PlatformActionResult,
+  Nine1BotProjectOption,
   Provider,
 } from '../api/client'
 import { copyText } from '../utils/clipboard'
@@ -22,6 +23,7 @@ const props = defineProps<{
   error: string
   actionResult: PlatformActionResult | null
   providers: Provider[]
+  projects: Nine1BotProjectOption[]
 }>()
 
 const emit = defineEmits<{
@@ -155,10 +157,11 @@ type GitLabProjectProfile = {
   id: string
   host?: string
   projectId: string | number
+  nine1botProjectID: string
   pathWithNamespace?: string
   displayName?: string
   enabled: boolean
-  contextMarkdown?: string
+  reviewContextMarkdown?: string
   reviewFocus: string[]
   includePathPrefixes: string[]
   excludePathPatterns: string[]
@@ -509,10 +512,11 @@ function parseGitLabProjectProfiles(input: string): GitLabProjectProfile[] {
         id,
         host: optionalProfileText(record.host),
         projectId,
+        nine1botProjectID: optionalProfileText(record.nine1botProjectID) ?? '',
         pathWithNamespace: optionalProfileText(record.pathWithNamespace),
         displayName: optionalProfileText(record.displayName),
         enabled: record.enabled !== false,
-        contextMarkdown: optionalProfileText(record.contextMarkdown),
+        reviewContextMarkdown: optionalProfileText(record.reviewContextMarkdown) ?? optionalProfileText(record.contextMarkdown),
         reviewFocus: profileTextList(record.reviewFocus),
         includePathPrefixes: profileTextList(record.includePathPrefixes),
         excludePathPatterns: profileTextList(record.excludePathPatterns),
@@ -555,11 +559,13 @@ function setGitLabProjectProfiles(profiles: GitLabProjectProfile[]) {
 
 function addGitLabProjectProfile(project: GitLabProjectRef) {
   const profiles = gitLabProjectProfiles.value
-  if (profiles.some((profile) => String(profile.projectId) === String(project.id))) return
+  const host = gitLabProjectHost(project.webUrl) ?? gitLabProjectHost(textValue('review.baseUrl'))
+  if (profiles.some((profile) => profile.host === host && String(profile.projectId) === String(project.id))) return
   setGitLabProjectProfiles([...profiles, {
-    id: `project-${String(project.id)}`,
-    host: gitLabProjectHost(project.webUrl),
+    id: gitLabProjectProfileId(host, project.id),
+    host,
     projectId: project.id,
+    nine1botProjectID: '',
     pathWithNamespace: project.pathWithNamespace,
     displayName: project.pathWithNamespace,
     enabled: true,
@@ -568,6 +574,12 @@ function addGitLabProjectProfile(project: GitLabProjectRef) {
     excludePathPatterns: [],
     ci: { enabled: false, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8000 },
   }])
+}
+
+function gitLabProjectProfileId(host: string | undefined, projectId: string | number) {
+  const authority = (host || 'gitlab').replace(/[^a-z0-9.-]/gi, '-')
+  const id = String(projectId).replace(/[^a-z0-9.-]/gi, '-')
+  return `project-${authority}-${id}`
 }
 
 function gitLabProjectHost(webUrl?: string) {
@@ -589,6 +601,20 @@ function updateGitLabProjectProfile(id: string, patch: Partial<GitLabProjectProf
 
 function removeGitLabProjectProfile(id: string) {
   setGitLabProjectProfiles(gitLabProjectProfiles.value.filter((profile) => profile.id !== id))
+}
+
+function hasNine1BotProject(projectID: string) {
+  return props.projects.some((project) => project.id === projectID)
+}
+
+function nine1botProjectLabel(project: Nine1BotProjectOption) {
+  return project.name || project.rootDirectory || project.worktree || project.id
+}
+
+function gitLabProfileBindingError(profile: GitLabProjectProfile) {
+  if (!profile.nine1botProjectID) return '请选择一个 Nine1Bot 项目。'
+  if (!hasNine1BotProject(profile.nine1botProjectID)) return '绑定的 Nine1Bot 项目已不存在，请重新选择。'
+  return ''
 }
 
 function profileLines(value: string[]) {
@@ -818,7 +844,24 @@ function buildSettingsPatch() {
     if (parsed.include) settings[field.key] = parsed.value
   }
 
+  if (isGitLabPlatform.value && !jsonErrors[gitLabProjectProfilesFieldKey]) {
+    const profileError = gitLabProjectProfilesValidationError()
+    if (profileError) jsonErrors[gitLabProjectProfilesFieldKey] = profileError
+  }
+
   return Object.keys(jsonErrors).length > 0 ? undefined : settings
+}
+
+function gitLabProjectProfilesValidationError() {
+  for (const profile of gitLabProjectProfiles.value) {
+    if (!profile.nine1botProjectID) {
+      return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 尚未绑定 Nine1Bot 项目。`
+    }
+    if (props.projects.length > 0 && !hasNine1BotProject(profile.nine1botProjectID)) {
+      return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 绑定的 Nine1Bot 项目不存在。`
+    }
+  }
+  return ''
 }
 
 function saveSettings() {
@@ -1319,7 +1362,13 @@ function actionResultDetails(result: PlatformActionResult) {
             <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
               <div class="platform-section-heading-row">
                 <h5 class="platform-section-title">项目审查档案</h5>
-                <span class="gitlab-guide-text">档案为仓库提供稳定的业务上下文、审查重点和 CI 证据策略；未建档项目仍可按默认策略审查。</span>
+                <span class="gitlab-guide-text">每个可审查仓库都必须建档并绑定已有的 Nine1Bot 项目；档案只补充 review 策略。</span>
+              </div>
+              <div v-if="props.projects.length === 0" class="platform-alert warning">
+                当前没有可绑定的 Nine1Bot 项目，请先在项目页添加仓库。
+              </div>
+              <div v-if="jsonErrors[gitLabProjectProfilesFieldKey]" class="platform-alert error">
+                {{ jsonErrors[gitLabProjectProfilesFieldKey] }}
               </div>
               <div v-if="gitLabProjectProfiles.length" class="gitlab-profile-list">
                 <article v-for="profile in gitLabProjectProfiles" :key="profile.id" class="gitlab-profile-card">
@@ -1353,6 +1402,30 @@ function actionResultDetails(result: PlatformActionResult) {
                       />
                     </label>
                     <label class="platform-field">
+                      <span class="platform-field-label">Nine1Bot 项目</span>
+                      <span class="platform-field-desc text-muted text-sm">Review runtime 使用该项目的工作目录和通用项目说明。</span>
+                      <select
+                        :value="profile.nine1botProjectID"
+                        class="input platform-input"
+                        required
+                        @change="updateGitLabProjectProfile(profile.id, { nine1botProjectID: ($event.target as HTMLSelectElement).value })"
+                      >
+                        <option value="">请选择项目</option>
+                        <option
+                          v-if="profile.nine1botProjectID && !hasNine1BotProject(profile.nine1botProjectID)"
+                          :value="profile.nine1botProjectID"
+                        >
+                          已失效 · {{ profile.nine1botProjectID }}
+                        </option>
+                        <option v-for="project in props.projects" :key="project.id" :value="project.id">
+                          {{ nine1botProjectLabel(project) }}
+                        </option>
+                      </select>
+                      <span v-if="gitLabProfileBindingError(profile)" class="platform-field-error">
+                        {{ gitLabProfileBindingError(profile) }}
+                      </span>
+                    </label>
+                    <label class="platform-field wide">
                       <span class="platform-field-label">审查关注点</span>
                       <textarea
                         :value="profileLines(profile.reviewFocus)"
@@ -1364,47 +1437,113 @@ function actionResultDetails(result: PlatformActionResult) {
                     </label>
                   </div>
                   <label class="platform-field">
-                    <span class="platform-field-label">仓库上下文</span>
-                    <span class="platform-field-desc text-muted text-sm">只注入该仓库的 review 上下文，不会公开到运行记录列表。</span>
+                    <span class="platform-field-label">Review 补充上下文</span>
+                    <span class="platform-field-desc text-muted text-sm">只补充该仓库的审查约束；通用项目说明在 Nine1Bot 项目页维护。</span>
                     <textarea
-                      :value="profile.contextMarkdown || ''"
+                      :value="profile.reviewContextMarkdown || ''"
                       class="input platform-input platform-textarea"
                       rows="5"
                       placeholder="例如：UF 的模块边界、关键约束、不可回归的兼容性要求"
-                      @input="updateGitLabProjectProfile(profile.id, { contextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
+                      @input="updateGitLabProjectProfile(profile.id, { reviewContextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
                     />
                   </label>
-                  <div class="gitlab-profile-ci">
-                    <label class="platform-switch inline">
-                      <input
-                        :checked="profile.ci.enabled"
-                        type="checkbox"
-                        @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, enabled: ($event.target as HTMLInputElement).checked } })"
+                  <div class="gitlab-profile-grid">
+                    <label class="platform-field">
+                      <span class="platform-field-label">优先审查路径</span>
+                      <span class="platform-field-desc text-muted text-sm">每行一个目录前缀；留空时按普通优先级处理全部文件。</span>
+                      <textarea
+                        :value="profileLines(profile.includePathPrefixes)"
+                        class="input platform-input platform-textarea"
+                        rows="3"
+                        placeholder="src/security/"
+                        @input="updateGitLabProjectProfile(profile.id, { includePathPrefixes: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
                       />
-                      <span>将当前 MR 的 CI 状态作为审查上下文</span>
                     </label>
-                    <label v-if="profile.ci.enabled" class="platform-switch inline">
-                      <input
-                        :checked="profile.ci.includeFailedJobLogs"
-                        type="checkbox"
-                        @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, includeFailedJobLogs: ($event.target as HTMLInputElement).checked } })"
-                      />
-                      <span>读取失败任务日志摘要</span>
-                    </label>
-                    <label v-if="profile.ci.enabled" class="platform-field gitlab-profile-number-field">
-                      <span class="platform-field-label">失败任务上限</span>
-                      <input
-                        :value="profile.ci.maxFailedJobs"
-                        type="number"
-                        min="1"
-                        class="input platform-input"
-                        @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxFailedJobs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
+                    <label class="platform-field">
+                      <span class="platform-field-label">排除路径</span>
+                      <span class="platform-field-desc text-muted text-sm">每行一个 glob；匹配文件不会进入审查证据。</span>
+                      <textarea
+                        :value="profileLines(profile.excludePathPatterns)"
+                        class="input platform-input platform-textarea"
+                        rows="3"
+                        placeholder="**/*.generated.ts"
+                        @input="updateGitLabProjectProfile(profile.id, { excludePathPatterns: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
                       />
                     </label>
                   </div>
+                  <div class="gitlab-profile-limit-grid">
+                    <label class="platform-field">
+                      <span class="platform-field-label">上下文预算（字节）</span>
+                      <input
+                        :value="profile.maxContextBytes ?? ''"
+                        type="number"
+                        min="1"
+                        step="1"
+                        class="input platform-input"
+                        placeholder="使用全局值"
+                        @input="updateGitLabProjectProfile(profile.id, { maxContextBytes: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
+                      />
+                    </label>
+                    <label class="platform-field">
+                      <span class="platform-field-label">文件上限</span>
+                      <input
+                        :value="profile.maxFiles ?? ''"
+                        type="number"
+                        min="1"
+                        step="1"
+                        class="input platform-input"
+                        placeholder="使用全局值"
+                        @input="updateGitLabProjectProfile(profile.id, { maxFiles: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
+                      />
+                    </label>
+                  </div>
+                  <div class="gitlab-profile-ci">
+                    <div class="gitlab-profile-toggle-row">
+                      <label class="platform-switch inline">
+                        <input
+                          :checked="profile.ci.enabled"
+                          type="checkbox"
+                          @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, enabled: ($event.target as HTMLInputElement).checked } })"
+                        />
+                        <span>将当前 MR 的 CI 状态作为审查上下文</span>
+                      </label>
+                      <label v-if="profile.ci.enabled" class="platform-switch inline">
+                        <input
+                          :checked="profile.ci.includeFailedJobLogs"
+                          type="checkbox"
+                          @change="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, includeFailedJobLogs: ($event.target as HTMLInputElement).checked } })"
+                        />
+                        <span>读取失败任务日志摘要</span>
+                      </label>
+                    </div>
+                    <div v-if="profile.ci.enabled" class="gitlab-profile-limit-grid">
+                      <label class="platform-field">
+                        <span class="platform-field-label">失败任务上限</span>
+                        <input
+                          :value="profile.ci.maxFailedJobs"
+                          type="number"
+                          min="1"
+                          step="1"
+                          class="input platform-input"
+                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxFailedJobs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
+                        />
+                      </label>
+                      <label v-if="profile.ci.includeFailedJobLogs" class="platform-field">
+                        <span class="platform-field-label">单任务日志上限（字节）</span>
+                        <input
+                          :value="profile.ci.maxJobLogBytes"
+                          type="number"
+                          min="1"
+                          step="1"
+                          class="input platform-input"
+                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxJobLogBytes: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 8000) } })"
+                        />
+                      </label>
+                    </div>
+                  </div>
                 </article>
               </div>
-              <p v-else class="text-muted text-sm">先从上面的项目搜索结果添加档案。项目范围和项目档案相互独立：范围控制是否接收，档案控制如何审查。</p>
+              <p v-else class="text-muted text-sm">先从上面的 GitLab 项目搜索结果添加档案，再绑定 Nine1Bot 项目。项目范围控制是否接收，项目档案控制在哪里、如何审查。</p>
             </div>
             <div v-if="gitLabAdvancedConfig" class="gitlab-scope-picker">
               <div class="platform-section-heading-row">
@@ -2097,7 +2236,7 @@ function actionResultDetails(result: PlatformActionResult) {
 }
 
 .gitlab-profile-heading,
-.gitlab-profile-ci {
+.gitlab-profile-toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2112,19 +2251,31 @@ function actionResultDetails(result: PlatformActionResult) {
 
 .gitlab-profile-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-sm);
 }
 
+.gitlab-profile-grid .wide {
+  grid-column: 1 / -1;
+}
+
 .gitlab-profile-ci {
-  align-items: end;
-  justify-content: flex-start;
-  flex-wrap: wrap;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-sm);
   padding-top: var(--space-xs);
 }
 
-.gitlab-profile-number-field {
-  width: 132px;
+.gitlab-profile-toggle-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.gitlab-profile-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
 }
 
 .gitlab-project-row {
@@ -2512,8 +2663,15 @@ function actionResultDetails(result: PlatformActionResult) {
   }
 
   .gitlab-guide-grid,
-  .gitlab-hook-mode-grid {
+  .gitlab-hook-mode-grid,
+  .gitlab-profile-grid,
+  .gitlab-profile-limit-grid,
+  .gitlab-selected-project-grid {
     grid-template-columns: 1fr;
+  }
+
+  .gitlab-profile-heading {
+    align-items: flex-start;
   }
 }
 </style>

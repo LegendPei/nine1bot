@@ -1208,6 +1208,7 @@ function handlePromptSelect(prompt: string) {
     <!-- Settings Modal -->
     <SettingsPanel
       v-if="showSettings"
+      :projects="projects"
       @close="closeSettings"
     />
 
