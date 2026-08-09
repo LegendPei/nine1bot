@@ -56,7 +56,7 @@
 - Produces: `GitLabApiRedirectError`，其 `code` 为 `gitlab_redirect_invalid`、`gitlab_redirect_cross_authority` 或 `gitlab_redirect_limit_exceeded`
 - Keeps: 所有现有调用在不传 options 时兼容
 
-- [ ] **Step 1: 写跨 authority token 泄漏失败测试**
+- [x] **Step 1: 写跨 authority token 泄漏失败测试**
 
 使用两个本地 Bun server。server A 返回 302 到 server B，两个 server 都记录 `PRIVATE-TOKEN`。断言调用失败且 B 从未收到请求：
 
@@ -67,17 +67,17 @@ await expect(client.getMergeRequestPipelines(3, 2)).rejects.toMatchObject({
 expect(secondServerHeaders).toEqual([])
 ```
 
-- [ ] **Step 2: 写同 authority、循环重定向和 abort 测试**
+- [x] **Step 2: 写同 authority、循环重定向和 abort 测试**
 
 覆盖相对 `Location`、同 host 绝对 URL、第四次跳转、调用前 abort 和跳转期间 abort。AbortSignal 必须到达每次 fetch。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts -t "redirect|AbortSignal"`
 
 Expected: 跨 authority 请求实际到达第二个 server，或新 error/options 尚不存在。
 
-- [ ] **Step 4: 实现手动重定向**
+- [x] **Step 4: 实现手动重定向**
 
 ```ts
 export type GitLabRequestOptions = { signal?: AbortSignal }
@@ -92,7 +92,7 @@ export class GitLabApiRedirectError extends Error {
 
 `withRequest()` 设置 `redirect: 'manual'`，解析 301、302、303、307、308，仅跟随相同标准化 authority，最多 3 次。错误不得包含 token 或完整重定向 URL。
 
-- [ ] **Step 5: 给读取接口增加可选 options**
+- [x] **Step 5: 给读取接口增加可选 options**
 
 ```ts
 getMergeRequestPipelines(projectId, mrIid, options: GitLabRequestOptions = {})
@@ -102,7 +102,7 @@ getJobTrace(projectId, jobId, maxBytes?, options: GitLabRequestOptions = {})
 
 把 `options.signal` 合并进现有 timeout controller。
 
-- [ ] **Step 6: 运行平台层回归**
+- [x] **Step 6: 运行平台层回归**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 
@@ -110,7 +110,7 @@ Run: `bun run --cwd packages/platform-gitlab typecheck`
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add packages/platform-gitlab/src/review/api-client.ts packages/platform-gitlab/test/gitlab-review.test.ts

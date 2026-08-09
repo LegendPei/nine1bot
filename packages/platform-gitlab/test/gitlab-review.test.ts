@@ -1299,6 +1299,87 @@ describe('GitLab review foundation', () => {
     ])
   })
 
+  test('rejects cross-authority redirects without forwarding the GitLab token', async () => {
+    const redirectedHeaders: Array<string | null> = []
+    using redirected = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(request) {
+        redirectedHeaders.push(request.headers.get('private-token'))
+        return Response.json([])
+      },
+    })
+    using origin = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch() {
+        return new Response(undefined, {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${redirected.port}/redirected` },
+        })
+      },
+    })
+    const client = new GitLabApiClient({
+      baseUrl: `http://127.0.0.1:${origin.port}`,
+      token: 'redirect-secret',
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).rejects.toMatchObject({
+      code: 'gitlab_redirect_cross_authority',
+    })
+    expect(redirectedHeaders).toEqual([])
+  })
+
+  test('follows same-authority redirects but rejects a fourth redirect', async () => {
+    const seen: Array<{ pathname: string; token: string | null }> = []
+    using server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url)
+        seen.push({ pathname: url.pathname, token: request.headers.get('private-token') })
+        const step = Number(url.pathname.match(/redirect-(\d+)$/)?.[1] ?? 0)
+        if (step > 0 && step < 4) {
+          return new Response(undefined, {
+            status: 302,
+            headers: { location: `/redirect-${step + 1}` },
+          })
+        }
+        if (step === 4) return Response.json([])
+        return new Response(undefined, {
+          status: 302,
+          headers: { location: '/redirect-1' },
+        })
+      },
+    })
+    const client = new GitLabApiClient({
+      baseUrl: `http://127.0.0.1:${server.port}`,
+      token: 'same-authority-secret',
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).rejects.toMatchObject({
+      code: 'gitlab_redirect_limit_exceeded',
+    })
+    expect(seen).toHaveLength(4)
+    expect(seen.every((request) => request.token === 'same-authority-secret')).toBe(true)
+  })
+
+  test('propagates an upstream AbortSignal through GitLab reads', async () => {
+    const controller = new AbortController()
+    const aborted = new Error('caller aborted GitLab read')
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      requestTimeoutMs: 100,
+      fetch: ((_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+        controller.abort(aborted)
+      })) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2, { signal: controller.signal })).rejects.toBe(aborted)
+  })
+
   test('inspects all GitLab CI job statuses for the review HEAD', async () => {
     const result = await inspectGitLabCi({
       client: {

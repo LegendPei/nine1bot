@@ -2,6 +2,17 @@ import type { GitLabRawChangesResponse } from './types'
 
 const GITLAB_PAGE_SIZE = 100
 const MAX_PAGINATED_PAGES = 5
+const MAX_REDIRECTS = 3
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+export type GitLabRequestOptions = {
+  signal?: AbortSignal
+}
+
+export type GitLabApiRedirectErrorCode =
+  | 'gitlab_redirect_invalid'
+  | 'gitlab_redirect_cross_authority'
+  | 'gitlab_redirect_limit_exceeded'
 
 export type GitLabApiClientOptions = {
   baseUrl: string
@@ -111,6 +122,13 @@ export class GitLabApiError extends Error {
   }
 }
 
+export class GitLabApiRedirectError extends Error {
+  constructor(readonly code: GitLabApiRedirectErrorCode) {
+    super(code)
+    this.name = 'GitLabApiRedirectError'
+  }
+}
+
 export class GitLabApiClient {
   private readonly baseUrl: string
   private readonly token: string
@@ -141,22 +159,37 @@ export class GitLabApiClient {
     return { changes: changes ?? [] }
   }
 
-  async getMergeRequestPipelines(projectId: string | number, mrIid: string | number): Promise<GitLabPipelineSummary[]> {
+  async getMergeRequestPipelines(
+    projectId: string | number,
+    mrIid: string | number,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabPipelineSummary[]> {
     return await this.requestPaginated<GitLabPipelineSummary>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/pipelines`,
+      options,
     )
   }
 
-  async getPipelineJobs(projectId: string | number, pipelineId: string | number): Promise<GitLabPipelineJob[]> {
+  async getPipelineJobs(
+    projectId: string | number,
+    pipelineId: string | number,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabPipelineJob[]> {
     return await this.requestPaginated<GitLabPipelineJob>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/pipelines/${encodeURIComponent(String(pipelineId))}/jobs`,
+      options,
     )
   }
 
-  async getJobTrace(projectId: string | number, jobId: string | number, maxBytes?: number): Promise<string> {
+  async getJobTrace(
+    projectId: string | number,
+    jobId: string | number,
+    maxBytes?: number,
+    options: GitLabRequestOptions = {},
+  ): Promise<string> {
     return await this.requestText(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/jobs/${encodeURIComponent(String(jobId))}/trace`,
-      {},
+      { signal: options.signal },
       maxBytes,
     )
   }
@@ -290,7 +323,7 @@ export class GitLabApiClient {
     return (await this.requestPage<T>(path, init)).data
   }
 
-  private async requestPaginated<T>(path: string): Promise<T[]> {
+  private async requestPaginated<T>(path: string, options: GitLabRequestOptions = {}): Promise<T[]> {
     const values: T[] = []
     const visitedPages = new Set<string>()
     let page = '1'
@@ -299,6 +332,7 @@ export class GitLabApiClient {
       const separator = path.includes('?') ? '&' : '?'
       const result = await this.requestPage<T[]>(
         `${path}${separator}per_page=${GITLAB_PAGE_SIZE}&page=${encodeURIComponent(page)}`,
+        { signal: options.signal },
       )
       if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
       values.push(...result.data)
@@ -354,14 +388,7 @@ export class GitLabApiClient {
     })
     try {
       const operation = (async () => {
-        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-          ...init,
-          signal: controller.signal,
-          headers: {
-            'PRIVATE-TOKEN': this.token,
-            ...(init.headers ?? {}),
-          },
-        })
+        const response = await this.fetchWithSafeRedirects(`${this.baseUrl}${path}`, init, controller.signal)
         return await consume(response)
       })()
       return await Promise.race([operation, deadline])
@@ -369,6 +396,70 @@ export class GitLabApiClient {
       if (timeout) clearTimeout(timeout)
       upstreamSignal?.removeEventListener('abort', onUpstreamAbort)
     }
+  }
+
+  private async fetchWithSafeRedirects(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    const initialUrl = parseHttpUrl(url)
+    if (!initialUrl) throw new GitLabApiRedirectError('gitlab_redirect_invalid')
+    const authority = initialUrl.host.toLowerCase()
+    let currentUrl = initialUrl
+    let currentInit = init
+    let redirects = 0
+
+    while (true) {
+      const headers = new Headers(currentInit.headers)
+      headers.set('PRIVATE-TOKEN', this.token)
+      const response = await this.fetchImpl(currentUrl, {
+        ...currentInit,
+        redirect: 'manual',
+        signal,
+        headers,
+      })
+      if (!REDIRECT_STATUSES.has(response.status)) return response
+
+      if (redirects >= MAX_REDIRECTS) {
+        await response.body?.cancel().catch(() => undefined)
+        throw new GitLabApiRedirectError('gitlab_redirect_limit_exceeded')
+      }
+      const location = response.headers.get('location')
+      const target = location ? parseHttpUrl(location, currentUrl) : undefined
+      if (!target || (currentUrl.protocol === 'https:' && target.protocol !== 'https:')) {
+        await response.body?.cancel().catch(() => undefined)
+        throw new GitLabApiRedirectError('gitlab_redirect_invalid')
+      }
+      if (target.host.toLowerCase() !== authority) {
+        await response.body?.cancel().catch(() => undefined)
+        throw new GitLabApiRedirectError('gitlab_redirect_cross_authority')
+      }
+
+      await response.body?.cancel().catch(() => undefined)
+      redirects += 1
+      currentInit = redirectedRequestInit(currentInit, response.status)
+      currentUrl = target
+    }
+  }
+}
+
+function parseHttpUrl(input: string, base?: URL) {
+  try {
+    const url = new URL(input, base)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function redirectedRequestInit(init: RequestInit, status: number): RequestInit {
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (status !== 303 && !((status === 301 || status === 302) && method === 'POST')) return init
+  const headers = new Headers(init.headers)
+  headers.delete('content-length')
+  headers.delete('content-type')
+  return {
+    ...init,
+    method: 'GET',
+    body: undefined,
+    headers,
   }
 }
 
