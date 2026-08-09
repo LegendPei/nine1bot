@@ -66,8 +66,20 @@ const FULL_PERMISSION_RULES: PermissionNext.Ruleset = [
   },
 ]
 
-function projectDirectory(project: Project.Info) {
+function projectDirectory(project: Pick<Project.Info, "rootDirectory" | "worktree">) {
   return project.rootDirectory || project.worktree
+}
+
+export async function resolveGitLabReviewRuntimeDirectory(
+  project: { nine1botProjectID?: string } | undefined,
+  getProject: (projectID: string) => Promise<Pick<Project.Info, "rootDirectory" | "worktree">> = Project.get,
+) {
+  const projectID = project?.nine1botProjectID?.trim()
+  if (!projectID) throw new Error("project_binding_missing")
+  const boundProject = await getProject(projectID).catch(() => undefined)
+  const directory = boundProject ? projectDirectory(boundProject) : undefined
+  if (!directory) throw new Error("project_binding_missing")
+  return directory
 }
 
 function currentOrigin(c: { req: { url: string } }) {
@@ -423,6 +435,7 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
         id: project.id,
         host: project.host,
         projectId: project.projectId,
+        nine1botProjectID: project.nine1botProjectID,
         pathWithNamespace: project.pathWithNamespace,
         displayName: project.displayName,
         enabled: project.enabled,
@@ -528,7 +541,7 @@ function gitLabReviewRuntimeInputFromRecord(run: ReviewRunRecord): GitLabReviewR
 }
 
 async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
-  const directory = process.env.NINE1BOT_PROJECT_DIR || process.cwd()
+  const directory = await resolveGitLabReviewRuntimeDirectory(result.context.project)
   const platforms = await readPlatformManagerConfig()
   registerBuiltinPlatformAdapters({
     config: platforms,

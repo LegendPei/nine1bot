@@ -45,6 +45,26 @@ describe('GitLab platform adapter package', () => {
     }))
   })
 
+  test('reports unsafe host and project profile configuration before saving', async () => {
+    const result = await gitlabPlatformContribution.validateConfig?.({
+      'review.enabled': true,
+      'review.tokenSecretRef': 'token-value',
+      allowedHosts: ['://invalid-host'],
+      'review.projects': [
+        { id: 'one', host: 'gitlab.example.com', projectId: 3, nine1botProjectID: 'project-uf', enabled: true },
+        { id: 'two', host: 'https://GITLAB.example.com', projectId: '3', enabled: true },
+      ],
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      fieldErrors: {
+        allowedHosts: expect.stringContaining('valid'),
+        'review.projects': expect.stringContaining('Nine1Bot project'),
+      },
+    })
+  })
+
   test('parses GitLab repository, file, tree, merge request, and issue URLs', () => {
     expect(parseGitLabUrl('https://gitlab.com/nine1/nine1bot')).toMatchObject({
       host: 'gitlab.com',

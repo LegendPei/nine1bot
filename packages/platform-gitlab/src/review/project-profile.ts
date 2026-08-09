@@ -11,6 +11,8 @@ export type GitLabReviewProjectResolution =
   | { status: 'matched'; project: GitLabReviewProjectSnapshot }
   | { status: 'missing'; project: GitLabReviewProjectSnapshot; warning: 'project_profile_missing' }
   | { status: 'disabled'; project: GitLabReviewProjectSnapshot }
+  | { status: 'unbound'; project: GitLabReviewProjectSnapshot }
+  | { status: 'duplicate'; project: GitLabReviewProjectSnapshot }
 
 export function resolveGitLabReviewProjectProfile(
   settings: Pick<GitLabReviewSettings, 'projects'>,
@@ -18,11 +20,15 @@ export function resolveGitLabReviewProjectProfile(
   now = Date.now(),
 ): GitLabReviewProjectResolution {
   const targetHost = normalizeGitLabAuthority(target.host)
-  const profile = settings.projects.find((candidate) =>
+  const profiles = settings.projects.filter((candidate) =>
     String(candidate.projectId) === String(target.projectId) &&
     Boolean(candidate.host) &&
     normalizeGitLabAuthority(candidate.host) === targetHost,
   )
+  if (profiles.length > 1) {
+    return { status: 'duplicate', project: snapshot(unconfiguredProfile(target), 'unconfigured', now) }
+  }
+  const profile = profiles[0]
   if (!profile) {
     return {
       status: 'missing',
@@ -31,7 +37,9 @@ export function resolveGitLabReviewProjectProfile(
     }
   }
   const project = snapshot(profile, 'configured', now)
-  return profile.enabled ? { status: 'matched', project } : { status: 'disabled', project }
+  if (!profile.enabled) return { status: 'disabled', project }
+  if (!profile.nine1botProjectID) return { status: 'unbound', project }
+  return { status: 'matched', project }
 }
 
 function snapshot(
@@ -47,6 +55,7 @@ function unconfiguredProfile(target: GitLabReviewProjectTarget): GitLabReviewPro
     id: `unconfigured:${target.host}:${target.projectId}`,
     host: target.host,
     projectId: target.projectId,
+    nine1botProjectID: '',
     pathWithNamespace: target.projectPath,
     displayName: target.projectPath ?? String(target.projectId),
     enabled: true,

@@ -336,6 +336,70 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('fails closed when an explicit GitLab host allowlist is malformed', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.enabled': true,
+      'review.webhookAutoReview': true,
+      allowedHosts: ['://invalid-host'],
+    })
+
+    expect(settings.configurationErrors).toContain('allowed_hosts_invalid')
+    expect(parseGitLabWebhookEvent({
+      object_kind: 'merge_request',
+      project: {
+        id: 3,
+        path_with_namespace: 'root/uftest',
+        web_url: 'https://gitlab.example.com/root/uftest',
+      },
+      object_attributes: { iid: 10, last_commit: { id: 'head' } },
+    }, settings)).toEqual({ ok: false, reason: 'invalid-review-configuration' })
+  })
+
+  test('rejects duplicate GitLab project identities regardless of profile id', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.projects': [
+        {
+          id: 'uftest-primary',
+          host: 'gitlab.example.com',
+          projectId: 3,
+          nine1botProjectID: 'project-uf',
+          enabled: true,
+        },
+        {
+          id: 'uftest-secondary',
+          host: 'https://GITLAB.example.com',
+          projectId: '3',
+          nine1botProjectID: 'project-other',
+          enabled: true,
+        },
+      ],
+    })
+
+    expect(settings.configurationErrors).toContain('project_profile_identity_duplicate:gitlab.example.com:3')
+  })
+
+  test('migrates legacy project context into a review overlay and requires a project binding', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.projects': [{
+        id: 'uftest',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        contextMarkdown: 'Legacy review-only notes.',
+        enabled: true,
+      }],
+    })
+
+    expect(settings.projects[0]).toMatchObject({
+      nine1botProjectID: '',
+      reviewContextMarkdown: 'Legacy review-only notes.',
+    })
+    expect(settings.configurationErrors).toContain('project_binding_missing:uftest')
+    expect(resolveGitLabReviewProjectProfile(settings, {
+      host: 'gitlab.example.com',
+      projectId: 3,
+    })).toMatchObject({ status: 'unbound', project: { id: 'uftest' } })
+  })
+
   test('slices review diff at hunk boundaries within a deterministic byte budget', () => {
     const slices = sliceGitLabReviewDiff([
       { oldPath: 'src/auth.ts', newPath: 'src/auth.ts', diff: '@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-c\n+d\n', added: false, renamed: false, deleted: false, generated: false },
@@ -413,10 +477,11 @@ describe('GitLab review foundation', () => {
         id: 'uftest',
         host: 'gitlab.example.com',
         projectId: 3,
+        nine1botProjectID: 'project-uf',
         pathWithNamespace: 'root/uftest',
         displayName: 'UFtest',
         enabled: true,
-        contextMarkdown: 'UF domain boundary notes.',
+        reviewContextMarkdown: 'UF domain boundary notes.',
         reviewFocus: ['authorization'],
         includePathPrefixes: ['src/security/'],
         excludePathPatterns: ['**/*.generated.ts'],
@@ -477,7 +542,8 @@ describe('GitLab review foundation', () => {
       },
       project: {
         id: 'uftest', host: 'gitlab.example.com', projectId: 3, enabled: true,
-        contextMarkdown: 'architecture '.repeat(200), reviewFocus: ['security'],
+        nine1botProjectID: 'project-uf',
+        reviewContextMarkdown: 'architecture '.repeat(200), reviewFocus: ['security'],
         includePathPrefixes: [], excludePathPatterns: [],
         ci: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8_000 },
         source: 'configured', matchedAt: 1_000,
@@ -532,6 +598,7 @@ describe('GitLab review foundation', () => {
         id: 'uftest',
         host: 'gitlab.example.com',
         projectId: 3,
+        nine1botProjectID: 'project-uf',
         pathWithNamespace: 'root/uftest',
         displayName: 'UFtest',
         enabled: true,
@@ -551,13 +618,14 @@ describe('GitLab review foundation', () => {
         projectId: 3,
         pathWithNamespace: 'root/uftest',
         displayName: 'UFtest',
-        contextMarkdown: 'UF domain and architecture notes.',
+        nine1botProjectID: 'project-uf',
+        reviewContextMarkdown: 'UF domain and architecture notes.',
         reviewFocus: ['authorization', 'api'],
       }),
     })
   })
 
-  test('keeps in-scope projects reviewable when no project profile exists', () => {
+  test('marks in-scope projects as missing when no project profile exists', () => {
     const settings = normalizeGitLabReviewSettings({})
 
     expect(resolveGitLabReviewProjectProfile(settings, {
@@ -585,6 +653,7 @@ describe('GitLab review foundation', () => {
         id: 'custom-port',
         host: 'gitlab.example.com:8443',
         projectId: 3,
+        nine1botProjectID: 'project-uf',
         enabled: true,
       }],
     })

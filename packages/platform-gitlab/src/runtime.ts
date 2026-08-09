@@ -368,6 +368,16 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
     if (!settings.botMention.trim().startsWith('@')) fieldErrors['review.botMention'] = 'Bot mention must start with @.'
     if (settings.modelProviderId && !settings.modelId) fieldErrors['review.modelId'] = 'Review model is required when a review model provider is set.'
     if (!settings.modelProviderId && settings.modelId) fieldErrors['review.modelProviderId'] = 'Review model provider is required when a review model is set.'
+    if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
+      fieldErrors.allowedHosts = 'Allowed GitLab hosts must contain only valid host or host:port values.'
+    }
+    const projectErrors = settings.configurationErrors.filter((error) => error.startsWith('project_'))
+    if (projectErrors.length > 0) {
+      fieldErrors['review.projects'] = [
+        'Every GitLab review profile must use a valid host, bind an existing Nine1Bot project,',
+        'and have unique profile and (host, projectId) identities.',
+      ].join(' ')
+    }
   }
 
   return Object.keys(fieldErrors).length

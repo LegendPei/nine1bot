@@ -7,6 +7,7 @@ import {
   publishGitLabReviewResult,
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
+  gitLabAuthorityFromUrl,
   isGitLabReviewProjectInScope,
   loadGitLabPipelineContext,
   normalizeGitLabReviewSettings,
@@ -276,16 +277,25 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     projectId: parsed.trigger.projectId,
     projectPath: parsed.trigger.projectPath,
   })
-  if (projectResolution.status === 'disabled') {
+  const projectRejection = projectResolution.status === 'disabled'
+    ? 'project_profile_disabled'
+    : projectResolution.status === 'missing'
+      ? 'project_profile_missing'
+      : projectResolution.status === 'unbound'
+        ? 'project_binding_missing'
+        : projectResolution.status === 'duplicate'
+          ? 'project_profile_identity_duplicate'
+          : undefined
+  if (projectRejection) {
     return reject(
       202,
-      'project_profile_disabled',
+      projectRejection,
       idempotencyKey,
       parsed.trigger as unknown as Record<string, unknown>,
       projectResolution.project,
     )
   }
-  const projectWarnings = projectResolution.status === 'missing' ? [projectResolution.warning] : []
+  const projectWarnings: string[] = []
 
   const run = ReviewRunStore.create({
     platform: 'gitlab',
@@ -708,7 +718,7 @@ function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings)
   const mergeRequest = recordValue(record.merge_request)
   const commit = recordValue(record.commit)
   const projectId = idValue(project?.id ?? note?.project_id)
-  const host = hostFromUrl(
+  const host = gitLabAuthorityFromUrl(
     stringValue(project?.web_url) ??
     stringValue(project?.git_http_url) ??
     stringValue(project?.homepage) ??
@@ -885,7 +895,7 @@ function summarizeGitLabWebhookEvent(payload: unknown, reason: string): Record<s
   const objectKind = stringValue(record.object_kind) ?? 'unknown'
   const projectId = idValue(project?.id ?? attrs?.project_id ?? attrs?.target_project_id)
   const projectPath = stringValue(project?.path_with_namespace)
-  const host = hostFromUrl(
+  const host = gitLabAuthorityFromUrl(
     stringValue(project?.web_url) ??
     stringValue(project?.git_http_url) ??
     stringValue(project?.homepage),
@@ -946,15 +956,6 @@ function idValue(input: unknown): string | number | undefined {
   if (typeof input === 'string' && input.length > 0) return input
   if (typeof input === 'number' && Number.isFinite(input)) return input
   return undefined
-}
-
-function hostFromUrl(input: string | undefined): string | undefined {
-  if (!input) return undefined
-  try {
-    return new URL(input).hostname
-  } catch {
-    return undefined
-  }
 }
 
 function extractJsonCandidates(text: string): string[] {

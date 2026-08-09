@@ -3,6 +3,7 @@ import {
   gitLabReviewPublishStatus,
   gitLabReviewRetryPatch,
   publicGitLabReviewRun,
+  resolveGitLabReviewRuntimeDirectory,
   webhookLocalOrigin,
 } from "../../src/server/routes/webhooks"
 
@@ -58,10 +59,11 @@ describe("webhook status URL selection", () => {
         id: "uftest",
         host: "gitlab.example.com",
         projectId: 3,
+        nine1botProjectID: "project-uf",
         pathWithNamespace: "root/uftest",
         displayName: "UFtest",
         enabled: true,
-        contextMarkdown: "Internal architecture notes.",
+        reviewContextMarkdown: "Internal review notes.",
         reviewFocus: ["auth"],
         includePathPrefixes: [],
         excludePathPatterns: [],
@@ -91,6 +93,7 @@ describe("webhook status URL selection", () => {
         id: "uftest",
         host: "gitlab.example.com",
         projectId: 3,
+        nine1botProjectID: "project-uf",
         pathWithNamespace: "root/uftest",
         displayName: "UFtest",
         enabled: true,
@@ -146,5 +149,32 @@ describe("webhook status URL selection", () => {
         "Review run manually retried from stored GitLab context.",
       ],
     })
+  })
+
+  test("resolves GitLab review runtime directory from the bound Nine1Bot project", async () => {
+    const requested: string[] = []
+    const directory = await resolveGitLabReviewRuntimeDirectory(
+      { nine1botProjectID: "project-uf" },
+      async (projectID) => {
+        requested.push(projectID)
+        return { worktree: "C:/worktrees/uf", rootDirectory: "C:/repos/uf" }
+      },
+    )
+
+    expect(requested).toEqual(["project-uf"])
+    expect(directory).toBe("C:/repos/uf")
+  })
+
+  test("fails GitLab review runtime startup when its project binding is missing or stale", async () => {
+    await expect(resolveGitLabReviewRuntimeDirectory(undefined, async () => {
+      throw new Error("must not resolve")
+    })).rejects.toThrow("project_binding_missing")
+
+    await expect(resolveGitLabReviewRuntimeDirectory(
+      { nine1botProjectID: "deleted-project" },
+      async () => {
+        throw new Error("not found")
+      },
+    )).rejects.toThrow("project_binding_missing")
   })
 })

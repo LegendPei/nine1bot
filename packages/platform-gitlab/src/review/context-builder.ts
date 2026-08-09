@@ -148,7 +148,7 @@ function manifestFromSlices(
 
 function projectContextBlock(project: GitLabReviewProjectSnapshot): GitLabReviewContext['contextBlocks'][number] {
   const reference = JSON.stringify({
-    contextMarkdown: project.contextMarkdown,
+    reviewContextMarkdown: project.reviewContextMarkdown,
     reviewFocus: project.reviewFocus,
     includePathPrefixes: project.includePathPrefixes,
     excludePathPatterns: project.excludePathPatterns,

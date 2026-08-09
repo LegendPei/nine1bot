@@ -8,6 +8,9 @@ export type GitLabParsedEvent =
 
 export function parseGitLabWebhookEvent(payload: unknown, settings: GitLabReviewSettings): GitLabParsedEvent {
   if (!settings.enabled) return { ok: false, reason: 'gitlab-review-disabled' }
+  if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
+    return { ok: false, reason: 'invalid-review-configuration' }
+  }
   if (!isRecord(payload)) return { ok: false, reason: 'invalid-payload' }
 
   const objectKind = stringValue(payload.object_kind)

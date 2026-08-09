@@ -58,10 +58,11 @@ const platforms = {
         id: 'nine1bot',
         host: 'gitlab.example.com',
         projectId: 123,
+        nine1botProjectID: 'project-nine1bot',
         pathWithNamespace: 'nine1/nine1bot',
         displayName: 'Nine1Bot',
         enabled: true,
-        contextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
+        reviewContextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
       }],
     },
   },
@@ -357,9 +358,10 @@ describe('GitLab review controller', () => {
       project: {
         id: 'nine1bot',
         projectId: 123,
+        nine1botProjectID: 'project-nine1bot',
         pathWithNamespace: 'nine1/nine1bot',
         displayName: 'Nine1Bot',
-        contextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
+        reviewContextMarkdown: 'Review the Nine1Bot runtime and platform boundaries.',
       },
     })
   })
@@ -394,8 +396,9 @@ describe('GitLab review controller', () => {
               id: 'nine1bot',
               host: 'gitlab.example.com',
               projectId: 123,
+              nine1botProjectID: 'project-nine1bot',
               enabled: true,
-              contextMarkdown: 'Repository-specific constraints.',
+              reviewContextMarkdown: 'Repository-specific constraints.',
               maxContextBytes: 1_000,
               maxFiles: 1,
             }],
@@ -438,7 +441,7 @@ describe('GitLab review controller', () => {
     })
   })
 
-  test('keeps unprofiled in-scope projects reviewable with a stored warning', async () => {
+  test('rejects unprofiled projects instead of running in the process default directory', async () => {
     const result = await handleGitLabReviewWebhook({
       payload: {
         object_kind: 'merge_request',
@@ -468,11 +471,45 @@ describe('GitLab review controller', () => {
       secrets: memorySecrets,
     })
 
-    expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: ['project_profile_missing'] })
-    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+    expect(result).toMatchObject({ accepted: false, status: 'rejected', error: 'project_profile_missing' })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'rejected',
+      error: 'project_profile_missing',
       project: { source: 'unconfigured', projectId: 123 },
-      warnings: ['project_profile_missing'],
     })
+  })
+
+  test('rejects configured profiles without a Nine1Bot project binding', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: { iid: 11, last_commit: { id: 'unbound-head' } },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.projects': [{
+              id: 'nine1bot',
+              host: 'gitlab.example.com',
+              projectId: 123,
+              enabled: true,
+            }],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({ accepted: false, status: 'rejected', error: 'project_binding_missing' })
+    expect(ReviewRunStore.list()).toHaveLength(1)
   })
 
   test('adds optional GitLab pipeline evidence without blocking the review', async () => {
@@ -487,7 +524,7 @@ describe('GitLab review controller', () => {
       platforms: { gitlab: { enabled: true, settings: {
         ...platforms.gitlab.settings,
         'review.baseUrl': 'https://gitlab.example.com',
-        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, enabled: true, ci: { enabled: true } }],
+        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, nine1botProjectID: 'project-nine1bot', enabled: true, ci: { enabled: true } }],
       } } },
       secrets: liveSecrets,
       fetch: (async (url) => {
@@ -527,7 +564,7 @@ describe('GitLab review controller', () => {
       headers: { 'x-gitlab-token': 'secret' },
       platforms: { gitlab: { enabled: true, settings: {
         ...platforms.gitlab.settings,
-        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, enabled: true, ci: { enabled: true } }],
+        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, nine1botProjectID: 'project-nine1bot', enabled: true, ci: { enabled: true } }],
       } } },
       secrets: failingTokenSecrets,
     })
@@ -566,6 +603,7 @@ describe('GitLab review controller', () => {
               id: 'nine1bot',
               host: 'gitlab.example.com',
               projectId: 123,
+              nine1botProjectID: 'project-nine1bot',
               enabled: false,
             }],
           },
@@ -613,7 +651,7 @@ describe('GitLab review controller', () => {
       headers: { 'x-gitlab-token': 'secret' },
       platforms: { gitlab: { enabled: true, settings: {
         ...platforms.gitlab.settings,
-        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, enabled: false }],
+        'review.projects': [{ id: 'nine1bot', host: 'gitlab.example.com', projectId: 123, nine1botProjectID: 'project-nine1bot', enabled: false }],
       } } },
       secrets: memorySecrets,
     })
@@ -1017,6 +1055,39 @@ describe('GitLab review controller', () => {
     expect(first.runId ? ReviewRunStore.get(first.runId) : undefined).toMatchObject({
       status: 'rejected',
       idempotencyKey: 'gitlab:gitlab.example.com:123:rejected-mention:merge_requests:10:note:99:mention-out-of-scope',
+    })
+  })
+
+  test('preserves custom GitLab ports in rejected event summaries', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'note',
+        project: {
+          id: 456,
+          path_with_namespace: 'nine1/ignored',
+          web_url: 'https://gitlab.example.com:8443/nine1/ignored',
+        },
+        object_attributes: { id: 89, note: '@Nine1bot review', project_id: 456 },
+        merge_request: { iid: 12, last_commit: { id: 'ignored-port-sha' } },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            allowedHosts: ['gitlab.example.com:8443'],
+            'review.scopeMode': 'all-received',
+            'review.excludedProjects': [{ id: 456, pathWithNamespace: 'nine1/ignored' }],
+          },
+        },
+      },
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({ accepted: false, error: 'project-not-allowed' })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      trigger: { host: 'gitlab.example.com:8443' },
     })
   })
 

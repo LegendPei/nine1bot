@@ -22,6 +22,7 @@ export type GitLabReviewSettings = {
   executionMode: 'dry-run' | 'runtime'
   modelProviderId?: string
   modelId?: string
+  configurationErrors: string[]
 }
 
 export type GitLabReviewScopeMode = 'all-received' | 'selected-only'
@@ -36,10 +37,11 @@ export type GitLabReviewProjectProfile = {
   id: string
   host?: string
   projectId: string | number
+  nine1botProjectID: string
   pathWithNamespace?: string
   displayName?: string
   enabled: boolean
-  contextMarkdown?: string
+  reviewContextMarkdown?: string
   reviewFocus: string[]
   includePathPrefixes: string[]
   excludePathPatterns: string[]
@@ -95,10 +97,13 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
   executionMode: 'dry-run',
   modelProviderId: undefined,
   modelId: undefined,
+  configurationErrors: [],
 }
 
 export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSettings {
   const record = isRecord(input) ? input : {}
+  const allowedHosts = allowedHostList(setting(record, 'allowedHosts'))
+  const projects = projectProfileList(setting(record, 'review.projects', 'projects'))
   const legacyAllowedProjectIds = idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds'))
   const explicitScopeMode = scopeModeValue(setting(record, 'review.scopeMode', 'scopeMode'))
   const includedProjects = projectRefList(setting(record, 'review.includedProjects', 'includedProjects'))
@@ -108,15 +113,12 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     enabled: booleanValue(setting(record, 'review.enabled', 'enabled'), defaultGitLabReviewSettings.enabled),
     baseUrl: optionalString(setting(record, 'review.baseUrl', 'baseUrl')),
     botMention: stringValue(setting(record, 'review.botMention', 'botMention'), defaultGitLabReviewSettings.botMention),
-    allowedHosts: stringList(setting(record, 'allowedHosts')).flatMap((host) => {
-      const normalized = normalizeGitLabAuthority(host)
-      return normalized ? [normalized] : []
-    }),
+    allowedHosts: allowedHosts.hosts,
     allowedProjectIds: legacyAllowedProjectIds,
     scopeMode,
     includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
     excludedProjects: projectRefList(setting(record, 'review.excludedProjects', 'excludedProjects')),
-    projects: projectProfileList(setting(record, 'review.projects', 'projects')),
+    projects,
     hookGroups: groupRefList(setting(record, 'review.hookGroups', 'hookGroups')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')) ?? defaultGitLabReviewSettings.webhookSecretRef,
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
@@ -129,6 +131,10 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     executionMode: setting(record, 'review.executionMode', 'executionMode') === 'runtime' ? 'runtime' : 'dry-run',
     modelProviderId: optionalString(setting(record, 'review.modelProviderId', 'modelProviderId')),
     modelId: optionalString(setting(record, 'review.modelId', 'modelId')),
+    configurationErrors: [
+      ...(allowedHosts.valid ? [] : ['allowed_hosts_invalid']),
+      ...projectProfileConfigurationErrors(projects),
+    ],
   }
 }
 
@@ -208,6 +214,26 @@ function stringList(input: unknown) {
     : []
 }
 
+function allowedHostList(input: unknown) {
+  if (input === undefined) return { hosts: [] as string[], valid: true }
+  if (!Array.isArray(input)) return { hosts: [] as string[], valid: false }
+  const hosts: string[] = []
+  let valid = true
+  for (const item of input) {
+    if (typeof item !== 'string' || !item.trim()) {
+      valid = false
+      continue
+    }
+    const normalized = normalizeGitLabAuthority(item)
+    if (!normalized) {
+      valid = false
+      continue
+    }
+    if (!hosts.includes(normalized)) hosts.push(normalized)
+  }
+  return { hosts, valid }
+}
+
 function idList(input: unknown) {
   return Array.isArray(input)
     ? input.filter((item): item is string | number => typeof item === 'string' || typeof item === 'number')
@@ -237,21 +263,21 @@ function projectRefList(input: unknown): GitLabProjectRef[] {
 
 function projectProfileList(input: unknown): GitLabReviewProjectProfile[] {
   if (!Array.isArray(input)) return []
-  const ids = new Set<string>()
   return input.flatMap((item) => {
     if (!isRecord(item)) return []
     const id = optionalString(item.id)
     const projectId = item.projectId ?? item.project_id
-    if (!id || (typeof projectId !== 'string' && typeof projectId !== 'number') || ids.has(id)) return []
-    ids.add(id)
+    if (!id || (typeof projectId !== 'string' && typeof projectId !== 'number')) return []
     return [{
       id,
       host: normalizeGitLabAuthority(optionalString(item.host)),
       projectId,
+      nine1botProjectID: optionalString(item.nine1botProjectID) ?? optionalString(item.nine1bot_project_id) ?? '',
       pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
       displayName: optionalString(item.displayName) ?? optionalString(item.display_name),
       enabled: booleanValue(item.enabled, true),
-      contextMarkdown: optionalString(item.contextMarkdown) ?? optionalString(item.context_markdown),
+      reviewContextMarkdown: optionalString(item.reviewContextMarkdown) ?? optionalString(item.review_context_markdown) ??
+        optionalString(item.contextMarkdown) ?? optionalString(item.context_markdown),
       reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
       includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
       excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),
@@ -265,6 +291,25 @@ function projectProfileList(input: unknown): GitLabReviewProjectProfile[] {
       },
     }]
   })
+}
+
+function projectProfileConfigurationErrors(projects: GitLabReviewProjectProfile[]) {
+  const errors: string[] = []
+  const ids = new Set<string>()
+  const identities = new Set<string>()
+  for (const project of projects) {
+    if (ids.has(project.id)) errors.push(`project_profile_id_duplicate:${project.id}`)
+    ids.add(project.id)
+    if (!project.host) {
+      errors.push(`project_profile_host_invalid:${project.id}`)
+    } else {
+      const identity = `${project.host}:${String(project.projectId)}`
+      if (identities.has(identity)) errors.push(`project_profile_identity_duplicate:${identity}`)
+      identities.add(identity)
+    }
+    if (!project.nine1botProjectID) errors.push(`project_binding_missing:${project.id}`)
+  }
+  return errors
 }
 
 function groupRefList(input: unknown): GitLabGroupRef[] {
