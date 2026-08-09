@@ -8,6 +8,10 @@ export type ReviewRunStatus = 'accepted' | 'rejected' | 'blocked' | 'running' | 
 export type ReviewRunCiSummary = {
   pipeline?: GitLabPipelineSummary
   diagnostics: string[]
+  observedAt?: number
+  queryCount?: number
+  jobLogReadCount?: number
+  queriedJobIds?: number[]
 }
 
 export type ReviewRunRecord = {
@@ -80,6 +84,12 @@ export namespace ReviewRunStore {
       if (run.idempotencyKey === idempotencyKey) return { ...run }
     }
     return undefined
+  }
+
+  export function findBySessionId(sessionId: string): ReviewRunRecord | undefined {
+    load()
+    const matches = [...runs.values()].filter((run) => run.sessionId === sessionId)
+    return matches.length === 1 ? { ...matches[0] } : undefined
   }
 
   export function get(id: string): ReviewRunRecord | undefined {
