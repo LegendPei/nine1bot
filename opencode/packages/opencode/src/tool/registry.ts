@@ -213,6 +213,7 @@ export namespace ToolRegistry {
           using _ = log.time(t.id)
           return {
             id: t.id,
+            requireExplicitEnable: t.requireExplicitEnable,
             ...(await t.init({ agent, skills: options?.skills })),
           }
         }),

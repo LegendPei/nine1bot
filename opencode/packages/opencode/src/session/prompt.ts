@@ -24,6 +24,7 @@ import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
 import { clone } from "remeda"
 import { ToolRegistry } from "../tool/registry"
+import { toolSelectionAllows } from "../tool/selection"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
 import { ListTool } from "../tool/ls"
@@ -1332,6 +1333,7 @@ export namespace SessionPrompt {
       input.agent,
       { skills: input.resources?.skills.availableSkills },
     )) {
+      if (!toolSelectionAllows(item, input.tools)) continue
       const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
       tools[item.id] = tool({
         id: item.id as any,
@@ -1392,6 +1394,7 @@ export namespace SessionPrompt {
     })
 
     for (const [key, item] of Object.entries(mcpTools)) {
+      if (!toolSelectionAllows({ id: key }, input.tools)) continue
       const execute = item.execute
       if (!execute) continue
 

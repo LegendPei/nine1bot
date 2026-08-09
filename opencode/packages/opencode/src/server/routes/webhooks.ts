@@ -451,7 +451,7 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
             sha: ci.pipeline.sha,
             status: ci.pipeline.status,
             ref: ci.pipeline.ref,
-            web_url: ci.pipeline.webUrl,
+            web_url: ci.pipeline.webUrl ?? (ci.pipeline as { web_url?: string }).web_url,
           },
         } : {}),
         diagnostics: ci.diagnostics,
@@ -667,11 +667,9 @@ export function gitLabReviewSessionCreatedPatch(sessionID: string) {
 
 export function gitLabReviewRuntimeTools(objectType: "mr" | "commit") {
   return {
+    "*": false,
+    task: true,
     gitlab_ci_inspect: objectType === "mr",
-    bash: false,
-    edit: false,
-    write: false,
-    apply_patch: false,
   }
 }
 

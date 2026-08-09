@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
+import { PermissionNext } from "../../src/permission/next"
 import { ControllerAgentRunCompiler } from "../../src/runtime/controller/agent-run-compiler"
 import { RuntimePlatformAdapterRegistry } from "../../src/runtime/platform/adapter"
 import { ControllerTemplateResolver } from "../../src/runtime/controller/template-resolver"
@@ -9,6 +10,8 @@ import { RuntimeSourceRegistry } from "../../src/runtime/source/registry"
 import { SessionProfileCompiler } from "../../src/runtime/session/profile-compiler"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { ToolRegistry } from "../../src/tool/registry"
+import { toolSelectionAllows } from "../../src/tool/selection"
 import { Instance } from "../../src/project/instance"
 import { tmpdir } from "../fixture/fixture"
 
@@ -520,6 +523,52 @@ test("controller prompt can persist the frozen declared-only platform agent", as
         expect(message.info.agent).toBe("gitlab.review")
       } finally {
         await Session.remove(session.id)
+      }
+    },
+  })
+})
+
+test("GitLab automated review agents expose only their frozen tool boundary", async () => {
+  await using tmp = await tmpdir({ git: true })
+  const agentsDir = path.resolve(import.meta.dir, "../../../../../packages/platform-gitlab/agents/review")
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      registerAgentSource({
+        id: "gitlab-review-agents",
+        directory: agentsDir,
+        visibility: "declared-only",
+      })
+      const tools = await ToolRegistry.tools({ providerID: "test", modelID: "test" })
+      const pm = await Agent.get("platform.gitlab.pm-coordinator", { includeDeclaredOnly: true })
+      expect(pm).toBeDefined()
+
+      const visible = (agent: NonNullable<typeof pm>, requested: Record<string, boolean> | undefined) => {
+        const disabled = PermissionNext.disabled(tools.map((tool) => tool.id), agent.permission)
+        return tools
+          .filter((tool) => !disabled.has(tool.id) && toolSelectionAllows(tool, requested))
+          .map((tool) => tool.id)
+          .sort()
+      }
+
+      expect(visible(pm!, { "*": false, task: true, gitlab_ci_inspect: true })).toEqual([
+        "gitlab_ci_inspect",
+        "task",
+      ])
+      expect(visible(pm!, { "*": false, task: true, gitlab_ci_inspect: false })).toEqual(["task"])
+
+      for (const name of [
+        "platform.gitlab.developer",
+        "platform.gitlab.frontend-designer",
+        "platform.gitlab.risk-qa",
+        "platform.gitlab.security-agent",
+        "platform.gitlab.spec-writer",
+        "platform.gitlab.tech-architect",
+      ]) {
+        const specialist = await Agent.get(name, { includeDeclaredOnly: true })
+        expect(specialist).toBeDefined()
+        expect(visible(specialist!, undefined)).toEqual([])
       }
     },
   })

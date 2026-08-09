@@ -21,24 +21,28 @@ const parameters = z.discriminatedUnion("action", [
 ])
 
 export function createGitLabCiInspectTool(dependencies: GitLabCiInspectDependencies): Tool.Info<typeof parameters> {
-  return Tool.define("gitlab_ci_inspect", {
-    description: [
-      "Inspect CI for the GitLab merge request bound to the current review session.",
-      "Call list first to see the HEAD pipeline and bounded job list, then read selected job logs only when needed.",
-      "Logs are available for any job status and are bounded and sanitized by the server.",
-    ].join(" "),
-    parameters,
-    async execute(args, context) {
-      const result = await dependencies.inspect(context.sessionID, args, context.abort)
-      return {
-        title: "GitLab CI inspection",
-        output: JSON.stringify(result),
-        metadata: {
-          truncated: result.ok ? result.truncated : false,
-        },
-      }
+  return Tool.define(
+    "gitlab_ci_inspect",
+    {
+      description: [
+        "Inspect CI for the GitLab merge request bound to the current review session.",
+        "Call list first to see the HEAD pipeline and bounded job list, then read selected job logs only when needed.",
+        "Logs are available for any job status and are bounded and sanitized by the server.",
+      ].join(" "),
+      parameters,
+      async execute(args, context) {
+        const result = await dependencies.inspect(context.sessionID, args, context.abort)
+        return {
+          title: "GitLab CI inspection",
+          output: JSON.stringify(result),
+          metadata: {
+            truncated: result.ok ? result.truncated : false,
+          },
+        }
+      },
     },
-  })
+    { requireExplicitEnable: true },
+  )
 }
 
 export const GitLabCiInspectTool = createGitLabCiInspectTool({

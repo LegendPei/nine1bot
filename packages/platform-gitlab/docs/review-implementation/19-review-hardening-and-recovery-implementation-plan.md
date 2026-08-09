@@ -226,15 +226,15 @@ git commit -m "fix(gitlab): bound CI evidence output"
 - Produces: `toolSelectionAllows(tool, requestedTools)`
 - Keeps: 普通工具未声明 opt-in 时保持现有行为
 
-- [ ] **Step 1: 写实际工具表失败测试**
+- [x] **Step 1: 写实际工具表失败测试**
 
 断言普通 session 未显式启用时不暴露 `gitlab_ci_inspect`；MR Review PM 只可见 `gitlab_ci_inspect` 和 `task`；commit Review 不可见 CI；specialist agent 的所有 registry 工具均被 deny。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `bun test opencode/packages/opencode/test/tool/registry.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts`
 
-- [ ] **Step 3: 实现显式 opt-in 工具元数据**
+- [x] **Step 3: 实现显式 opt-in 工具元数据**
 
 ```ts
 export function toolSelectionAllows(
@@ -249,11 +249,11 @@ export function toolSelectionAllows(
 
 `GitLabCiInspectTool` 标记 `requireExplicitEnable: true`；`SessionPrompt.resolveTools` 在初始化和加入模型工具表前调用该函数。
 
-- [ ] **Step 4: 收紧 PM 和 specialist 权限**
+- [x] **Step 4: 收紧 PM 和 specialist 权限**
 
 PM frontmatter 以 `"*": deny` 开始，再只允许 `gitlab_ci_inspect` 和 `task: platform.gitlab.*`。所有 specialist 使用 `"*": deny`。MR runtime tools 返回 `{ '*': false, task: true, gitlab_ci_inspect: true }`，commit 返回 `{ '*': false, task: true, gitlab_ci_inspect: false }`。
 
-- [ ] **Step 5: 运行 OpenCode 测试与类型检查并提交**
+- [x] **Step 5: 运行 OpenCode 测试与类型检查并提交**
 
 Run: `bun test opencode/packages/opencode/test/tool/registry.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts`
 

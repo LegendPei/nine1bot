@@ -4,6 +4,7 @@ import fs from "fs/promises"
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { ToolRegistry } from "../../src/tool/registry"
+import { toolSelectionAllows } from "../../src/tool/selection"
 import { clearBridgeServer, setBridgeServer } from "../../src/browser/bridge"
 
 describe("tool.registry", () => {
@@ -97,6 +98,25 @@ describe("tool.registry", () => {
 
         clearBridgeServer()
         expect(await ToolRegistry.ids()).not.toContain("browser_status")
+      },
+    })
+  })
+
+  test("requires explicit opt-in for dedicated tools and honors deny-by-default selection", async () => {
+    await using tmp = await tmpdir()
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const tools = await ToolRegistry.tools({ providerID: "test", modelID: "test" })
+        const gitlab = tools.find((tool) => tool.id === "gitlab_ci_inspect")
+        const read = tools.find((tool) => tool.id === "read")
+
+        expect(gitlab?.requireExplicitEnable).toBe(true)
+        expect(gitlab && toolSelectionAllows(gitlab, undefined)).toBe(false)
+        expect(gitlab && toolSelectionAllows(gitlab, { gitlab_ci_inspect: true })).toBe(true)
+        expect(read && toolSelectionAllows(read, { "*": false })).toBe(false)
+        expect(read && toolSelectionAllows(read, { "*": false, read: true })).toBe(true)
       },
     })
   })

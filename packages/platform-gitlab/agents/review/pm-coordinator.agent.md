@@ -3,8 +3,7 @@ name: platform.gitlab.pm-coordinator
 description: GitLab review PM coordinator. Primary runtime agent that restores review state, routes risk, creates custom subagents, and produces final GitLab review decisions.
 mode: primary
 permission:
-  edit: deny
-  bash: deny
+  "*": deny
   gitlab_ci_inspect: allow
   task:
     "platform.gitlab.*": allow

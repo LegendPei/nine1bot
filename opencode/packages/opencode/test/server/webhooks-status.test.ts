@@ -196,13 +196,15 @@ describe("webhook status URL selection", () => {
 
   test("enables only the bounded GitLab CI tool in the automated review message", () => {
     expect(gitLabReviewRuntimeTools("mr")).toEqual({
+      "*": false,
+      task: true,
       gitlab_ci_inspect: true,
-      bash: false,
-      edit: false,
-      write: false,
-      apply_patch: false,
     })
-    expect(gitLabReviewRuntimeTools("commit").gitlab_ci_inspect).toBe(false)
+    expect(gitLabReviewRuntimeTools("commit")).toEqual({
+      "*": false,
+      task: true,
+      gitlab_ci_inspect: false,
+    })
   })
 
   test("binds a fresh review session before runtime message delivery", () => {
