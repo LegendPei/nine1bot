@@ -1,5 +1,8 @@
 import type { GitLabRawChangesResponse } from './types'
 
+const GITLAB_PAGE_SIZE = 100
+const MAX_PAGINATED_PAGES = 5
+
 export type GitLabApiClientOptions = {
   baseUrl: string
   token: string
@@ -139,13 +142,13 @@ export class GitLabApiClient {
   }
 
   async getMergeRequestPipelines(projectId: string | number, mrIid: string | number): Promise<GitLabPipelineSummary[]> {
-    return await this.request<GitLabPipelineSummary[]>(
+    return await this.requestPaginated<GitLabPipelineSummary>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/pipelines`,
     )
   }
 
   async getPipelineJobs(projectId: string | number, pipelineId: string | number): Promise<GitLabPipelineJob[]> {
-    return await this.request<GitLabPipelineJob[]>(
+    return await this.requestPaginated<GitLabPipelineJob>(
       `/api/v4/projects/${encodeURIComponent(String(projectId))}/pipelines/${encodeURIComponent(String(pipelineId))}/jobs`,
     )
   }
@@ -284,6 +287,29 @@ export class GitLabApiClient {
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return (await this.requestPage<T>(path, init)).data
+  }
+
+  private async requestPaginated<T>(path: string): Promise<T[]> {
+    const values: T[] = []
+    const visitedPages = new Set<string>()
+    let page = '1'
+    for (let index = 0; index < MAX_PAGINATED_PAGES && !visitedPages.has(page); index += 1) {
+      visitedPages.add(page)
+      const separator = path.includes('?') ? '&' : '?'
+      const result = await this.requestPage<T[]>(
+        `${path}${separator}per_page=${GITLAB_PAGE_SIZE}&page=${encodeURIComponent(page)}`,
+      )
+      if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
+      values.push(...result.data)
+      const nextPage = result.nextPage
+      if (!nextPage || !/^\d+$/.test(nextPage)) break
+      page = nextPage
+    }
+    return values
+  }
+
+  private async requestPage<T>(path: string, init: RequestInit = {}): Promise<{ data: T; nextPage?: string }> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
         const errorBody = await readBoundedText(response, this.maxErrorResponseBytes).catch(() => undefined)
@@ -292,8 +318,9 @@ export class GitLabApiClient {
       const body = await readBoundedText(response, this.maxJsonResponseBytes)
       if (body.truncated) throw new Error(`GitLab API response exceeded ${this.maxJsonResponseBytes} bytes`)
       const text = body.text
-      if (!text.trim()) return undefined as T
-      return JSON.parse(text) as T
+      const data = text.trim() ? JSON.parse(text) as T : undefined as T
+      const nextPage = response.headers.get('x-next-page')?.trim() || undefined
+      return { data, nextPage }
     })
   }
 
@@ -357,13 +384,17 @@ async function readBoundedText(response: Response, maxBytes?: number) {
   let completed = false
   let truncated = false
   try {
-    while (used < maxBytes) {
+    while (true) {
       const { done, value } = await reader.read()
       if (done) {
         completed = true
         break
       }
       const remaining = maxBytes - used
+      if (remaining <= 0) {
+        truncated = true
+        break
+      }
       const chunk = value.byteLength > remaining ? value.slice(0, remaining) : value
       chunks.push(chunk)
       used += chunk.byteLength

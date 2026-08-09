@@ -79,6 +79,25 @@ export function buildGitLabReviewDiffEvidence(
   }
 }
 
+export function minimumGitLabReviewDiffEvidenceBytes(
+  files: GitLabChangedFile[],
+  options: GitLabReviewDiffEvidenceOptions = {},
+) {
+  for (const file of files) {
+    const firstHunk = splitHunks(file.diff)[0]
+    if (!firstHunk) continue
+    const slices = [{ file: file.newPath, hunk: firstHunk }]
+    return byteLength(renderGitLabReviewDiffEvidence({
+      slices,
+      skipped: options.skipped ?? [],
+      omissions: omittedFiles(files, slices),
+      headSha: options.headSha,
+      maxSummaryItems: 0,
+    }))
+  }
+  return 0
+}
+
 export function renderGitLabReviewDiffEvidence(input: {
   slices: GitLabReviewDiffSlice[]
   skipped: GitLabSkippedFile[]

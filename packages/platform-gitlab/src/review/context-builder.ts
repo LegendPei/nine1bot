@@ -1,8 +1,10 @@
 import { buildGitLabDiffManifest } from './diff-builder'
-import { buildGitLabReviewDiffEvidence } from './diff-slicer'
+import { buildGitLabReviewDiffEvidence, minimumGitLabReviewDiffEvidenceBytes } from './diff-slicer'
 import { buildGitLabReviewIdempotencyKey } from './idempotency'
 import type { GitLabReviewProjectSnapshot } from './settings'
 import type { GitLabRawChangesResponse, GitLabReviewTrigger } from './types'
+
+const MIN_SUPPLEMENTAL_CONTEXT_BYTES = 64
 
 export type GitLabReviewContext = {
   trigger: GitLabReviewTrigger
@@ -35,27 +37,46 @@ export function buildGitLabReviewContext(input: {
   diagnostics?: string[]
 }): GitLabReviewContext {
   const contextBudget = input.maxDiffBytes ?? 240_000
-  let remainingBudget = contextBudget
-  const projectBlock = input.project
-    ? boundedBlock(projectContextBlock(input.project), Math.min(32_000, Math.floor(contextBudget / 3)), '[project context truncated]')
-    : undefined
-  if (projectBlock) remainingBudget = Math.max(0, remainingBudget - byteLength(projectBlock.content))
-  const additionalContextBlocks = (input.additionalContextBlocks ?? []).map((block) => {
-    const bounded = boundedBlock(block, remainingBudget, '[context block truncated]')
-    remainingBudget = Math.max(0, remainingBudget - byteLength(bounded.content))
-    return bounded
-  })
   const candidateDiff = buildGitLabDiffManifest(input.changes, {
     maxDiffBytes: Number.MAX_SAFE_INTEGER,
     maxFiles: input.maxFiles,
     includePathPrefixes: input.project?.includePathPrefixes,
     excludePathPatterns: input.project?.excludePathPatterns,
   })
-  const manifestBlock = remainingBudget > 0
-    ? boundedBlock(diffManifestBlock(candidateDiff), remainingBudget, '[diff manifest truncated]')
+  const minimumDiffBudget = minimumGitLabReviewDiffEvidenceBytes(candidateDiff.files, {
+    skipped: candidateDiff.skipped,
+    headSha: candidateDiff.diffRefs?.headSha,
+  })
+  const hasSupplementalContext = Boolean(input.project || input.additionalContextBlocks?.length)
+  const supplementalFloor = hasSupplementalContext ? MIN_SUPPLEMENTAL_CONTEXT_BYTES : 0
+  const reservedDiffBudget = minimumDiffBudget > 0 && minimumDiffBudget + supplementalFloor <= contextBudget
+    ? minimumDiffBudget
+    : 0
+  let remainingSupplementalBudget = Math.max(0, contextBudget - reservedDiffBudget)
+  const projectBlock = input.project
+    ? boundedBlock(
+        projectContextBlock(input.project),
+        Math.min(remainingSupplementalBudget, 32_000, Math.floor(contextBudget / 3)),
+        '[project context truncated]',
+      )
     : undefined
-  if (manifestBlock) remainingBudget = Math.max(0, remainingBudget - byteLength(manifestBlock.content))
-  const slices = buildGitLabReviewDiffEvidence(candidateDiff.files, remainingBudget, {
+  if (projectBlock) {
+    remainingSupplementalBudget = Math.max(0, remainingSupplementalBudget - byteLength(projectBlock.content))
+  }
+  const additionalContextBlocks = (input.additionalContextBlocks ?? []).map((block) => {
+    const bounded = boundedBlock(block, remainingSupplementalBudget, '[context block truncated]')
+    remainingSupplementalBudget = Math.max(0, remainingSupplementalBudget - byteLength(bounded.content))
+    return bounded
+  })
+  const manifestBlock = remainingSupplementalBudget > 0
+    ? boundedBlock(diffManifestBlock(candidateDiff), remainingSupplementalBudget, '[diff manifest truncated]')
+    : undefined
+  if (manifestBlock) {
+    remainingSupplementalBudget = Math.max(0, remainingSupplementalBudget - byteLength(manifestBlock.content))
+  }
+  const usedSupplementalBudget = contextBudget - reservedDiffBudget - remainingSupplementalBudget
+  const availableDiffBudget = Math.max(0, contextBudget - usedSupplementalBudget)
+  const slices = buildGitLabReviewDiffEvidence(candidateDiff.files, availableDiffBudget, {
     skipped: candidateDiff.skipped,
     headSha: candidateDiff.diffRefs?.headSha,
   })

@@ -398,7 +398,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       ReviewRunStore.update(run.id, {
         status: 'blocked',
         warnings,
-        context,
+        context: persistedGitLabReviewContext(context),
         ci,
       })
       return {
@@ -413,7 +413,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     }
     ReviewRunStore.update(run.id, {
       status: settings.dryRun ? 'succeeded' : 'running',
-      context,
+      context: persistedGitLabReviewContext(context),
       warnings: [...projectWarnings, ...contextDiagnostics],
       ci,
     })
@@ -449,6 +449,13 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
         : 'Runtime review execution is not wired yet.',
     ],
+  }
+}
+
+function persistedGitLabReviewContext(context: ReturnType<typeof buildGitLabReviewContext>) {
+  return {
+    ...context,
+    contextBlocks: context.contextBlocks.filter((block) => block.source !== 'platform.gitlab.review.pipeline'),
   }
 }
 

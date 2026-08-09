@@ -529,9 +529,10 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: (async (url) => {
         const value = String(url)
-        if (value.endsWith('/pipelines')) return Response.json([{ id: 55, sha: 'ci-head', status: 'failed' }])
-        if (value.endsWith('/pipelines/55/jobs')) return Response.json([{ id: 56, name: 'test', stage: 'verify', status: 'failed' }])
-        if (value.endsWith('/jobs/56/trace')) return new Response('FAILED test', { status: 200 })
+        const pathname = new URL(value).pathname
+        if (pathname.endsWith('/pipelines')) return Response.json([{ id: 55, sha: 'ci-head', status: 'failed' }])
+        if (pathname.endsWith('/pipelines/55/jobs')) return Response.json([{ id: 56, name: 'test', stage: 'verify', status: 'failed' }])
+        if (pathname.endsWith('/jobs/56/trace')) return new Response('FAILED test', { status: 200 })
         throw new Error(`unexpected request: ${value}`)
       }) as typeof fetch,
     })
@@ -539,9 +540,13 @@ describe('GitLab review controller', () => {
     expect(result).toMatchObject({ accepted: true, status: 'dry-run', warnings: [] })
     expect(result.accepted && result.context?.contextBlocks.map((block) => block.id)).toContain('gitlab-review-pipeline')
     expect(result.accepted && result.context?.contextBlocks.find((block) => block.id === 'gitlab-review-pipeline')?.content).toContain('FAILED test')
-    expect(result.accepted ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+    const stored = result.accepted ? ReviewRunStore.get(result.runId) : undefined
+    expect(stored).toMatchObject({
       ci: { pipeline: { id: 55, sha: 'ci-head', status: 'failed' }, diagnostics: [] },
     })
+    expect(JSON.stringify(stored?.context)).not.toContain('FAILED test')
+    expect((stored?.context as { contextBlocks?: Array<{ id: string }> } | undefined)?.contextBlocks?.map((block) => block.id))
+      .not.toContain('gitlab-review-pipeline')
   })
 
   test('degrades optional pipeline context when the token secret store fails', async () => {

@@ -566,6 +566,40 @@ describe('GitLab review foundation', () => {
       .toContain('[project context truncated]')
   })
 
+  test('reserves enough context budget for a diff hunk before optional CI evidence', () => {
+    const budget = 1_200
+    const context = buildGitLabReviewContext({
+      trigger: {
+        host: 'gitlab.example.com', projectId: 3, projectPath: 'root/uftest', objectType: 'mr', objectIid: 10,
+        headSha: 'head', eventName: 'merge_request', mode: 'webhook',
+      },
+      project: {
+        id: 'uftest', host: 'gitlab.example.com', projectId: 3, enabled: true,
+        nine1botProjectID: 'project-uf',
+        reviewContextMarkdown: 'architecture '.repeat(200), reviewFocus: ['security'],
+        includePathPrefixes: [], excludePathPatterns: [],
+        ci: { enabled: true, includeFailedJobLogs: true, maxFailedJobs: 3, maxJobLogBytes: 8_000 },
+        source: 'configured', matchedAt: 1_000,
+      },
+      changes: {
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+      },
+      additionalContextBlocks: [{
+        id: 'gitlab-review-pipeline', layer: 'platform', source: 'platform.gitlab.review.pipeline', enabled: true,
+        priority: 89, lifecycle: 'turn', visibility: 'system-required', content: 'failed pipeline trace '.repeat(200),
+      }],
+      maxDiffBytes: budget,
+    })
+    const dynamicBlockBytes = context.contextBlocks
+      .filter((block) => block.source !== 'platform.gitlab.review.trigger')
+      .reduce((total, block) => total + new TextEncoder().encode(block.content).length, 0)
+
+    expect(context.slices?.slices).toHaveLength(1)
+    expect(context.contextBlocks.find((block) => block.source === 'platform.gitlab.review.pipeline')?.content)
+      .toContain('[context block truncated]')
+    expect(dynamicBlockBytes + new TextEncoder().encode(context.diffEvidence ?? '').length).toBeLessThanOrEqual(budget)
+  })
+
   test('bounds skipped and omitted file summaries inside the final diff evidence budget', () => {
     const budget = 500
     const context = buildGitLabReviewContext({
@@ -1154,9 +1188,11 @@ describe('GitLab review foundation', () => {
       baseUrl: 'https://gitlab.example.com',
       token: 'token',
       fetch: (async (url) => {
-        urls.push(String(url))
-        if (String(url).endsWith('/pipelines')) return Response.json([{ id: 7, sha: 'head', status: 'failed' }])
-        if (String(url).endsWith('/pipelines/7/jobs')) return Response.json([{ id: 8, name: 'test', status: 'failed' }])
+        const value = String(url)
+        const pathname = new URL(value).pathname
+        urls.push(value)
+        if (pathname.endsWith('/pipelines')) return Response.json([{ id: 7, sha: 'head', status: 'failed' }])
+        if (pathname.endsWith('/pipelines/7/jobs')) return Response.json([{ id: 8, name: 'test', status: 'failed' }])
         return new Response('failed trace', { status: 200 })
       }) as typeof fetch,
     })
@@ -1165,9 +1201,40 @@ describe('GitLab review foundation', () => {
     await expect(client.getPipelineJobs(3, 7)).resolves.toMatchObject([{ id: 8, name: 'test', status: 'failed' }])
     await expect(client.getJobTrace(3, 8)).resolves.toBe('failed trace')
     expect(urls).toEqual([
-      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines',
-      'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=1',
+      'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs?per_page=100&page=1',
       'https://gitlab.example.com/api/v4/projects/3/jobs/8/trace',
+    ])
+  })
+
+  test('loads at most five pages of merge request pipelines', async () => {
+    const urls: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        urls.push(value)
+        const page = Number(new URL(value).searchParams.get('page'))
+        return Response.json([{ id: page, status: 'failed' }], {
+          headers: { 'x-next-page': String(page + 1) },
+        })
+      }) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).resolves.toEqual([
+      { id: 1, status: 'failed' },
+      { id: 2, status: 'failed' },
+      { id: 3, status: 'failed' },
+      { id: 4, status: 'failed' },
+      { id: 5, status: 'failed' },
+    ])
+    expect(urls).toEqual([
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=1',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=2',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=3',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=4',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/pipelines?per_page=100&page=5',
     ])
   })
 
@@ -1234,7 +1301,18 @@ describe('GitLab review foundation', () => {
     }
   })
 
-  test('cancels a job trace stream when the byte limit is reached exactly', async () => {
+  test('accepts a complete JSON response exactly at the byte limit', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      maxJsonResponseBytes: 2,
+      fetch: (async () => new Response('[]', { status: 200 })) as unknown as typeof fetch,
+    })
+
+    await expect(client.getMergeRequestPipelines(3, 2)).resolves.toEqual([])
+  })
+
+  test('cancels a job trace stream when content exceeds the byte limit', async () => {
     let canceled = false
     const client = new GitLabApiClient({
       baseUrl: 'https://gitlab.example.com',
@@ -1242,6 +1320,7 @@ describe('GitLab review foundation', () => {
       fetch: (async () => new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(new TextEncoder().encode('12345'))
+          controller.enqueue(new TextEncoder().encode('6'))
         },
         cancel() {
           canceled = true
