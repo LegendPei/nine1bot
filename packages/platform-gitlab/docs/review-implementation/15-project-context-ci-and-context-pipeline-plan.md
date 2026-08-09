@@ -1,6 +1,6 @@
 # GitLab Review 项目归属、CI/CD 与上下文管线实施计划
 
-> 本文记录 2026-08-06 确认的下一轮改进方案。它是实施计划，不改变已经稳定的 webhook、MR review、回写和幂等行为。
+> 本文记录 2026-08-06 确认的改进方案，并在 2026-08-09 根据 PR review 修正项目领域边界。它是实施计划，不改变已经稳定的 webhook、MR review、回写和幂等行为。
 
 ## 目标
 
@@ -10,8 +10,9 @@
 
 ## 已确认决策
 
-- 项目配置采用“结构化表单字段 + 可选 Markdown 项目说明”。
-- 项目说明是项目私有的系统上下文，不进入普通 Web 对话，不跨项目复用。
+- Nine1Bot `Project` 是项目身份、工作目录和通用项目上下文的唯一主实体；GitLab 项目档案不得复制出第二套项目模型。
+- GitLab 项目档案采用“GitLab 仓库映射 + Nine1Bot Project 绑定 + review 专属策略”，其中 Markdown 仅作为 review overlay，通用项目说明继续由 `Project.instructions` 管理。
+- 配置了 GitLab 项目档案却没有有效 Nine1Bot Project 绑定时必须 fail closed，不得静默回退到 `NINE1BOT_PROJECT_DIR` 或 `process.cwd()`。
 - 每个 `ReviewRun` 必须固化项目身份和项目配置快照，历史 run 不因后续编辑项目配置而改变归属或证据。
 - CI/CD 仅是增强上下文，第一版不作为 review 发布门禁，也不触发、重跑、取消或修改 GitLab pipeline。
 - 不让模型直接执行 GitLab CLI 或 API；读取 GitLab 仍经 `GitLabApiClient`，上下文组装仍由 platform-gitlab 的纯函数完成。
@@ -34,16 +35,18 @@
 GitLab webhook / @Nine1bot
   -> event-parser 解析 GitLabReviewTrigger
   -> GitLabProjectProfileResolver 按 host + projectId 匹配项目档案
-  -> ReviewRun 创建并持久化 projectSnapshot
+  -> project profile 提供 opaque nine1botProjectID
+  -> controller/server 边界解析 Nine1Bot Project
+  -> ReviewRun 创建并持久化 GitLab identity + project binding snapshot
   -> GitLabApiClient 读取 MR diff 与可选 CI/CD 证据
-  -> ReviewContextPacketBuilder 受预算组装：项目 -> CI -> diff manifest -> diff slices
-  -> Runtime 执行既有 GitLab review workflow
+  -> ReviewContextPacketBuilder 受预算组装：review overlay -> bounded CI -> diff manifest -> diff slices
+  -> Runtime 在绑定 Project 的 rootDirectory/worktree 中执行既有 GitLab review workflow
   -> ReviewRun 和 GitLab 回写都保留项目归属与证据摘要
 ```
 
 上下文包固定为四层，优先级从高到低如下：
 
-1. **项目层**：项目身份、Markdown 说明、审查重点、路径规则、非目标和项目级预算。
+1. **项目层**：Nine1Bot Project 通过既有 context pipeline 注入通用 instructions、环境变量键和 shared files；GitLab profile 只补充 review overlay、审查重点、路径规则和项目级预算。
 2. **CI 层**：MR HEAD SHA 对应 pipeline 摘要；仅包括状态、web URL、失败/取消 job 的名称、阶段、失败原因和脱敏截断日志。
 3. **变更清单层**：全部变更文件、过滤原因、切片与裁剪统计。
 4. **Diff 证据层**：按排序后的文件和 hunk 生成的可审查片段，带文件路径、old/new line 范围和被省略标记。
@@ -61,10 +64,11 @@ type GitLabReviewProjectProfile = {
   id: string
   host?: string
   projectId: string | number
+  nine1botProjectID: string
   pathWithNamespace?: string
   displayName?: string
   enabled: boolean
-  contextMarkdown?: string
+  reviewContextMarkdown?: string
   reviewFocus?: string[]
   includePathPrefixes?: string[]
   excludePathPatterns?: string[]
@@ -78,15 +82,15 @@ type GitLabReviewProjectProfile = {
   }
 }
 
-type GitLabReviewProjectSnapshot = Omit<GitLabReviewProjectProfile, 'contextMarkdown'> & {
-  contextMarkdown?: string
+type GitLabReviewProjectSnapshot = Omit<GitLabReviewProjectProfile, 'reviewContextMarkdown'> & {
+  reviewContextMarkdown?: string
   matchedAt: number
 }
 ```
 
-规则：未配置项目档案但仍在现有 scope 中的项目保持可审查，使用一个由 trigger 派生的“无档案快照”，并附 `project_profile_missing` warning。这样升级不影响已接入项目；配置了项目档案且 `enabled=false` 时，明确拒绝并记录 `project_profile_disabled`。
+规则：`(host, projectId)` 是唯一仓库身份，同一身份存在多个档案时配置无效并 fail closed。非 dry-run 审查必须匹配已启用且包含 `nine1botProjectID` 的档案；未建档项目返回 `project_profile_missing`，未绑定项目返回 `project_binding_missing`。如果绑定的 Nine1Bot Project 已删除或不可读，Runtime 启动失败并记录同一错误，不得使用进程默认目录。历史 `contextMarkdown` 在读取时迁移为 `reviewContextMarkdown`，但不再承担通用项目说明职责。
 
-`ReviewRunRecord` 新增 `project?: GitLabReviewProjectSnapshot`、`contextDiagnostics?: GitLabReviewContextDiagnostics` 和 `ci?: GitLabPipelineSummary`。webhook 路由的 public DTO 仅暴露安全字段，不能返回完整项目 Markdown、原始 job trace、token 或 GitLab API 错误正文。
+`ReviewRunRecord` 新增 `project?: GitLabReviewProjectSnapshot`、`contextDiagnostics?: GitLabReviewContextDiagnostics` 和 `ci?: GitLabPipelineSummary`。其中 project snapshot 固化 GitLab identity 与 `nine1botProjectID`，但 Runtime 每次启动仍须验证绑定 Project 存在。webhook 路由的 public DTO 仅暴露安全字段，不能返回完整 review overlay、原始 job trace、token、项目本地路径或 GitLab API 错误正文。
 
 ## CI/CD 证据策略
 
@@ -98,7 +102,7 @@ getPipelineJobs(projectId, pipelineId): Promise<GitLabPipelineJob[]>
 getJobTrace(projectId, jobId): Promise<string>
 ```
 
-选择规则：优先 `sha === trigger.headSha` 的最新 pipeline；若 GitLab API 未返回 sha 匹配项，则不猜测关联关系，标记 `pipeline_not_found_for_head_sha`。只读取失败、取消或手动阻塞的前 N 个 job；日志先清除 ANSI 控制符和可能的密钥形式，再截断到项目预算。`
+选择规则：优先 `sha === trigger.headSha` 的最新 pipeline；若 GitLab API 未返回 sha 匹配项，则不猜测关联关系，标记 `pipeline_not_found_for_head_sha`。pipeline 与 job 列表使用显式、有限的分页策略。只读取失败、取消或手动阻塞的前 N 个 job；日志先清除 ANSI 控制符和可能的密钥形式，再截断到项目预算。日志只保留在当次 Runtime 输入内，`ReviewRunStore` 仅持久化 pipeline/job 摘要和 diagnostics。
 
 所有以下情况均返回“CI 证据不可用/不完整”诊断并继续 review：无 MR、无 HEAD SHA、无 pipeline、pipeline running、token 缺失、403/404、超时、单个 job trace 读取失败。只有 diff 自身的既有硬阻断仍可阻断 review。
 
@@ -124,6 +128,7 @@ getJobTrace(projectId, jobId): Promise<string>
 - 当前实现对单个超过剩余预算的 hunk 整体省略并记录 `budget-exceeded`，不会截断在半行或伪造行号。首尾带行号窗口仍是后续增强项，不能在验收结论中声称已经支持。
 - 被跳过的文件和 hunk 都进入 `omissions`，包括原因 `budget-exceeded`、`profile-excluded`、`large-hunk-truncated`。
 - 预算分配先预留项目层和 CI 层，再将剩余预算用于 diff；任何可选层超预算均先缩减自身，不能挤掉项目身份或 diff manifest。
+- 只要存在可用 diff hunk，就必须为 diff evidence 预留明确的最低预算；CI 与其他可选 block 不得把 hunk 数压到 0。
 
 第一版不做向量检索、代码库全量索引或跨 MR 长期记忆；这些会引入索引一致性、权限和成本问题，且不满足当前 MR diff review 的最小闭环。
 
@@ -133,7 +138,7 @@ getJobTrace(projectId, jobId): Promise<string>
 
 **状态：已完成（2026-08-06）**
 
-已实现项目档案归一化与 `(host, projectId)` 匹配；`ReviewRun` 已持久化项目快照。未建档但在 scope 内的项目继续执行并记录 `project_profile_missing`，禁用项目档案会创建 rejected run；公开 run DTO 仅返回项目摘要，未暴露项目 Markdown 或策略字段。
+已实现项目档案归一化与 `(host, projectId)` 匹配；`ReviewRun` 已持久化项目快照。该批次最初允许未建档项目继续执行，现由 Batch 6 的显式 Project 绑定和 fail-closed 规则替代；公开 run DTO 仍只返回项目摘要，不暴露 review overlay 或策略字段。
 
 **范围**
 
@@ -147,7 +152,7 @@ getJobTrace(projectId, jobId): Promise<string>
 
 - `root/uftest`（project id 3）触发 review 后，run 记录和 API 响应都有稳定的项目名称、路径、项目 ID 与快照版本。
 - 同项目的后续配置修改不改变历史 run 的项目快照。
-- 未建档但在当前 allowlist 内的项目仍可审查且带 warning；禁用档案的项目被确定性拒绝。
+- 未建档兼容行为仅记录为历史实现；Batch 6 完成后，未建档、未绑定和禁用档案的项目均被确定性拒绝。
 
 ### Batch 2：可降级 CI/CD 上下文
 
@@ -236,6 +241,28 @@ getJobTrace(projectId, jobId): Promise<string>
 - 单个 hunk 大于全部剩余预算时当前整体省略；尚未实现首尾窗口切片。
 - 本轮不提供仓库级语义检索、向量索引或跨 MR 长期记忆；大 PR 优化仍以文件优先级、hunk 边界切片、确定性预算和显式 omission 为主。
 
+### Batch 6：PR Review 收敛修正
+
+**状态：进行中（2026-08-09）**
+
+本批次只修复 PR #52 已确认的领域边界、安全和稳定性问题，不再增加 GitLab 能力面。
+
+**实施顺序**
+
+1. 为项目档案增加 `nine1botProjectID`，将历史 `contextMarkdown` 兼容迁移为 `reviewContextMarkdown`；配置页从现有 Nine1Bot Project 列表选择绑定项目。
+2. 在 controller/server 边界解析绑定 Project，并以其 `rootDirectory/worktree` 启动 Runtime；未建档、未绑定或绑定失效均使用稳定错误码 fail closed。
+3. 区分未配置 `allowedHosts` 与非法 allowlist，拒绝重复 `(host, projectId)` 档案，并统一所有 GitLab identity 路径使用 `host[:port]` authority helper。
+4. 为 diff evidence 预留最低预算；CI block 只作为当次 Runtime 输入，持久化 context 删除 job trace，仅保留安全摘要和 diagnostics。
+5. pipeline/job 列表采用显式有界分页，修复 response body 恰好等于 byte limit 时的误截断边界。
+6. 补齐 include/exclude、上下文预算、文件上限和 job log 预算的 Web 编辑入口，并覆盖配置 round-trip、项目绑定和错误态。
+
+**验收门槛**
+
+- 每项行为修复先增加会失败的回归测试，再实现最小修复。
+- ReviewRun 可追溯 GitLab identity 与 Nine1Bot Project ID，但落盘数据不含 CI trace、项目本地路径或 secret。
+- 大 CI + 小总预算时仍至少包含一个可用 diff hunk；无可用 hunk 时必须有明确 omission/blocked 诊断。
+- `bun run ci:test`、`bun run ci:typecheck`、`bun run build:web` 和 `git diff --check origin/main...HEAD` 全部通过后才能推送。
+
 ## 稳定性与安全约束
 
 - 项目档案匹配只信任 GitLab webhook 解析出的 host/project ID，不信任用户评论中的项目文字。
@@ -249,7 +276,7 @@ getJobTrace(projectId, jobId): Promise<string>
 
 | 层级 | 关键用例 |
 | --- | --- |
-| 纯函数 | 项目匹配、配置归一化、无档案降级、禁用拒绝、排序、hunk 切片、预算和 omission |
+| 纯函数 | 项目匹配、配置归一化、无档案/未绑定拒绝、禁用拒绝、排序、hunk 切片、预算和 omission |
 | GitLab API client | pipeline/job/trace 路径、分页/空响应、非 2xx、日志内容读取 |
 | Controller | run 快照、CI 成功/失败/缺失、CI 降级不阻断、prompt 内容、幂等与 retry |
 | Store/路由 | 旧 run 兼容、脱敏 DTO、项目和诊断展示 |
