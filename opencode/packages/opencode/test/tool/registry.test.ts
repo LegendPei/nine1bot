@@ -6,6 +6,7 @@ import { Instance } from "../../src/project/instance"
 import { ToolRegistry } from "../../src/tool/registry"
 import { toolSelectionAllows } from "../../src/tool/selection"
 import { clearBridgeServer, setBridgeServer } from "../../src/browser/bridge"
+import { PermissionNext } from "../../src/permission/next"
 
 describe("tool.registry", () => {
   afterEach(() => {
@@ -117,6 +118,19 @@ describe("tool.registry", () => {
         expect(gitlab && toolSelectionAllows(gitlab, { gitlab_ci_inspect: true })).toBe(true)
         expect(read && toolSelectionAllows(read, { "*": false })).toBe(false)
         expect(read && toolSelectionAllows(read, { "*": false, read: true })).toBe(true)
+
+        const specialistPermissions = PermissionNext.fromConfig({ "*": "deny" })
+        expect(read && toolSelectionAllows(read, undefined, specialistPermissions)).toBe(false)
+        expect(toolSelectionAllows({ id: "mcp_gitlab_admin" }, undefined, specialistPermissions)).toBe(false)
+
+        const coordinatorPermissions = PermissionNext.fromConfig({
+          "*": "deny",
+          task: "allow",
+          gitlab_ci_inspect: "allow",
+        })
+        expect(gitlab && toolSelectionAllows(gitlab, { gitlab_ci_inspect: true }, coordinatorPermissions)).toBe(true)
+        expect(toolSelectionAllows({ id: "task" }, { task: true }, coordinatorPermissions)).toBe(true)
+        expect(read && toolSelectionAllows(read, { read: true }, coordinatorPermissions)).toBe(false)
       },
     })
   })

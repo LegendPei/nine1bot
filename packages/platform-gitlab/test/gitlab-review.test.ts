@@ -47,6 +47,16 @@ describe('GitLab review foundation', () => {
 
     expect(resolveGitLabApiBaseUrl({ triggerHost: 'gitlab.example.com:8443' }))
       .toEqual({ ok: true, baseUrl: 'https://gitlab.example.com:8443' })
+
+    expect(resolveGitLabApiBaseUrl({
+      configuredBaseUrl: 'https://user:password@gitlab.example.com',
+      triggerHost: 'gitlab.example.com',
+    })).toEqual({ ok: false, reason: 'gitlab_host_invalid' })
+
+    expect(resolveGitLabApiBaseUrl({
+      configuredBaseUrl: 'ftp://gitlab.example.com',
+      triggerHost: 'gitlab.example.com',
+    })).toEqual({ ok: false, reason: 'gitlab_host_invalid' })
   })
 
   test('builds MR idempotency keys from head SHA and note id', () => {

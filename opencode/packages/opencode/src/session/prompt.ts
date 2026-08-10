@@ -1291,6 +1291,7 @@ export namespace SessionPrompt {
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
+    const permissions = PermissionNext.merge(input.agent.permission, input.session.permission ?? [])
 
     const context = (args: any, options: ToolCallOptions): Tool.Context => ({
       sessionID: input.session.id,
@@ -1333,7 +1334,7 @@ export namespace SessionPrompt {
       input.agent,
       { skills: input.resources?.skills.availableSkills },
     )) {
-      if (!toolSelectionAllows(item, input.tools)) continue
+      if (!toolSelectionAllows(item, input.tools, permissions)) continue
       const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
       tools[item.id] = tool({
         id: item.id as any,
@@ -1394,7 +1395,7 @@ export namespace SessionPrompt {
     })
 
     for (const [key, item] of Object.entries(mcpTools)) {
-      if (!toolSelectionAllows({ id: key }, input.tools)) continue
+      if (!toolSelectionAllows({ id: key }, input.tools, permissions)) continue
       const execute = item.execute
       if (!execute) continue
 

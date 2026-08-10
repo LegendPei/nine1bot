@@ -298,7 +298,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
 
   const idempotencyKey = buildGitLabReviewIdempotencyKey(parsed.trigger)
   const duplicate = ReviewRunStore.findByIdempotencyKey(idempotencyKey)
-  if (duplicate && duplicate.status !== 'failed') {
+  if (duplicate) {
     if (duplicate.status === 'rejected') {
       return {
         accepted: false,
@@ -306,6 +306,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
         error: duplicate.error ?? 'duplicate_gitlab_review_trigger',
         httpStatus: 202,
         runId: duplicate.id,
+        ...reviewAttemptMetadata(duplicate),
       }
     }
     return {
@@ -316,6 +317,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       trigger: parsed.trigger,
       warnings: ['Duplicate GitLab review trigger ignored by idempotency key.'],
       duplicateOf: duplicate.id,
+      ...reviewAttemptMetadata(duplicate),
     }
   }
   const projectResolution = resolveGitLabReviewProjectProfile(settings, {

@@ -907,6 +907,9 @@ describe('GitLab review controller', () => {
         iid: 10,
         last_commit: { id: 'abc123' },
       },
+      changes: {
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+      },
     }
 
     const first = await handleGitLabReviewWebhook({
@@ -922,7 +925,19 @@ describe('GitLab review controller', () => {
       secrets: memorySecrets,
     })
 
-    expect(first.accepted && second.accepted && second.duplicateOf).toBe(first.accepted && first.runId)
+    expect(first).toMatchObject({ accepted: true, status: 'dry-run' })
+    expect(second).toMatchObject({ accepted: true, duplicateOf: first.runId })
+
+    ReviewRunStore.update(first.runId!, { status: 'failed', error: 'runtime_failed' })
+    const replayAfterFailure = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })
+
+    expect(replayAfterFailure).toMatchObject({ accepted: true, duplicateOf: first.runId, runId: first.runId })
+    expect(ReviewRunStore.list()).toHaveLength(1)
   })
 
   test('persists review runs between store reloads', async () => {

@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
+  gitLabReviewControllerResponsePatch,
   gitLabReviewRuntimeTools,
+  gitLabReviewRuntimeFailure,
   gitLabReviewSessionCreatedPatch,
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
@@ -11,6 +13,31 @@ import {
 } from "../../src/server/routes/webhooks"
 
 describe("webhook status URL selection", () => {
+  test("does not move a terminal GitLab review run back to running", () => {
+    const response = {
+      accepted: true,
+      turnSnapshotId: "turn_fast_completion",
+    } as any
+    const run = {
+      id: "run_terminal",
+      status: "succeeded",
+      publishedAt: 42,
+    } as any
+
+    expect(gitLabReviewControllerResponsePatch(run, response)).toBeUndefined()
+    expect(gitLabReviewControllerResponsePatch({ ...run, status: "failed", publishedAt: undefined }, response))
+      .toBeUndefined()
+    expect(gitLabReviewControllerResponsePatch({ ...run, status: "running", publishedAt: undefined }, response))
+      .toEqual({ status: "running", turnSnapshotId: "turn_fast_completion" })
+  })
+
+  test("normalizes runtime failures without exposing exception text", () => {
+    expect(gitLabReviewRuntimeFailure("runtime_start", new Error("PRIVATE-TOKEN=secret at C:\\private\\config")))
+      .toBe("gitlab_review_runtime_start_failed")
+    expect(gitLabReviewRuntimeFailure("runtime_finished", "provider response with private prompt"))
+      .toBe("gitlab_review_runtime_finished_failed")
+  })
+
   test("uses configured local URL when provided", () => {
     expect(webhookLocalOrigin({
       requestOrigin: "http://127.0.0.1:4096",
@@ -85,6 +112,8 @@ describe("webhook status URL selection", () => {
           status: "failed",
           ref: "feature/review",
           web_url: "https://gitlab.example.com/root/uftest/-/pipelines/41",
+          kind: "source",
+          verification: ["mr_pipeline_candidate", "head_sha_exact"],
           trace: "must never reach the browser",
         },
         diagnostics: ["failed_jobs_detected"],
@@ -118,6 +147,8 @@ describe("webhook status URL selection", () => {
           status: "failed",
           ref: "feature/review",
           web_url: "https://gitlab.example.com/root/uftest/-/pipelines/41",
+          kind: "source",
+          verification: ["mr_pipeline_candidate", "head_sha_exact"],
         },
         diagnostics: ["failed_jobs_detected"],
       },

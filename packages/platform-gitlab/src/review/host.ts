@@ -1,10 +1,7 @@
 export function gitLabAuthorityFromUrl(input?: string) {
-  if (!input) return undefined
-  try {
-    return new URL(input).host.toLowerCase()
-  } catch {
-    return undefined
-  }
+  const url = parseGitLabHttpUrl(input)
+  if (!url || url.username || url.password) return undefined
+  return url.host.toLowerCase()
 }
 
 export function normalizeGitLabAuthority(input?: string) {
@@ -24,8 +21,23 @@ export function resolveGitLabApiBaseUrl(input: {
   const triggerAuthority = normalizeGitLabAuthority(input.triggerHost)
   if (!triggerAuthority) return { ok: false, reason: 'gitlab_host_invalid' }
   if (!input.configuredBaseUrl) return { ok: true, baseUrl: `https://${triggerAuthority}` }
-  if (gitLabAuthorityFromUrl(input.configuredBaseUrl) !== triggerAuthority) {
+  const configured = parseGitLabHttpUrl(input.configuredBaseUrl)
+  if (!configured || configured.username || configured.password) {
+    return { ok: false, reason: 'gitlab_host_invalid' }
+  }
+  if (configured.host.toLowerCase() !== triggerAuthority) {
     return { ok: false, reason: 'gitlab_host_mismatch' }
   }
-  return { ok: true, baseUrl: input.configuredBaseUrl.replace(/\/+$/, '') }
+  const path = configured.pathname.replace(/\/+$/, '')
+  return { ok: true, baseUrl: `${configured.origin}${path === '/' ? '' : path}` }
+}
+
+function parseGitLabHttpUrl(input?: string) {
+  if (!input) return undefined
+  try {
+    const url = new URL(input)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined
+  } catch {
+    return undefined
+  }
 }
