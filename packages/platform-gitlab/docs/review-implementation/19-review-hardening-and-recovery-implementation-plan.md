@@ -526,27 +526,27 @@ git commit -m "feat(gitlab): retry rejected reviews as attempts"
 - Produces: `selectTrustedGitLabCiPipeline(input): Promise<GitLabCiPipelineSelection>`
 - Produces: `GitLabCiPipeline.kind = 'source' | 'detached' | 'merged_result' | 'merge_train' | 'integrated'`
 
-- [ ] **Step 1: 写候选矩阵失败测试**
+- [x] **Step 1: 写候选矩阵失败测试**
 
 表驱动覆盖：source SHA 精确匹配、detached MR pipeline、merged result 临时提交父节点包含 head、merge train 临时提交包含 head、旧 head、来自错误 MR 的伪候选、ref 看似正确但父节点不含 head、commit metadata 404。
 
-- [ ] **Step 2: 写选择优先级和 50 条上限测试**
+- [x] **Step 2: 写选择优先级和 50 条上限测试**
 
 同一 MR 同时有 source 与 integrated pipeline 时优先 integrated；同层 ID 最大优先；只读取前 50 个受控候选；不得请求项目 latest pipelines endpoint。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts -t "trusted GitLab CI pipeline|integrated pipeline"`
 
-- [ ] **Step 4: 实现元数据 DTO 与候选校验**
+- [x] **Step 4: 实现元数据 DTO 与候选校验**
 
 MR pipelines 列表和同次 MR 详情 `head_pipeline` 合并去重。SHA 等于 `diff_refs.head_sha` 直接可信；临时 SHA 必须同时满足当前 MR endpoint 归属、`source === 'merge_request_event'`、commit `parent_ids` 包含 head。ref/事件类型仅分类，不单独建立信任。
 
-- [ ] **Step 5: 返回稳定非阻断诊断**
+- [x] **Step 5: 返回稳定非阻断诊断**
 
 无候选为 `ci_pipeline_not_found_for_current_mr`；有候选但无可信结果为 `ci_pipeline_unverified_for_current_head`；元数据请求失败为 `ci_pipeline_metadata_unavailable:<ErrorName>`。
 
-- [ ] **Step 6: 运行平台层回归并提交**
+- [x] **Step 6: 运行平台层回归并提交**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 

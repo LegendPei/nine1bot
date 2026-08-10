@@ -26,6 +26,7 @@ import {
   readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
   sanitizeGitLabCiTrace,
+  selectTrustedGitLabCiPipeline,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
@@ -1457,11 +1458,353 @@ describe('GitLab review foundation', () => {
     }])
   })
 
+  test('projects GitLab MR, pipeline, and commit provenance metadata before returning it', async () => {
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const pathname = new URL(String(url)).pathname
+        if (pathname.endsWith('/merge_requests/10')) {
+          return Response.json({
+            id: 101,
+            iid: 10,
+            project_id: 3,
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head-a' },
+            head_pipeline: {
+              id: 55,
+              project_id: 3,
+              sha: 'temporary-merge',
+              source: 'merge_request_event',
+              ref: 'refs/merge-requests/10/merge',
+              status: 'success',
+              variables: [{ key: 'TOKEN', value: 'raw-secret' }],
+            },
+            description: 'private MR description',
+          })
+        }
+        if (pathname.endsWith('/pipelines/55')) {
+          return Response.json({
+            id: 55,
+            project_id: 3,
+            sha: 'temporary-merge',
+            source: 'merge_request_event',
+            ref: 'refs/merge-requests/10/merge',
+            status: 'success',
+            user: { private_email: 'secret@example.com' },
+          })
+        }
+        return Response.json({
+          id: 'temporary-merge',
+          short_id: 'temp',
+          parent_ids: ['target', 'head-a'],
+          message: 'private commit message',
+          author_email: 'secret@example.com',
+        })
+      }) as typeof fetch,
+    })
+
+    await expect(client.getMergeRequest(3, 10)).resolves.toEqual({
+      id: 101,
+      iid: 10,
+      project_id: 3,
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head-a' },
+      head_pipeline: {
+        id: 55,
+        project_id: 3,
+        sha: 'temporary-merge',
+        source: 'merge_request_event',
+        ref: 'refs/merge-requests/10/merge',
+        status: 'success',
+      },
+    })
+    await expect(client.getPipeline(3, 55)).resolves.toEqual({
+      id: 55,
+      project_id: 3,
+      sha: 'temporary-merge',
+      source: 'merge_request_event',
+      ref: 'refs/merge-requests/10/merge',
+      status: 'success',
+    })
+    await expect(client.getCommit(3, 'temporary-merge')).resolves.toEqual({
+      id: 'temporary-merge',
+      short_id: 'temp',
+      parent_ids: ['target', 'head-a'],
+    })
+  })
+
+  test('selects only a trusted GitLab CI pipeline for the current MR head', async () => {
+    const cases = [
+      {
+        name: 'source SHA exact match',
+        pipeline: { id: 11, sha: 'head-a', source: 'push', ref: 'feature/review', status: 'success' },
+        expectedKind: 'source',
+        expectedVerification: 'head_sha_exact',
+      },
+      {
+        name: 'detached MR pipeline',
+        pipeline: { id: 12, sha: 'head-a', source: 'merge_request_event', ref: 'refs/merge-requests/10/head', status: 'success' },
+        expectedKind: 'detached',
+        expectedVerification: 'head_sha_exact',
+      },
+      {
+        name: 'merged result contains current head',
+        pipeline: { id: 13, sha: 'merged-a', source: 'merge_request_event', ref: 'refs/merge-requests/10/merge', status: 'failed' },
+        parentIds: ['target-a', 'head-a'],
+        expectedKind: 'merged_result',
+        expectedVerification: 'temporary_commit_contains_head',
+      },
+      {
+        name: 'merge train contains current head',
+        pipeline: { id: 14, sha: 'train-a', source: 'merge_request_event', ref: 'refs/merge-requests/10/train', status: 'running' },
+        parentIds: ['train-parent', 'head-a'],
+        expectedKind: 'merge_train',
+        expectedVerification: 'temporary_commit_contains_head',
+      },
+      {
+        name: 'unclassified integrated pipeline contains current head',
+        pipeline: { id: 15, sha: 'integrated-a', source: 'merge_request_event', ref: 'refs/pipelines/15', status: 'running' },
+        parentIds: ['target-a', 'head-a'],
+        expectedKind: 'integrated',
+        expectedVerification: 'temporary_commit_contains_head',
+      },
+      {
+        name: 'old source head',
+        pipeline: { id: 16, sha: 'old-head', source: 'push', ref: 'feature/review', status: 'success' },
+        expectedDiagnostic: 'ci_pipeline_unverified_for_current_head',
+      },
+      {
+        name: 'candidate ref belongs to another MR',
+        pipeline: { id: 17, sha: 'foreign-a', source: 'merge_request_event', ref: 'refs/merge-requests/99/merge', status: 'success' },
+        parentIds: ['target-a', 'head-a'],
+        expectedDiagnostic: 'ci_pipeline_unverified_for_current_head',
+      },
+      {
+        name: 'candidate belongs to another project',
+        pipeline: { id: 171, project_id: 4, sha: 'head-a', source: 'push', ref: 'feature/review', status: 'success' },
+        expectedDiagnostic: 'ci_pipeline_unverified_for_current_head',
+      },
+      {
+        name: 'merged ref does not contain current head',
+        pipeline: { id: 18, sha: 'fake-merge', source: 'merge_request_event', ref: 'refs/merge-requests/10/merge', status: 'success' },
+        parentIds: ['target-a', 'other-head'],
+        expectedDiagnostic: 'ci_pipeline_unverified_for_current_head',
+      },
+      {
+        name: 'temporary commit metadata is unavailable',
+        pipeline: { id: 19, sha: 'missing-commit', source: 'merge_request_event', ref: 'refs/merge-requests/10/merge', status: 'success' },
+        commitError: new GitLabApiError(404, 'Not Found'),
+        expectedDiagnostic: 'ci_pipeline_metadata_unavailable:GitLabApiError',
+      },
+    ] as const
+
+    for (const entry of cases) {
+      const result = await selectTrustedGitLabCiPipeline({
+        client: {
+          async getMergeRequestPipelines() {
+            return [entry.pipeline]
+          },
+          async getMergeRequest() {
+            return {
+              id: 101,
+              iid: 10,
+              project_id: 3,
+              diff_refs: { base_sha: 'base', start_sha: 'target-a', head_sha: 'head-a' },
+            }
+          },
+          async getPipeline() {
+            return entry.pipeline
+          },
+          async getCommit() {
+            if ('commitError' in entry) throw entry.commitError
+            return { id: entry.pipeline.sha, parent_ids: 'parentIds' in entry ? [...entry.parentIds] : [] }
+          },
+        },
+        projectId: 3,
+        mrIid: 10,
+        headSha: 'head-a',
+      })
+
+      if ('expectedKind' in entry) {
+        expect(result.pipeline, entry.name).toMatchObject({
+          id: entry.pipeline.id,
+          kind: entry.expectedKind,
+          verification: expect.arrayContaining(['mr_pipeline_candidate', entry.expectedVerification]),
+        })
+        expect(result.diagnostics, entry.name).toEqual([])
+      } else {
+        expect(result.pipeline, entry.name).toBeUndefined()
+        expect(result.diagnostics, entry.name).toEqual([entry.expectedDiagnostic])
+      }
+    }
+  })
+
+  test('prefers integrated pipelines and bounds trusted GitLab CI pipeline candidates to 50', async () => {
+    const priorityResult = await selectTrustedGitLabCiPipeline({
+      client: {
+        async getMergeRequestPipelines() {
+          return [
+            { id: 90, sha: 'head-a', source: 'push', ref: 'feature/review', status: 'success' },
+            { id: 30, sha: 'merged-30', source: 'merge_request_event', ref: 'refs/merge-requests/10/merge', status: 'success' },
+            { id: 31, sha: 'train-31', source: 'merge_request_event', ref: 'refs/merge-requests/10/train', status: 'failed' },
+          ]
+        },
+        async getMergeRequest() {
+          return { iid: 10, project_id: 3, diff_refs: { head_sha: 'head-a' } }
+        },
+        async getPipeline(_projectId, pipelineId) {
+          return pipelineId === 30
+            ? { id: 30, sha: 'merged-30', source: 'merge_request_event', ref: 'refs/merge-requests/10/merge', status: 'success' }
+            : { id: 31, sha: 'train-31', source: 'merge_request_event', ref: 'refs/merge-requests/10/train', status: 'failed' }
+        },
+        async getCommit(_projectId, sha) {
+          return { id: String(sha), parent_ids: ['target-a', 'head-a'] }
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'head-a',
+    })
+    expect(priorityResult.pipeline).toMatchObject({ id: 31, kind: 'merge_train' })
+
+    const pipelineReads: Array<string | number> = []
+    const commitReads: Array<string | number> = []
+    const candidates = Array.from({ length: 51 }, (_, index) => ({
+      id: index + 1,
+      sha: `temporary-${index + 1}`,
+      source: 'merge_request_event',
+      ref: 'refs/merge-requests/10/merge',
+      status: 'success',
+    }))
+    const boundedResult = await selectTrustedGitLabCiPipeline({
+      client: {
+        async getMergeRequestPipelines() {
+          return candidates
+        },
+        async getMergeRequest() {
+          return { iid: 10, project_id: 3, diff_refs: { head_sha: 'head-a' } }
+        },
+        async getPipeline(_projectId, pipelineId) {
+          pipelineReads.push(pipelineId)
+          return candidates[Number(pipelineId) - 1]!
+        },
+        async getCommit(_projectId, sha) {
+          commitReads.push(sha)
+          return {
+            id: String(sha),
+            parent_ids: sha === 'temporary-51' ? ['target-a', 'head-a'] : ['target-a', 'other-head'],
+          }
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'head-a',
+    })
+
+    expect(boundedResult.pipeline).toBeUndefined()
+    expect(boundedResult.diagnostics).toEqual(['ci_pipeline_unverified_for_current_head'])
+    expect(pipelineReads).toHaveLength(50)
+    expect(commitReads).toHaveLength(50)
+    expect(pipelineReads).not.toContain(51)
+    expect(commitReads).not.toContain('temporary-51')
+
+    await expect(selectTrustedGitLabCiPipeline({
+      client: {
+        async getMergeRequestPipelines() {
+          return []
+        },
+        async getMergeRequest() {
+          return { iid: 10, project_id: 3, diff_refs: { head_sha: 'head-a' } }
+        },
+        async getPipeline() {
+          throw new Error('empty candidate set must not load pipeline metadata')
+        },
+        async getCommit() {
+          throw new Error('empty candidate set must not load commit metadata')
+        },
+      },
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'head-a',
+    })).resolves.toEqual({ diagnostics: ['ci_pipeline_not_found_for_current_mr'] })
+  })
+
+  test('uses only bounded MR-scoped endpoints to select an integrated pipeline', async () => {
+    const urls: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        const parsed = new URL(value)
+        urls.push(value)
+        if (parsed.pathname.endsWith('/merge_requests/10/pipelines')) {
+          return Response.json([{
+            id: 54,
+            project_id: 3,
+            sha: 'head-a',
+            source: 'push',
+            ref: 'feature/review',
+            status: 'success',
+          }], { headers: { 'x-next-page': '2' } })
+        }
+        if (parsed.pathname.endsWith('/merge_requests/10')) {
+          return Response.json({
+            iid: 10,
+            project_id: 3,
+            diff_refs: { head_sha: 'head-a' },
+            head_pipeline: {
+              id: 55,
+              project_id: 3,
+              sha: 'merged-a',
+              source: 'merge_request_event',
+              ref: 'refs/merge-requests/10/merge',
+              status: 'success',
+            },
+          })
+        }
+        if (parsed.pathname.endsWith('/pipelines/55')) {
+          return Response.json({
+            id: 55,
+            project_id: 3,
+            sha: 'merged-a',
+            source: 'merge_request_event',
+            ref: 'refs/merge-requests/10/merge',
+            status: 'success',
+          })
+        }
+        if (parsed.pathname.endsWith('/repository/commits/merged-a')) {
+          return Response.json({ id: 'merged-a', parent_ids: ['target-a', 'head-a'] })
+        }
+        throw new Error(`unexpected GitLab request: ${value}`)
+      }) as typeof fetch,
+    })
+
+    await expect(selectTrustedGitLabCiPipeline({
+      client,
+      projectId: 3,
+      mrIid: 10,
+      headSha: 'head-a',
+    })).resolves.toMatchObject({ pipeline: { id: 55, kind: 'merged_result' }, diagnostics: [] })
+    expect(urls.filter((url) => new URL(url).pathname.endsWith('/merge_requests/10/pipelines'))).toEqual([
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/10/pipelines?per_page=50&page=1',
+    ])
+    expect(urls.some((url) => new URL(url).pathname === '/api/v4/projects/3/pipelines')).toBe(false)
+  })
+
   test('bounds projected GitLab CI job lists by count and serialized bytes', async () => {
     const result = await inspectGitLabCi({
       client: {
         async getMergeRequestPipelines() {
           return [{ id: 55, sha: 'head-a', status: 'success' }]
+        },
+        async getMergeRequest() {
+          return { iid: 10, project_id: 3, diff_refs: { head_sha: 'head-a' } }
+        },
+        async getPipeline() {
+          throw new Error('exact head pipeline must not load pipeline metadata')
+        },
+        async getCommit() {
+          throw new Error('exact head pipeline must not load commit metadata')
         },
         async getPipelineJobs() {
           return Array.from({ length: 150 }, (_, index) => ({
@@ -1604,6 +1947,15 @@ describe('GitLab review foundation', () => {
             { id: 54, sha: 'old-head', status: 'failed' },
             { id: 55, sha: 'review-head', status: 'success', ref: 'feat/review' },
           ]
+        },
+        async getMergeRequest() {
+          return { iid: 10, project_id: 3, diff_refs: { head_sha: 'review-head' } }
+        },
+        async getPipeline() {
+          throw new Error('exact head pipeline must not load pipeline metadata')
+        },
+        async getCommit() {
+          throw new Error('exact head pipeline must not load commit metadata')
         },
         async getPipelineJobs() {
           return [

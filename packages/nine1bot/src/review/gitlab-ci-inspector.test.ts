@@ -57,6 +57,8 @@ describe('GitLab CI session inspector', () => {
       if (url.includes('/projects/3/merge_requests/10/pipelines')) {
         return Response.json([{ id: 55, sha: 'head-a', status: 'running' }])
       }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
       if (url.includes('/projects/3/pipelines/55/jobs')) {
         return Response.json([
           { id: 56, name: 'build', status: 'success' },
@@ -100,7 +102,13 @@ describe('GitLab CI session inspector', () => {
         headSha: 'head-a',
         mrUrl: 'https://gitlab.example.com/root/uftest/-/merge_requests/10',
       },
-      pipeline: { id: 55, sha: 'head-a', status: 'running' },
+      pipeline: {
+        id: 55,
+        sha: 'head-a',
+        status: 'running',
+        kind: 'source',
+        verification: expect.arrayContaining(['mr_pipeline_candidate', 'head_sha_exact']),
+      },
       jobs: [
         { id: 56, name: 'build', status: 'success' },
         { id: 57, name: 'test', status: 'failed' },
@@ -108,7 +116,7 @@ describe('GitLab CI session inspector', () => {
       ],
       diagnostics: [],
     })
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
     expect(calls.every((url) => url.includes('/projects/3/'))).toBe(true)
 
     const runA = ReviewRunStore.findBySessionId('session-a')
@@ -192,6 +200,8 @@ describe('GitLab CI session inspector', () => {
       if (url.includes('/merge_requests/10/pipelines')) {
         return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
       }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
       if (url.includes('/pipelines/55/jobs')) {
         return Response.json([
           { id: 56, name: 'build', status: 'success' },
@@ -283,6 +293,8 @@ describe('GitLab CI session inspector', () => {
       if (url.includes('/merge_requests/10/pipelines')) {
         return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
       }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
       if (url.includes('/pipelines/55/jobs')) {
         return Response.json([{ id: 56, name: 'test', status: 'success' }])
       }
@@ -339,6 +351,8 @@ describe('GitLab CI session inspector', () => {
         if (url.includes('/merge_requests/10/pipelines')) {
           return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
         }
+        const mergeRequest = currentMergeRequestMetadataResponse(url)
+        if (mergeRequest) return mergeRequest
         if (url.includes('/pipelines/55/jobs')) {
           return Response.json(Array.from({ length: 150 }, (_, index) => ({
             id: index + 1,
@@ -364,6 +378,8 @@ describe('GitLab CI session inspector', () => {
       if (url.includes('/merge_requests/10/pipelines')) {
         return Response.json([{ id: pipelineId, sha: 'head-a', status: pipelineId === 55 ? 'failed' : 'success' }])
       }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
       if (url.includes(`/pipelines/${pipelineId}/jobs`)) return Response.json([])
       throw new Error(`unexpected request: ${url}`)
     }) as typeof fetch
@@ -437,5 +453,15 @@ function createReviewRun(sessionId: string, projectId: number, mrIid: number, he
       source: 'configured',
       matchedAt: 1,
     },
+  })
+}
+
+function currentMergeRequestMetadataResponse(url: string) {
+  const pathname = new URL(url).pathname
+  if (pathname !== '/api/v4/projects/3/merge_requests/10') return undefined
+  return Response.json({
+    iid: 10,
+    project_id: 3,
+    diff_refs: { head_sha: 'head-a' },
   })
 }

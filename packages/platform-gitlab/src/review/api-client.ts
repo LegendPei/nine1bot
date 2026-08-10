@@ -6,9 +6,11 @@ const MAX_REDIRECTS = 3
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const MAX_CI_TEXT_LENGTH = 512
 const MAX_CI_URL_LENGTH = 4_096
+const MAX_COMMIT_PARENTS = 64
 
 export type GitLabRequestOptions = {
   signal?: AbortSignal
+  maxItems?: number
 }
 
 export type GitLabApiRedirectErrorCode =
@@ -67,6 +69,24 @@ export type GitLabPipelineSummary = {
   web_url?: string
   created_at?: string
   updated_at?: string
+}
+
+export type GitLabMergeRequestMetadata = {
+  id?: number
+  iid?: number
+  project_id?: number
+  diff_refs?: {
+    base_sha?: string
+    start_sha?: string
+    head_sha?: string
+  }
+  head_pipeline?: GitLabPipelineSummary
+}
+
+export type GitLabCommitMetadata = {
+  id: string
+  short_id?: string
+  parent_ids: string[]
 }
 
 export type GitLabPipelineJob = {
@@ -182,6 +202,48 @@ export class GitLabApiClient {
       const projected = projectPipelineSummary(value)
       return projected ? [projected] : []
     })
+  }
+
+  async getMergeRequest(
+    projectId: string | number,
+    mrIid: string | number,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabMergeRequestMetadata> {
+    const value = await this.request<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}`,
+      { signal: options.signal },
+    )
+    const projected = projectMergeRequestMetadata(value)
+    if (!projected) throw new Error('GitLab merge request metadata response is invalid')
+    return projected
+  }
+
+  async getPipeline(
+    projectId: string | number,
+    pipelineId: string | number,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabPipelineSummary> {
+    const value = await this.request<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/pipelines/${encodeURIComponent(String(pipelineId))}`,
+      { signal: options.signal },
+    )
+    const projected = projectPipelineSummary(value)
+    if (!projected) throw new Error('GitLab pipeline metadata response is invalid')
+    return projected
+  }
+
+  async getCommit(
+    projectId: string | number,
+    sha: string,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabCommitMetadata> {
+    const value = await this.request<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/commits/${encodeURIComponent(sha)}`,
+      { signal: options.signal },
+    )
+    const projected = projectCommitMetadata(value)
+    if (!projected) throw new Error('GitLab commit metadata response is invalid')
+    return projected
   }
 
   async getPipelineJobs(
@@ -344,16 +406,27 @@ export class GitLabApiClient {
   private async requestPaginated<T>(path: string, options: GitLabRequestOptions = {}): Promise<T[]> {
     const values: T[] = []
     const visitedPages = new Set<string>()
+    const itemLimit = options.maxItems === undefined
+      ? Number.POSITIVE_INFINITY
+      : Number.isFinite(options.maxItems)
+        ? Math.max(0, Math.floor(options.maxItems))
+        : 0
+    if (itemLimit === 0) return values
+    const perPage = Number.isFinite(itemLimit) ? Math.min(GITLAB_PAGE_SIZE, itemLimit) : GITLAB_PAGE_SIZE
+    const pageLimit = Number.isFinite(itemLimit)
+      ? Math.min(MAX_PAGINATED_PAGES, Math.ceil(itemLimit / perPage))
+      : MAX_PAGINATED_PAGES
     let page = '1'
-    for (let index = 0; index < MAX_PAGINATED_PAGES && !visitedPages.has(page); index += 1) {
+    for (let index = 0; index < pageLimit && !visitedPages.has(page); index += 1) {
       visitedPages.add(page)
       const separator = path.includes('?') ? '&' : '?'
       const result = await this.requestPage<T[]>(
-        `${path}${separator}per_page=${GITLAB_PAGE_SIZE}&page=${encodeURIComponent(page)}`,
+        `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
         { signal: options.signal },
       )
       if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
-      values.push(...result.data)
+      values.push(...result.data.slice(0, itemLimit - values.length))
+      if (values.length >= itemLimit) break
       const nextPage = result.nextPage
       if (!nextPage || !/^\d+$/.test(nextPage)) break
       page = nextPage
@@ -483,6 +556,45 @@ function projectPipelineSummary(input: unknown): GitLabPipelineSummary | undefin
     created_at: boundedString(record?.created_at, MAX_CI_TEXT_LENGTH),
     updated_at: boundedString(record?.updated_at, MAX_CI_TEXT_LENGTH),
   }) as GitLabPipelineSummary
+}
+
+function projectMergeRequestMetadata(input: unknown): GitLabMergeRequestMetadata | undefined {
+  const record = objectRecord(input)
+  if (!record) return undefined
+  const diffRefs = objectRecord(record.diff_refs)
+  const headPipeline = projectPipelineSummary(record.head_pipeline)
+  return compactObject({
+    id: finiteNumber(record.id),
+    iid: finiteNumber(record.iid),
+    project_id: finiteNumber(record.project_id),
+    diff_refs: diffRefs
+      ? compactObject({
+          base_sha: boundedString(diffRefs.base_sha, MAX_CI_TEXT_LENGTH),
+          start_sha: boundedString(diffRefs.start_sha, MAX_CI_TEXT_LENGTH),
+          head_sha: boundedString(diffRefs.head_sha, MAX_CI_TEXT_LENGTH),
+        })
+      : undefined,
+    head_pipeline: headPipeline,
+  }) as GitLabMergeRequestMetadata
+}
+
+function projectCommitMetadata(input: unknown): GitLabCommitMetadata | undefined {
+  const record = objectRecord(input)
+  const id = boundedString(record?.id, MAX_CI_TEXT_LENGTH)
+  if (!id) return undefined
+  const parentIds = Array.isArray(record?.parent_ids)
+    ? record.parent_ids
+      .slice(0, MAX_COMMIT_PARENTS)
+      .flatMap((value) => {
+        const parent = boundedString(value, MAX_CI_TEXT_LENGTH)
+        return parent ? [parent] : []
+      })
+    : []
+  return compactObject({
+    id,
+    short_id: boundedString(record?.short_id, MAX_CI_TEXT_LENGTH),
+    parent_ids: parentIds,
+  }) as GitLabCommitMetadata
 }
 
 function projectPipelineJob(input: unknown): GitLabPipelineJob | undefined {
