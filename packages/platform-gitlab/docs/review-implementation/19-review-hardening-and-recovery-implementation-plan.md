@@ -617,7 +617,7 @@ git commit -m "fix(gitlab): isolate CI queries by review attempt"
 | 3 | 后端 profile 诊断与前端无损编辑 | `00d2a72`、`a2ae986` | 已完成 |
 | 4 | ReviewRun attempt 数据模型与配置型拒绝显式 retry | `9f1bf4e`、`113937a` | 已完成 |
 | 5 | 可信 MR pipeline 选择与 CI 查询 attempt 隔离 | `bd22147`、`0f466b3` | 已完成 |
-| 6 | 全量验证、分支 review 收口、文档同步与推送 | `cc88a9f`、文档提交（本提交） | 已完成（待推送） |
+| 6 | 全量验证、分支 review 收口、文档同步与推送 | `cc88a9f`、`ba414b2`、状态回写（本提交） | 已完成 |
 
 实现期间保持每个风险独立提交，原有 rejected run 不原地修改，CI 不可用也不阻断 Review。真实隔离 GitLab 验收独立保留在联调清单中，不以单元测试替代。
 
@@ -688,8 +688,10 @@ git commit -m "docs(gitlab): record review hardening rollout"
 
 Result: 分支级 `git diff origin/main...HEAD --check`、敏感信息扫描和最终 review 均通过；仅提交四份 GitLab Review 文档，不纳入本地 IDE 文件。
 
-- [ ] **Step 6: 推送当前 PR 分支**
+- [x] **Step 6: 推送当前 PR 分支**
 
 Run: `git push origin HEAD:feat/gitlab-review-workflow-v2`
 
 Expected: 远端 PR #52 更新成功。
+
+Result: `git push origin HEAD:feat/gitlab-review-workflow-v2` 成功，PR #52 已包含实现、测试与无凭证联调清单；本步骤状态由随后的小型文档提交回写。
