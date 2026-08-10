@@ -558,6 +558,10 @@ test("GitLab automated review agents expose only their frozen tool boundary", as
       ])
       expect(visible(pm!, { "*": false, task: true, gitlab_ci_inspect: false })).toEqual(["task"])
 
+      expect(
+        PermissionNext.evaluateWithSessionGrants("task", "platform.gitlab.risk-qa", pm!.permission, []).action,
+      ).toBe("allow")
+
       for (const name of [
         "platform.gitlab.developer",
         "platform.gitlab.frontend-designer",

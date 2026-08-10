@@ -400,6 +400,25 @@ test("evaluate - merges multiple rulesets", () => {
   expect(result.action).toBe("deny")
 })
 
+test("evaluateWithSessionGrants - final base rule wins before session grants", () => {
+  const base = PermissionNext.fromConfig({
+    "*": "deny",
+    task: { "platform.gitlab.*": "allow" },
+  })
+
+  expect(
+    PermissionNext.evaluateWithSessionGrants("task", "platform.gitlab.risk-qa", base, []).action,
+  ).toBe("allow")
+  expect(
+    PermissionNext.evaluateWithSessionGrants(
+      "bash",
+      "*",
+      base,
+      [{ permission: "bash", pattern: "*", action: "allow" }],
+    ).action,
+  ).toBe("deny")
+})
+
 // disabled tests
 
 test("disabled - returns empty set when all tools allowed", () => {

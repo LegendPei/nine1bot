@@ -283,11 +283,8 @@ export namespace PermissionNext {
     ruleset: Ruleset,
     sessionGrants: Ruleset,
   ): Rule {
-    const baseDeny = merge(ruleset).findLast(
-      (rule) =>
-        rule.action === "deny" && Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
-    )
-    if (baseDeny) return baseDeny
+    const base = evaluate(permission, pattern, ruleset)
+    if (base.action === "deny") return base
     return evaluate(permission, pattern, ruleset, sessionGrants)
   }
 
