@@ -59,6 +59,8 @@
    - 本轮安全与稳定性改进的任务清单、提交记录和验收结果。
 20. [20-review-follow-up-hardening-design.md](./20-review-follow-up-hardening-design.md)
    - 分支二次审查后的权限、脱敏、HEAD 一致性、绑定恢复、发布幂等、资源限制和 attempt 链完整性设计。
+21. [21-review-follow-up-hardening-implementation-plan.md](./21-review-follow-up-hardening-implementation-plan.md)
+   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界。
 
 ## 当前交付目标
 
