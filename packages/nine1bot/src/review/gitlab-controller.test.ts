@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -758,6 +758,118 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.findByIdempotencyKey('gitlab:example:123:commit:abc:auto:test')).toMatchObject({
       id: created.id,
     })
+  })
+
+  test('models review attempt chains with stable generations and legacy defaults', async () => {
+    const first = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'gitlab:example:123:mr:10:head:abc',
+      triggerKey: 'gitlab:example:123:mr:10:head:abc',
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    const second = ReviewRunStore.createRetryAttempt(first, {
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: first.idempotencyKey,
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    expect(second).toBeDefined()
+    const third = ReviewRunStore.createRetryAttempt(second!, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: first.idempotencyKey,
+    })
+
+    expect(first).toMatchObject({ rootRunId: first.id, attempt: 1, generation: expect.any(String) })
+    expect(first.generation).not.toBe('')
+    expect(second).toMatchObject({
+      rootRunId: first.id,
+      attempt: 2,
+      retryOf: first.id,
+      triggerKey: first.triggerKey,
+      generation: expect.any(String),
+    })
+    expect(third).toMatchObject({
+      rootRunId: first.id,
+      attempt: 3,
+      retryOf: second!.id,
+      triggerKey: first.triggerKey,
+    })
+    expect(ReviewRunStore.findLatestByTriggerKey(first.triggerKey)).toMatchObject({ id: third!.id })
+
+    const legacyPath = join(tempDirs.at(-1)!, 'legacy-review-runs.json')
+    await writeFile(legacyPath, JSON.stringify({
+      version: 1,
+      sequence: 4,
+      runs: [{
+        id: 'review_legacy_4',
+        platform: 'gitlab',
+        status: 'failed',
+        idempotencyKey: 'legacy-trigger',
+        createdAt: 10,
+        updatedAt: 20,
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(legacyPath)
+
+    expect(ReviewRunStore.get('review_legacy_4')).toMatchObject({
+      rootRunId: 'review_legacy_4',
+      attempt: 1,
+      triggerKey: 'legacy-trigger',
+      generation: expect.stringContaining('legacy-'),
+    })
+  })
+
+  test('applies conditional review updates only to the current attempt identity', () => {
+    const first = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      idempotencyKey: 'conditional-trigger',
+      triggerKey: 'conditional-trigger',
+      sessionId: 'session-current',
+    })
+
+    expect(ReviewRunStore.updateIfCurrent({
+      runId: first.id,
+      sessionId: 'session-old',
+      generation: first.generation,
+    }, { error: 'old-session' })).toBe(false)
+    expect(ReviewRunStore.updateIfCurrent({
+      runId: first.id,
+      sessionId: first.sessionId,
+      generation: 'old-generation',
+    }, { error: 'old-generation' })).toBe(false)
+    expect(ReviewRunStore.updateIfCurrent({
+      runId: first.id,
+      sessionId: first.sessionId,
+      generation: first.generation,
+    }, { warnings: ['current-update'] })).toBe(true)
+
+    const retry = ReviewRunStore.createRetryAttempt(first, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: first.idempotencyKey,
+    })
+    const competingRetry = ReviewRunStore.createRetryAttempt(first, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: first.idempotencyKey,
+    })
+
+    expect(retry).toBeDefined()
+    expect(competingRetry).toBeUndefined()
+    expect(ReviewRunStore.updateIfCurrent({
+      runId: first.id,
+      sessionId: first.sessionId,
+      generation: first.generation,
+    }, { error: 'stale-attempt' })).toBe(false)
+    expect(ReviewRunStore.get(first.id)).toMatchObject({
+      warnings: ['current-update'],
+    })
+    expect(ReviewRunStore.get(first.id)?.error).toBeUndefined()
   })
 
   test('lists newest review runs first and prunes old records', () => {

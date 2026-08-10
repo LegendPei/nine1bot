@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
+import { randomUUID } from 'crypto'
 import { getDataDir } from '../config/loader'
 import type { GitLabCiPipeline, GitLabReviewProjectSnapshot } from '@nine1bot/platform-gitlab/review'
 
@@ -16,6 +17,11 @@ export type ReviewRunCiSummary = {
 
 export type ReviewRunRecord = {
   id: string
+  rootRunId: string
+  attempt: number
+  retryOf?: string
+  triggerKey: string
+  generation: string
   platform: 'gitlab'
   idempotencyKey?: string
   status: ReviewRunStatus
@@ -33,12 +39,25 @@ export type ReviewRunRecord = {
   lastRetryAt?: number
   warnings?: string[]
   context?: unknown
+  rejectionKind?: string
+  recoverable?: boolean
 }
 
-export type CreateReviewRunInput = Omit<ReviewRunRecord, 'id' | 'createdAt' | 'updatedAt'>
+export type CreateReviewRunInput = Omit<
+  ReviewRunRecord,
+  'id' | 'rootRunId' | 'attempt' | 'retryOf' | 'triggerKey' | 'generation' | 'createdAt' | 'updatedAt'
+> & {
+  triggerKey?: string
+}
+
+export type ReviewRunIdentity = {
+  runId: string
+  sessionId?: string
+  generation: string
+}
 
 type ReviewRunStoreFile = {
-  version: 1
+  version: 2
   sequence: number
   runs: ReviewRunRecord[]
 }
@@ -66,13 +85,7 @@ function maxRecords() {
 export namespace ReviewRunStore {
   export function create(input: CreateReviewRunInput): ReviewRunRecord {
     load()
-    const now = Date.now()
-    const run = {
-      ...input,
-      id: `review_${now.toString(36)}_${(++sequence).toString(36)}`,
-      createdAt: now,
-      updatedAt: now,
-    } satisfies ReviewRunRecord
+    const run = createRecord(input)
     runs.set(run.id, run)
     save()
     return { ...run }
@@ -80,10 +93,15 @@ export namespace ReviewRunStore {
 
   export function findByIdempotencyKey(idempotencyKey: string): ReviewRunRecord | undefined {
     load()
-    for (const run of runs.values()) {
-      if (run.idempotencyKey === idempotencyKey) return { ...run }
-    }
-    return undefined
+    const matches = [...runs.values()].filter((run) => run.idempotencyKey === idempotencyKey)
+    const latest = matches.sort(compareLatestAttemptFirst)[0]
+    return latest ? { ...latest } : undefined
+  }
+
+  export function findLatestByTriggerKey(triggerKey: string): ReviewRunRecord | undefined {
+    load()
+    const latest = findLatestByTriggerKeyInternal(triggerKey)
+    return latest ? { ...latest } : undefined
   }
 
   export function findBySessionId(sessionId: string): ReviewRunRecord | undefined {
@@ -110,6 +128,46 @@ export namespace ReviewRunStore {
     runs.set(id, next)
     save()
     return { ...next }
+  }
+
+  export function updateIfCurrent(
+    identity: ReviewRunIdentity,
+    patch: Partial<Omit<ReviewRunRecord, 'id' | 'rootRunId' | 'attempt' | 'retryOf' | 'triggerKey' | 'generation' | 'createdAt'>>,
+  ): boolean {
+    load()
+    const existing = runs.get(identity.runId)
+    if (!existing) return false
+    if (existing.generation !== identity.generation || existing.sessionId !== identity.sessionId) return false
+    if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return false
+    runs.set(existing.id, {
+      ...existing,
+      ...patch,
+      updatedAt: Date.now(),
+    })
+    save()
+    return true
+  }
+
+  export function createRetryAttempt(
+    previous: ReviewRunRecord,
+    input: CreateReviewRunInput,
+  ): ReviewRunRecord | undefined {
+    load()
+    const existing = runs.get(previous.id)
+    if (!existing || existing.generation !== previous.generation) return undefined
+    if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return undefined
+
+    const run = createRecord({
+      ...input,
+      triggerKey: existing.triggerKey,
+    }, {
+      rootRunId: existing.rootRunId,
+      attempt: existing.attempt + 1,
+      retryOf: existing.id,
+    })
+    runs.set(run.id, run)
+    save()
+    return { ...run }
   }
 
   export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
@@ -146,6 +204,31 @@ export namespace ReviewRunStore {
   }
 }
 
+function createRecord(
+  input: CreateReviewRunInput,
+  lineage?: { rootRunId: string; attempt: number; retryOf: string },
+): ReviewRunRecord {
+  const now = Date.now()
+  const id = `review_${now.toString(36)}_${(++sequence).toString(36)}`
+  return {
+    ...input,
+    id,
+    rootRunId: lineage?.rootRunId ?? id,
+    attempt: lineage?.attempt ?? 1,
+    retryOf: lineage?.retryOf,
+    triggerKey: input.triggerKey || input.idempotencyKey || id,
+    generation: randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function findLatestByTriggerKeyInternal(triggerKey: string) {
+  return [...runs.values()]
+    .filter((run) => run.triggerKey === triggerKey)
+    .sort(compareLatestAttemptFirst)[0]
+}
+
 function load() {
   if (loaded) return
   loaded = true
@@ -153,7 +236,9 @@ function load() {
   if (!existsSync(filepath)) return
   try {
     const parsed = JSON.parse(readFileSync(filepath, 'utf-8')) as Partial<ReviewRunStoreFile>
-    const records = Array.isArray(parsed.runs) ? parsed.runs.filter(isReviewRunRecord) : []
+    const records = Array.isArray(parsed.runs)
+      ? parsed.runs.filter(isStoredReviewRunRecord).map(normalizeStoredReviewRun)
+      : []
     runs.clear()
     for (const run of records) {
       runs.set(run.id, { ...run })
@@ -172,7 +257,7 @@ function save() {
   mkdirSync(dirname(filepath), { recursive: true })
   prune()
   const data: ReviewRunStoreFile = {
-    version: 1,
+    version: 2,
     sequence,
     runs: [...runs.values()],
   }
@@ -208,7 +293,34 @@ function compareNewestFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
   return b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || b.id.localeCompare(a.id)
 }
 
-function isReviewRunRecord(input: unknown): input is ReviewRunRecord {
+function compareLatestAttemptFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
+  return b.attempt - a.attempt || compareNewestFirst(a, b)
+}
+
+function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunRecord {
+  const id = input.id as string
+  const idempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined
+  return {
+    ...input,
+    id,
+    platform: 'gitlab',
+    status: input.status as ReviewRunStatus,
+    createdAt: input.createdAt as number,
+    updatedAt: input.updatedAt as number,
+    rootRunId: typeof input.rootRunId === 'string' && input.rootRunId ? input.rootRunId : id,
+    attempt: typeof input.attempt === 'number' && Number.isInteger(input.attempt) && input.attempt > 0
+      ? input.attempt
+      : 1,
+    triggerKey: typeof input.triggerKey === 'string' && input.triggerKey
+      ? input.triggerKey
+      : idempotencyKey || id,
+    generation: typeof input.generation === 'string' && input.generation
+      ? input.generation
+      : `legacy-${id}`,
+  } as ReviewRunRecord
+}
+
+function isStoredReviewRunRecord(input: unknown): input is Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return false
   const record = input as Record<string, unknown>
   return typeof record.id === 'string'

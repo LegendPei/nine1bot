@@ -432,19 +432,19 @@ git commit -m "fix(web): preserve invalid GitLab profiles"
 - Produces: `ReviewRunStore.updateIfCurrent(identity, patch)`
 - Produces: `ReviewRunStore.createRetryAttempt(previous, input)`
 
-- [ ] **Step 1: 写新记录、旧记录兼容和 attempt 链失败测试**
+- [x] **Step 1: 写新记录、旧记录兼容和 attempt 链失败测试**
 
 首个 run 自动得到 `rootRunId === id`、`attempt === 1` 和非空 generation。加载旧 store 文件时补齐兼容默认值。连续重试得到 attempt 2/3，并保持 `retryOf` 链。
 
-- [ ] **Step 2: 写条件更新与并发创建失败测试**
+- [x] **Step 2: 写条件更新与并发创建失败测试**
 
 旧 session、旧 generation 或非最新 attempt 的 `updateIfCurrent` 返回 false 且不修改记录；同一 latest attempt 只能成功创建一个 retry。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts -t "attempt|generation|conditional review update"`
 
-- [ ] **Step 4: 实现模型与 store 原子边界**
+- [x] **Step 4: 实现模型与 store 原子边界**
 
 ```ts
 export type ReviewRunIdentity = {
@@ -456,7 +456,7 @@ export type ReviewRunIdentity = {
 
 所有 store 操作在单次同步 load/mutate/save 中完成；`create()` 在生成 ID 后填充 rootRunId。文件 `version` 升级并兼容 version 1。
 
-- [ ] **Step 5: 运行 Nine1Bot 回归并提交**
+- [x] **Step 5: 运行 Nine1Bot 回归并提交**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts packages/nine1bot/src/review/gitlab-ci-inspector.test.ts`
 
