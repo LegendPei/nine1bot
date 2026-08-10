@@ -57,6 +57,8 @@
    - 安全重定向、工具白名单、可信流水线、attempt 恢复、竞态隔离和无损配置设计。
 19. [19-review-hardening-and-recovery-implementation-plan.md](./19-review-hardening-and-recovery-implementation-plan.md)
    - 本轮安全与稳定性改进的任务清单、提交记录和验收结果。
+20. [20-review-follow-up-hardening-design.md](./20-review-follow-up-hardening-design.md)
+   - 分支二次审查后的权限、脱敏、HEAD 一致性、绑定恢复、发布幂等、资源限制和 attempt 链完整性设计。
 
 ## 当前交付目标
 
