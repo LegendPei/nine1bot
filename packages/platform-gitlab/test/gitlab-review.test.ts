@@ -219,6 +219,87 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('does not carry inline positions across later file metadata without a hunk', () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/first.ts',
+        new_path: 'src/first.ts',
+        diff: [
+          'diff --git a/src/first.ts b/src/first.ts',
+          '--- a/src/first.ts',
+          '+++ b/src/first.ts',
+          '@@ -10 +20 @@',
+          '-old',
+          '+new',
+          'diff --git a/assets/logo.png b/assets/logo.png',
+          'new file mode 100644',
+          'Binary files /dev/null and b/assets/logo.png differ',
+        ].join('\n'),
+      }],
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'First file addition',
+      body: 'Valid changed line',
+      severity: 'major',
+      file: 'src/first.ts',
+      newLine: 20,
+    }, manifest.files)).toMatchObject({ ok: true })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Stale new position',
+      body: 'Must not use binary file metadata as context',
+      severity: 'major',
+      file: 'src/first.ts',
+      newLine: 22,
+    }, manifest.files)).toMatchObject({ ok: false })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Stale old position',
+      body: 'Must not use binary file metadata as context',
+      severity: 'major',
+      file: 'src/first.ts',
+      oldLine: 12,
+    }, manifest.files)).toMatchObject({ ok: false })
+  })
+
+  test('ignores no-newline markers after repeated-prefix source lines', () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/prefixes.ts',
+        new_path: 'src/prefixes.ts',
+        diff: '@@ -10,2 +20,2 @@\n+++counter\n\\ No newline at end of file\n---flag\n\\ No newline at end of file\n tail\n',
+      }],
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Following marker context',
+      body: 'Context must remain synchronized',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      newLine: 21,
+    }, manifest.files)).toMatchObject({
+      ok: true,
+      position: { old_line: 11, new_line: 21 },
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Marker new position',
+      body: 'No-newline marker is not a source line',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      newLine: 22,
+    }, manifest.files)).toMatchObject({ ok: false })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Marker old position',
+      body: 'No-newline marker is not a source line',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      oldLine: 12,
+    }, manifest.files)).toMatchObject({ ok: false })
+  })
+
   test('groups deterministic finding duplicates before PM polishing', () => {
     const findings: ReviewFinding[] = [
       { title: 'Auth gap', body: 'QA body', severity: 'major', category: 'auth', file: 'src/auth.ts', newLine: 20, source: 'qa' },
@@ -1922,6 +2003,22 @@ describe('GitLab review foundation', () => {
     expect(output).not.toContain('query-secret')
     expect(output).not.toContain('fragment-secret')
     expect(output).not.toContain('partial-private-material')
+  })
+
+  test('preserves URL redaction delimiters and quote or whitespace terminators', () => {
+    const output = sanitizeGitLabCiTrace([
+      'curl https://ci.example/run?access_token=query-secret&mode=test',
+      'https://ci.example/#client_secret=fragment-secret',
+      'quoted "?access_token=quoted-secret" tail',
+      'spaced ?access_token=spaced-secret next',
+    ].join('\n'))
+
+    expect(output).toBe([
+      'curl https://ci.example/run?access_token=***&mode=test',
+      'https://ci.example/#client_secret=***',
+      'quoted "?access_token=***" tail',
+      'spaced ?access_token=*** next',
+    ].join('\n'))
   })
 
   test('rejects cross-authority redirects without forwarding the GitLab token', async () => {
