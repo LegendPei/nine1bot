@@ -2,7 +2,7 @@
 
 ## 1. 文档状态
 
-- 状态：设计已确认，等待实施计划
+- 状态：已实现并完成自动化验证，等待真实 GitLab 联调验收
 - 日期：2026-08-10
 - 目标分支：`feat/gitlab-review-workflow`
 - 适用范围：`platform-gitlab`、`nine1bot` Review controller、OpenCode 自动化运行时、Web GitLab 配置页
@@ -360,3 +360,19 @@ GitLab Review 启用时至少需要一个满足以下条件的 profile，健康�
 5. 自动 Review 工具表真正 deny-by-default，普通 session 不暴露专用 CI tool。
 6. profile 编辑和保存不会因 parser 静默过滤而丢失用户配置。
 7. 全量测试、类型检查、Web 构建和 diff 检查通过，真实联调结果已记录。
+
+## 18. 实施结果与设计差异
+
+截至 2026-08-10，本设计对应实现已完成，自动化测试、类型检查和 Web 构建均通过。真实隔离 GitLab 的 source、merged-results/merge-train 与配置修复后 retry 尚需按 [14-live-integration-test-checklist.md](./14-live-integration-test-checklist.md) 执行，因此当前状态不是“已完成生产验收”。
+
+实现与原设计保持一致，仅有以下落地细节需要固定：
+
+1. `packages/platform-gitlab/src/index.ts` 原有通配导出已经覆盖新增 API 和类型，不需要额外修改入口文件。
+2. pipeline 候选硬上限直接落实到 MR pipelines 网络请求的 `per_page=50`，不是在无界响应进入内存后再切片。
+3. merged-result、merge-train 和通用 integrated 的可信性由“候选来自当前 MR + `source=merge_request_event` + 临时提交父节点包含冻结 source HEAD”共同证明；ref 只参与分类，不能单独建立信任。
+4. 同时存在可信候选时，优先使用已验证 integrated 类 pipeline，再按 pipeline ID 取最新；找不到可信候选时不请求项目级 latest pipeline。
+5. CI 查询绑定 `{ runId, sessionId, generation }`，每个 GitLab await 前后都重新校验。trace 请求发出前失效不消耗额度，发出后失效保留旧 attempt 的审计计数，但不写入任何 attempt 的 pipeline 结果。
+6. 根测试套件在默认 5 秒单测超时下，少数原有高开销测试可能因机器负载超时；使用 `--timeout 30000` 完整运行后为 459 通过、0 失败。这是测试运行时限说明，不是功能降级。
+7. 最终分支 review 进一步收紧了运行时边界：权限 deny 会在内置/MCP 工具进入模型上下文前生效；GitLab base URL 拒绝 userinfo 与非 HTTP(S) 协议；公开 CI 摘要保留 `kind/verification`；终态 run 不会被迟到的 controller response 改回 running；同一失败 webhook 的回放保持幂等，不另起 attempt 根链；runtime 异常只持久化稳定阶段错误码。
+
+本轮提交与自动化证据详见 [19-review-hardening-and-recovery-implementation-plan.md](./19-review-hardening-and-recovery-implementation-plan.md)。

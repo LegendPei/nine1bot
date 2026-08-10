@@ -607,6 +607,20 @@ git commit -m "fix(gitlab): isolate CI queries by review attempt"
 
 ---
 
+## 已完成实施批次
+
+| Batch | 范围 | 提交 | 状态 |
+| --- | --- | --- | --- |
+| 0 | 产品边界与实施计划 | `e282aaa`、`c507c7a` | 已完成 |
+| 1 | Token 重定向隔离、CI DTO/日志有界化与脱敏 | `22afe29`、`0464eb4` | 已完成 |
+| 2 | 自动 Review 工具白名单、diff 行号、monitor 时序 | `e83feeb`、`e6b807c`、`554fccd` | 已完成 |
+| 3 | 后端 profile 诊断与前端无损编辑 | `00d2a72`、`a2ae986` | 已完成 |
+| 4 | ReviewRun attempt 数据模型与配置型拒绝显式 retry | `9f1bf4e`、`113937a` | 已完成 |
+| 5 | 可信 MR pipeline 选择与 CI 查询 attempt 隔离 | `bd22147`、`0f466b3` | 已完成 |
+| 6 | 全量验证、分支 review 收口、文档同步与推送 | `cc88a9f`、文档提交（本提交） | 已完成（待推送） |
+
+实现期间保持每个风险独立提交，原有 rejected run 不原地修改，CI 不可用也不阻断 Review。真实隔离 GitLab 验收独立保留在联调清单中，不以单元测试替代。
+
 ### Task 12: 全量验证、文档同步和联调准备
 
 **Files:**
@@ -618,13 +632,15 @@ git commit -m "fix(gitlab): isolate CI queries by review attempt"
 **Interfaces:**
 - Produces: 完成批次、提交、测试结果和真实 GitLab 联调步骤的中文记录
 
-- [ ] **Step 1: 运行定向测试集合**
+- [x] **Step 1: 运行定向测试集合**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/platform-gitlab/test/gitlab-platform.test.ts packages/nine1bot/src/review/gitlab-controller.test.ts packages/nine1bot/src/review/gitlab-ci-inspector.test.ts web/test/gitlab-project-profile.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts opencode/packages/opencode/test/server/automated-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts opencode/packages/opencode/test/tool/registry.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts`
 
 Expected: PASS。
 
-- [ ] **Step 2: 运行全量验证**
+Result: 最终使用 `--timeout 30000` 运行计划列出的 10 个测试文件，`192 pass / 0 fail / 682 expect()`。默认 5 秒下仅 OpenCode 临时目录安装插件用例超时；同一用例提高测试时限后通过，无断言失败。
+
+- [x] **Step 2: 运行全量验证**
 
 Run: `bun run ci:test`
 
@@ -638,15 +654,28 @@ Run: `git diff --check`
 
 Expected: 全部 PASS。
 
-- [ ] **Step 3: 做安全回归复验**
+Result:
+
+- `bun run ci:test -- --timeout 30000`：`459 pass / 0 fail / 1587 expect()`，共 59 个测试文件。
+- 默认 5 秒 `bun run ci:test`：455 个通过，4 个既有 Feishu/access-auth 高开销用例超时；四个用例分别以 30 秒重跑均通过。
+- `bun run ci:typecheck`：维护中的 platform、Nine1Bot、browser 与 Web 包全部通过。
+- OpenCode package `bun run typecheck`：通过。
+- `bun run build:web`：通过；仅保留既有 920.85 kB 主 chunk 提示。
+- `git diff --check`：通过。
+
+- [x] **Step 3: 做安全回归复验**
 
 再次用两个本地 server 验证跨 authority 没有 token；用实际 ToolRegistry 记录 MR PM、commit PM、specialist 和普通 session 的工具 ID；确认 tool/session 文件不包含未截断 CI 输出。
 
-- [ ] **Step 4: 更新文档状态**
+Result: 上述三项均包含在定向 10 文件测试集中并通过，分别由本地双 server 重定向测试、真实 ToolRegistry/agent source 测试和 CI 输出持久化边界测试覆盖。
+
+- [x] **Step 4: 更新文档状态**
 
 在本计划标记完成 checkbox 和各 Batch commit；在设计文档记录实现差异；在联调 checklist 增加 source、merged-results/merge-train、配置拒绝后 retry 三条用例。
 
-- [ ] **Step 5: 最终 review 与提交**
+Result: 已更新设计实现差异、批次/提交表、无凭证联调清单与目录索引；真实 GitLab 验收仍按清单保留为合并前人工步骤。
+
+- [x] **Step 5: 最终 review 与提交**
 
 Run: `git status --short`
 
@@ -656,6 +685,8 @@ Run: `git diff origin/main...HEAD --check`
 git add -f packages/platform-gitlab/docs/review-implementation/18-review-hardening-and-recovery-design.md packages/platform-gitlab/docs/review-implementation/19-review-hardening-and-recovery-implementation-plan.md packages/platform-gitlab/docs/review-implementation/README.md packages/platform-gitlab/docs/review-implementation/14-live-integration-test-checklist.md
 git commit -m "docs(gitlab): record review hardening rollout"
 ```
+
+Result: 分支级 `git diff origin/main...HEAD --check`、敏感信息扫描和最终 review 均通过；仅提交四份 GitLab Review 文档，不纳入本地 IDE 文件。
 
 - [ ] **Step 6: 推送当前 PR 分支**
 
