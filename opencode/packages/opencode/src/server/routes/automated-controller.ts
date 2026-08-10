@@ -34,6 +34,11 @@ export type AutomatedRuntimeOutput = {
   text?: string
 }
 
+export type AutomatedRunMonitor = {
+  finish(status: AutomatedRunStatus, error?: string): Promise<void>
+  dispose(): void
+}
+
 export type AutomatedControllerInput = {
   title: string
   directory: string
@@ -67,12 +72,19 @@ export async function createAndSendAutomatedControllerTurn<
 >(input: {
   createSession: () => Promise<TSession>
   onSessionCreated?: (response: { sessionID: string }) => Promise<void>
+  startMonitor?: (sessionID: string) => AutomatedRunMonitor
   sendMessage: (sessionID: string) => Promise<TMessage>
 }) {
   const sessionResponse = await input.createSession()
   await input.onSessionCreated?.({ sessionID: sessionResponse.sessionId })
-  const messageResponse = await input.sendMessage(sessionResponse.sessionId)
-  return { sessionResponse, messageResponse }
+  const monitor = input.startMonitor?.(sessionResponse.sessionId)
+  try {
+    const messageResponse = await input.sendMessage(sessionResponse.sessionId)
+    return { sessionResponse, messageResponse }
+  } catch (error) {
+    await monitor?.finish("failed", formatSessionError(error))
+    throw error
+  }
 }
 
 export async function runAutomatedControllerSession(input: AutomatedControllerInput): Promise<AutomatedControllerResponse> {
@@ -80,6 +92,7 @@ export async function runAutomatedControllerSession(input: AutomatedControllerIn
     directory: input.directory,
     init: InstanceBootstrap,
     async fn() {
+      let monitor: AutomatedRunMonitor | undefined
       const { sessionResponse, messageResponse } = await createAndSendAutomatedControllerTurn({
         createSession: async () => await createControllerSession({
           directory: input.directory,
@@ -90,6 +103,18 @@ export async function runAutomatedControllerSession(input: AutomatedControllerIn
           clientCapabilities: input.clientCapabilities,
         }),
         onSessionCreated: input.onSessionCreated,
+        startMonitor(sessionID) {
+          monitor = startAutomatedRunMonitor({
+            sessionID,
+            timeoutMs: input.timeoutMs,
+            timeoutMessage: input.timeoutMessage,
+            interactionPolicy: input.interactionPolicy,
+            onRuntimeOutput: input.onRuntimeOutput,
+            onFinished: input.onFinished,
+            onInteraction: input.onInteraction,
+          })
+          return monitor
+        },
         sendMessage: async (sessionID) => await sendControllerMessage(sessionID, {
           parts: input.parts,
           context: input.context,
@@ -109,22 +134,9 @@ export async function runAutomatedControllerSession(input: AutomatedControllerIn
       await input.onControllerResponse?.(response)
 
       if (!response.accepted) {
-        await input.onFinished?.({
-          status: "failed",
-          error: "controller_message_not_accepted",
-        })
+        await monitor?.finish("failed", "controller_message_not_accepted")
         return response
       }
-
-      startAutomatedRunMonitor({
-        sessionID: sessionResponse.sessionId,
-        timeoutMs: input.timeoutMs,
-        timeoutMessage: input.timeoutMessage,
-        interactionPolicy: input.interactionPolicy,
-        onRuntimeOutput: input.onRuntimeOutput,
-        onFinished: input.onFinished,
-        onInteraction: input.onInteraction,
-      })
 
       return response
     },
@@ -139,16 +151,22 @@ export function startAutomatedRunMonitor(input: {
   onFinished?: (result: { status: AutomatedRunStatus; error?: string }) => Promise<void>
   onRuntimeOutput?: AutomatedControllerInput["onRuntimeOutput"]
   onInteraction?: AutomatedControllerInput["onInteraction"]
-}) {
+}): AutomatedRunMonitor {
   let finished = false
   let unsubscribe: (() => void) | undefined
   let timeout: ReturnType<typeof setTimeout> | undefined
 
+  const dispose = () => {
+    if (timeout) clearTimeout(timeout)
+    timeout = undefined
+    unsubscribe?.()
+    unsubscribe = undefined
+  }
+
   const finish = async (status: AutomatedRunStatus, error?: string) => {
     if (finished) return
     finished = true
-    if (timeout) clearTimeout(timeout)
-    unsubscribe?.()
+    dispose()
     await input.onFinished?.({ status, error }).catch(() => undefined)
   }
 
@@ -231,10 +249,11 @@ export function startAutomatedRunMonitor(input: {
   timeout.unref?.()
 
   return {
-    stop() {
-      if (timeout) clearTimeout(timeout)
-      unsubscribe?.()
+    finish,
+    dispose() {
+      if (finished) return
       finished = true
+      dispose()
     },
   }
 }

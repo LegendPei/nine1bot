@@ -1,5 +1,21 @@
 import { describe, expect, test } from "bun:test"
-import { createAndSendAutomatedControllerTurn } from "../../src/server/routes/automated-controller"
+import { Bus } from "../../src/bus"
+import { Instance } from "../../src/project/instance"
+import { SessionStatus } from "../../src/session/status"
+import {
+  createAndSendAutomatedControllerTurn,
+  startAutomatedRunMonitor,
+  type AutomatedInteractionPolicy,
+} from "../../src/server/routes/automated-controller"
+import { tmpdir } from "../fixture/fixture"
+
+const interactionPolicy: AutomatedInteractionPolicy = {
+  permission: "deny",
+  question: "deny",
+  permissionAllowMessage: "allowed",
+  permissionDenyMessage: "denied",
+  questionDenyMessage: "denied",
+}
 
 describe("automated controller session startup", () => {
   test("binds the created session before sending the first message", async () => {
@@ -26,6 +42,76 @@ describe("automated controller session startup", () => {
     expect(result).toEqual({
       sessionResponse: { sessionId: "session-review-1", marker: "created" },
       messageResponse: { marker: "sent" },
+    })
+  })
+
+  test("subscribes to a fast idle event before sending the first message", async () => {
+    await using tmp = await tmpdir()
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const finished: Array<{ status: string; error?: string }> = []
+
+        await createAndSendAutomatedControllerTurn({
+          async createSession() {
+            return { sessionId: "session-fast-idle" }
+          },
+          startMonitor(sessionID) {
+            return startAutomatedRunMonitor({
+              sessionID,
+              timeoutMs: 1_000,
+              interactionPolicy,
+              async onFinished(result) {
+                finished.push(result)
+              },
+            })
+          },
+          async sendMessage(sessionID) {
+            await Bus.publish(SessionStatus.Event.Idle, { sessionID })
+            return { marker: "sent" }
+          },
+        })
+
+        expect(finished).toEqual([{ status: "succeeded" }])
+      },
+    })
+  })
+
+  test("finishes once and disposes the monitor when the first send fails", async () => {
+    await using tmp = await tmpdir()
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const finished: Array<{ status: string; error?: string }> = []
+
+        const run = createAndSendAutomatedControllerTurn({
+          async createSession() {
+            return { sessionId: "session-send-failure" }
+          },
+          startMonitor(sessionID) {
+            return startAutomatedRunMonitor({
+              sessionID,
+              timeoutMs: 20,
+              timeoutMessage: "monitor timeout",
+              interactionPolicy,
+              async onFinished(result) {
+                finished.push(result)
+              },
+            })
+          },
+          async sendMessage() {
+            throw new Error("first send failed")
+          },
+        })
+
+        await expect(run).rejects.toThrow("first send failed")
+        await Bus.publish(SessionStatus.Event.Idle, { sessionID: "session-send-failure" })
+        await Bun.sleep(40)
+
+        expect(finished).toEqual([{ status: "failed", error: "first send failed" }])
+      },
     })
   })
 })

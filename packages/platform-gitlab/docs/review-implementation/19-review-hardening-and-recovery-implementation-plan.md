@@ -309,19 +309,19 @@ git commit -m "fix(gitlab): preserve prefixed diff line mapping"
 - Produces: `AutomatedRunMonitor = { finish(status, error?): Promise<void>; dispose(): void }`
 - Keeps: `runAutomatedControllerSession()` 返回结构不变
 
-- [ ] **Step 1: 写快速 idle 与发送失败测试**
+- [x] **Step 1: 写快速 idle 与发送失败测试**
 
 在 `sendMessage` 内同步发布当前 session 的 `session.idle`，断言 `onFinished` 收到一次 succeeded。再让 send 抛错，断言订阅与 timeout 被释放，`onFinished` 只调用一次。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `bun test opencode/packages/opencode/test/server/automated-controller.test.ts`
 
-- [ ] **Step 3: 重排启动顺序并统一 finish**
+- [x] **Step 3: 重排启动顺序并统一 finish**
 
 顺序固定为 create session、`onSessionCreated`、`startAutomatedRunMonitor`、send message。monitor 的 `finish()` 幂等执行清理和 callback；`dispose()` 只清理，不伪造成功。
 
-- [ ] **Step 4: 运行 OpenCode 回归并提交**
+- [x] **Step 4: 运行 OpenCode 回归并提交**
 
 Run: `bun test opencode/packages/opencode/test/server/automated-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts`
 
