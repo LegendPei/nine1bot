@@ -6,8 +6,10 @@ import {
   buildGitLabReviewRuntimePrompt,
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
+  isRecoverableGitLabReviewRejection,
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
+  retryGitLabReviewAttempt,
   validateGitLabDedicatedWebhookSecret,
 } from './gitlab-controller'
 import { ReviewRunStore } from './run-store'
@@ -550,6 +552,197 @@ describe('GitLab review controller', () => {
 
     expect(result).toMatchObject({ accepted: false, status: 'rejected', error: 'project_binding_missing' })
     expect(ReviewRunStore.list()).toHaveLength(1)
+  })
+
+  test('retries a recoverable rejection as a new attempt after project configuration is fixed', async () => {
+    const triggerPayload = {
+      object_kind: 'merge_request',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: { iid: 21, last_commit: { id: 'retry-head' } },
+    }
+    const missingProjectPlatforms = {
+      gitlab: {
+        enabled: true,
+        settings: {
+          ...platforms.gitlab.settings,
+          'review.projects': [{
+            id: 'other',
+            host: 'gitlab.example.com',
+            projectId: 999,
+            nine1botProjectID: 'project-other',
+            enabled: true,
+          }],
+        },
+      },
+    }
+    const rejected = await handleGitLabReviewWebhook({
+      payload: triggerPayload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: missingProjectPlatforms,
+      secrets: memorySecrets,
+    })
+    expect(rejected).toMatchObject({ accepted: false, error: 'project_profile_missing' })
+    if (!rejected.runId) throw new Error('expected rejected review run')
+    expect(ReviewRunStore.get(rejected.runId)).toMatchObject({
+      rejectionKind: 'configuration',
+      recoverable: true,
+      attempt: 1,
+    })
+
+    const stillInvalid = await retryGitLabReviewAttempt({
+      runId: rejected.runId,
+      platforms: missingProjectPlatforms,
+      secrets: memorySecrets,
+    })
+    expect(stillInvalid).toMatchObject({
+      accepted: false,
+      error: 'project_profile_missing',
+      httpStatus: 409,
+      runId: rejected.runId,
+    })
+    expect(ReviewRunStore.list()).toHaveLength(1)
+
+    const requests: string[] = []
+    const repairedPlatforms = {
+      gitlab: {
+        enabled: true,
+        settings: {
+          ...platforms.gitlab.settings,
+          'review.dryRun': false,
+        },
+      },
+    }
+    const retried = await retryGitLabReviewAttempt({
+      runId: rejected.runId,
+      platforms: repairedPlatforms,
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request) => {
+        requests.push(String(url))
+        return Response.json({
+          changes: [{ old_path: 'src/retry.ts', new_path: 'src/retry.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+        })
+      }) as typeof fetch,
+    })
+
+    expect(retried).toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      attempt: 2,
+      retryOf: rejected.runId,
+      context: { diff: { files: [{ newPath: 'src/retry.ts' }] } },
+    })
+    expect(requests).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/21/changes',
+    ])
+    expect(ReviewRunStore.get(rejected.runId)).toMatchObject({
+      status: 'rejected',
+      error: 'project_profile_missing',
+      attempt: 1,
+    })
+    expect(ReviewRunStore.get(rejected.runId)?.context).toBeUndefined()
+  })
+
+  test('allows only one concurrent retry attempt and rejects nonrecoverable or active runs', async () => {
+    expect(isRecoverableGitLabReviewRejection('project_profile_missing')).toBe(true)
+    expect(isRecoverableGitLabReviewRejection('project-not-allowed')).toBe(false)
+    const trigger = {
+      host: 'gitlab.example.com',
+      projectId: 123,
+      projectPath: 'nine1/nine1bot',
+      objectType: 'mr' as const,
+      objectIid: 22,
+      headSha: 'concurrent-head',
+      eventName: 'merge_request',
+      mode: 'webhook' as const,
+    }
+    const policy = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'project-not-allowed',
+      trigger,
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: policy.id,
+      platforms,
+      secrets: liveSecrets,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_not_recoverable', httpStatus: 409 })
+
+    const active = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      trigger,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: active.id,
+      platforms,
+      secrets: liveSecrets,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_already_active', httpStatus: 409 })
+
+    const published = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'succeeded',
+      publishedAt: Date.now(),
+      trigger,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: published.id,
+      platforms,
+      secrets: liveSecrets,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_already_published', httpStatus: 409 })
+
+    const invalidTrigger = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'project_profile_missing',
+      trigger: { objectType: 'mr' },
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: invalidTrigger.id,
+      platforms,
+      secrets: liveSecrets,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_trigger_invalid', httpStatus: 400 })
+
+    const rejected = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'project_profile_missing',
+      idempotencyKey: 'concurrent-retry',
+      triggerKey: 'concurrent-retry',
+      trigger,
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    const retryInput = {
+      runId: rejected.id,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: { ...platforms.gitlab.settings, 'review.dryRun': false },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: (async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
+        changes: [{ old_path: 'src/a.ts', new_path: 'src/a.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+      })) as typeof fetch,
+    }
+    const attempts = await Promise.all([
+      retryGitLabReviewAttempt(retryInput),
+      retryGitLabReviewAttempt(retryInput),
+    ])
+
+    expect(attempts.filter((result) => result.accepted)).toHaveLength(1)
+    expect(attempts.filter((result) => !result.accepted)).toEqual([
+      expect.objectContaining({ error: 'review_run_not_latest', httpStatus: 409 }),
+    ])
+    expect(ReviewRunStore.findLatestByTriggerKey(rejected.triggerKey)).toMatchObject({ attempt: 2 })
   })
 
   test('does not prefetch GitLab CI while creating an MR review run', async () => {

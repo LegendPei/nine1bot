@@ -20,7 +20,7 @@ import {
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
 } from '@nine1bot/platform-gitlab/review'
-import { ReviewRunStore } from './run-store'
+import { ReviewRunStore, type ReviewRunRecord } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -45,6 +45,9 @@ export type GitLabReviewWebhookResult =
       context?: ReturnType<typeof buildGitLabReviewContext>
       warnings: string[]
       duplicateOf?: string
+      rootRunId?: string
+      attempt?: number
+      retryOf?: string
     }
   | {
       accepted: false
@@ -52,7 +55,17 @@ export type GitLabReviewWebhookResult =
       error: string
       httpStatus: number
       runId?: string
+      rootRunId?: string
+      attempt?: number
+      retryOf?: string
     }
+
+export type RetryGitLabReviewAttemptInput = {
+  runId: string
+  platforms: PlatformManagerConfig
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+}
 
 export type GitLabDedicatedWebhookSecretValidation =
   | { ok: true }
@@ -213,6 +226,17 @@ function fencedJson(input: unknown) {
   ].join('\n')
 }
 
+const recoverableGitLabReviewRejections = new Set([
+  'project_profile_missing',
+  'project_profile_disabled',
+  'project_binding_missing',
+  'project_profile_identity_duplicate',
+])
+
+export function isRecoverableGitLabReviewRejection(error: string | undefined) {
+  return Boolean(error && recoverableGitLabReviewRejections.has(error))
+}
+
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (!settings.enabled) {
@@ -299,15 +323,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     projectId: parsed.trigger.projectId,
     projectPath: parsed.trigger.projectPath,
   })
-  const projectRejection = projectResolution.status === 'disabled'
-    ? 'project_profile_disabled'
-    : projectResolution.status === 'missing'
-      ? 'project_profile_missing'
-      : projectResolution.status === 'unbound'
-        ? 'project_binding_missing'
-        : projectResolution.status === 'duplicate'
-          ? 'project_profile_identity_duplicate'
-          : undefined
+  const projectRejection = gitLabProjectRejection(projectResolution.status)
   if (projectRejection) {
     return reject(
       202,
@@ -322,29 +338,119 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
   const run = ReviewRunStore.create({
     platform: 'gitlab',
     idempotencyKey,
+    triggerKey: idempotencyKey,
     status: 'accepted',
     trigger: parsed.trigger as unknown as Record<string, unknown>,
     project: projectResolution.project,
     warnings: projectWarnings,
   })
 
-  const fixtureChanges = extractDryRunChanges(input.payload)
+  return await executeGitLabReviewAttempt({
+    run,
+    idempotencyKey,
+    trigger: parsed.trigger,
+    project: projectResolution.project,
+    settings,
+    platforms: input.platforms,
+    secrets: input.secrets,
+    fetch: input.fetch,
+    fixtureChanges: extractDryRunChanges(input.payload),
+    warnings: projectWarnings,
+  })
+}
+
+export async function retryGitLabReviewAttempt(
+  input: RetryGitLabReviewAttemptInput,
+): Promise<GitLabReviewWebhookResult> {
+  const previous = ReviewRunStore.get(input.runId)
+  if (!previous) return rejectWithoutRun(404, 'review_run_not_found')
+  const latest = ReviewRunStore.findLatestByTriggerKey(previous.triggerKey)
+  if (latest?.id !== previous.id) return retryRejected(previous, 409, 'review_run_not_latest')
+  if (previous.publishedAt) return retryRejected(previous, 409, 'review_run_already_published')
+  if (previous.status === 'accepted' || previous.status === 'running') {
+    return retryRejected(previous, 409, 'review_run_already_active')
+  }
+  if (
+    previous.status !== 'rejected' ||
+    !(previous.recoverable ?? isRecoverableGitLabReviewRejection(previous.error))
+  ) {
+    return retryRejected(previous, 409, 'review_run_not_recoverable')
+  }
+
+  const trigger = storedGitLabReviewTrigger(previous.trigger)
+  if (!trigger) return retryRejected(previous, 400, 'review_run_trigger_invalid')
+  const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
+  if (!settings.enabled) return retryRejected(previous, 409, 'gitlab_review_disabled')
+
+  const projectResolution = resolveGitLabReviewProjectProfile(settings, {
+    host: trigger.host,
+    projectId: trigger.projectId,
+    projectPath: trigger.projectPath,
+  })
+  const projectRejection = gitLabProjectRejection(projectResolution.status)
+  if (projectRejection) return retryRejected(previous, 409, projectRejection)
+  if (settings.configurationErrors.length > 0) {
+    return retryRejected(previous, 409, 'invalid-review-configuration')
+  }
+
+  const apiBaseUrl = resolveGitLabApiBaseUrl({
+    configuredBaseUrl: settings.baseUrl,
+    triggerHost: trigger.host,
+  })
+  if (!apiBaseUrl.ok) return retryRejected(previous, 400, apiBaseUrl.reason)
+
+  const idempotencyKey = previous.idempotencyKey ?? buildGitLabReviewIdempotencyKey(trigger)
+  const run = ReviewRunStore.createRetryAttempt(previous, {
+    platform: 'gitlab',
+    idempotencyKey,
+    status: 'accepted',
+    trigger: trigger as unknown as Record<string, unknown>,
+    project: projectResolution.project,
+    warnings: ['Review run retried after validating the current GitLab project configuration.'],
+  })
+  if (!run) return retryRejected(previous, 409, 'review_run_not_latest')
+
+  return await executeGitLabReviewAttempt({
+    run,
+    idempotencyKey,
+    trigger,
+    project: projectResolution.project,
+    settings,
+    platforms: input.platforms,
+    secrets: input.secrets,
+    fetch: input.fetch,
+    warnings: run.warnings ?? [],
+  })
+}
+
+async function executeGitLabReviewAttempt(input: {
+  run: ReviewRunRecord
+  idempotencyKey: string
+  trigger: GitLabReviewTrigger
+  project: NonNullable<ReturnType<typeof resolveGitLabReviewProjectProfile>['project']>
+  settings: GitLabReviewSettings
+  platforms: PlatformManagerConfig
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+  fixtureChanges?: GitLabRawChangesResponse
+  warnings: string[]
+}): Promise<GitLabReviewWebhookResult> {
   let changes: GitLabRawChangesResponse | undefined
   try {
-    changes = fixtureChanges ?? await loadLiveChanges({
-      trigger: parsed.trigger,
-      settings,
+    changes = input.fixtureChanges ?? await loadLiveChanges({
+      trigger: input.trigger,
+      settings: input.settings,
       secrets: input.secrets,
       fetch: input.fetch,
     })
   } catch (error) {
     const message = gitLabApiFailureMessage('load_changes', error)
-    ReviewRunStore.update(run.id, {
+    ReviewRunStore.update(input.run.id, {
       status: 'failed',
       error: message,
     })
     await reportGitLabReviewRunFailure({
-      runId: run.id,
+      runId: input.run.id,
       platforms: input.platforms,
       secrets: input.secrets,
       fetch: input.fetch,
@@ -356,38 +462,39 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       status: 'rejected',
       httpStatus: 502,
       error: message,
-      runId: run.id,
+      runId: input.run.id,
+      ...reviewAttemptMetadata(input.run),
     }
   }
 
   if (changes) {
     const context = buildGitLabReviewContext({
-      trigger: parsed.trigger,
+      trigger: input.trigger,
       changes,
-      project: projectResolution.project,
+      project: input.project,
       maxDiffBytes: Math.min(
-        settings.maxDiffBytes,
-        projectResolution.project.maxContextBytes ?? settings.maxDiffBytes,
+        input.settings.maxDiffBytes,
+        input.project.maxContextBytes ?? input.settings.maxDiffBytes,
       ),
       maxFiles: Math.min(
-        settings.maxFiles,
-        projectResolution.project.maxFiles ?? settings.maxFiles,
+        input.settings.maxFiles,
+        input.project.maxFiles ?? input.settings.maxFiles,
       ),
     })
     if (context.diff.blocked) {
       const publishWarning = await maybeWriteBlockedComment({
-        trigger: parsed.trigger,
-        settings,
+        trigger: input.trigger,
+        settings: input.settings,
         secrets: input.secrets,
         fetch: input.fetch,
         reason: context.diff.blockReason ?? 'MR diff is too large or was truncated by GitLab.',
       })
       const warnings = [
-        ...projectWarnings,
+        ...input.warnings,
         context.diff.blockReason ?? 'GitLab diff blocked.',
         ...(publishWarning ? [publishWarning] : []),
       ]
-      ReviewRunStore.update(run.id, {
+      ReviewRunStore.update(input.run.id, {
         status: 'blocked',
         warnings,
         context,
@@ -395,51 +502,89 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       return {
         accepted: true,
         status: 'blocked',
-        idempotencyKey,
-        runId: run.id,
-        trigger: parsed.trigger,
+        idempotencyKey: input.idempotencyKey,
+        runId: input.run.id,
+        trigger: input.trigger,
         context,
         warnings,
+        ...reviewAttemptMetadata(input.run),
       }
     }
-    ReviewRunStore.update(run.id, {
-      status: settings.dryRun ? 'succeeded' : 'running',
+    ReviewRunStore.update(input.run.id, {
+      status: input.settings.dryRun ? 'succeeded' : 'running',
       context,
-      warnings: projectWarnings,
+      warnings: input.warnings,
     })
     return {
       accepted: true,
-      status: settings.dryRun ? 'dry-run' : 'accepted',
-      idempotencyKey,
-      runId: run.id,
-      trigger: parsed.trigger,
+      status: input.settings.dryRun ? 'dry-run' : 'accepted',
+      idempotencyKey: input.idempotencyKey,
+      runId: input.run.id,
+      trigger: input.trigger,
       context,
-      warnings: projectWarnings,
+      warnings: input.warnings,
+      ...reviewAttemptMetadata(input.run),
     }
   }
 
-  ReviewRunStore.update(run.id, {
-    status: settings.dryRun ? 'succeeded' : 'running',
-    warnings: [
-      ...projectWarnings,
-      settings.dryRun
-        ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
-        : 'Runtime review execution is not wired yet.',
-    ],
+  const warnings = [
+    ...input.warnings,
+    input.settings.dryRun
+      ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
+      : 'Runtime review execution is not wired yet.',
+  ]
+  ReviewRunStore.update(input.run.id, {
+    status: input.settings.dryRun ? 'succeeded' : 'running',
+    warnings,
   })
   return {
     accepted: true,
-    status: settings.dryRun ? 'dry-run' : 'accepted',
-    idempotencyKey,
-    runId: run.id,
-    trigger: parsed.trigger,
-    warnings: [
-      ...projectWarnings,
-      settings.dryRun
-        ? 'Dry-run payload did not include changes; live GitLab changes fetch is not wired yet.'
-        : 'Runtime review execution is not wired yet.',
-    ],
+    status: input.settings.dryRun ? 'dry-run' : 'accepted',
+    idempotencyKey: input.idempotencyKey,
+    runId: input.run.id,
+    trigger: input.trigger,
+    warnings,
+    ...reviewAttemptMetadata(input.run),
   }
+}
+
+function gitLabProjectRejection(status: ReturnType<typeof resolveGitLabReviewProjectProfile>['status']) {
+  if (status === 'disabled') return 'project_profile_disabled'
+  if (status === 'missing') return 'project_profile_missing'
+  if (status === 'unbound') return 'project_binding_missing'
+  if (status === 'duplicate') return 'project_profile_identity_duplicate'
+  return undefined
+}
+
+function reviewAttemptMetadata(run: ReviewRunRecord) {
+  return {
+    rootRunId: run.rootRunId,
+    attempt: run.attempt,
+    ...(run.retryOf ? { retryOf: run.retryOf } : {}),
+  }
+}
+
+function retryRejected(run: ReviewRunRecord, httpStatus: number, error: string): GitLabReviewWebhookResult {
+  return {
+    accepted: false,
+    status: 'rejected',
+    httpStatus,
+    error,
+    runId: run.id,
+    ...reviewAttemptMetadata(run),
+  }
+}
+
+function storedGitLabReviewTrigger(input: unknown): GitLabReviewTrigger | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const trigger = input as Partial<GitLabReviewTrigger>
+  if (typeof trigger.host !== 'string') return undefined
+  if (typeof trigger.projectId !== 'string' && typeof trigger.projectId !== 'number') return undefined
+  if (trigger.objectType !== 'mr' && trigger.objectType !== 'commit') return undefined
+  if (trigger.mode !== 'webhook' && trigger.mode !== 'mention') return undefined
+  if (trigger.objectType === 'mr' && (!trigger.objectIid || !trigger.headSha)) return undefined
+  if (trigger.objectType === 'commit' && !trigger.commitSha) return undefined
+  return trigger as GitLabReviewTrigger
 }
 
 export async function publishGitLabReviewRunResult(input: {
@@ -885,11 +1030,15 @@ function reject(
   trigger?: Record<string, unknown>,
   project?: ReturnType<typeof resolveGitLabReviewProjectProfile>['project'],
 ): GitLabReviewWebhookResult {
+  const recoverable = isRecoverableGitLabReviewRejection(error)
   const run = ReviewRunStore.create({
     platform: 'gitlab',
     idempotencyKey,
+    triggerKey: idempotencyKey,
     status: 'rejected',
     error,
+    rejectionKind: recoverable ? 'configuration' : gitLabReviewRejectionKind(error),
+    recoverable,
     ...(trigger ? { trigger } : {}),
     ...(project ? { project } : {}),
   })
@@ -899,7 +1048,14 @@ function reject(
     error,
     httpStatus,
     runId: run.id,
+    ...reviewAttemptMetadata(run),
   }
+}
+
+function gitLabReviewRejectionKind(error: string) {
+  if (error === 'project-not-allowed' || error === 'host-not-allowed') return 'policy'
+  if (error.includes('token') || error.includes('secret')) return 'authentication'
+  return 'payload'
 }
 
 function rejectWithoutRun(httpStatus: number, error: string): GitLabReviewWebhookResult {

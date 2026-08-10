@@ -16,7 +16,9 @@ import {
   publishGitLabReviewRunResult,
   reportGitLabReviewRunFailure,
   resolveGitLabReviewModelSelection,
+  retryGitLabReviewAttempt,
   validateGitLabDedicatedWebhookSecret as validateGitLabDedicatedWebhookPathSecret,
+  type GitLabReviewWebhookResult,
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
@@ -461,7 +463,7 @@ export function publicGitLabReviewRun(run: ReviewRunRecord) {
 }
 
 export function publicGitLabReviewWebhookResult(
-  result: Awaited<ReturnType<typeof handleGitLabReviewWebhook>>,
+  result: GitLabReviewWebhookResult,
 ) {
   if (!result.accepted) return result
   const { context: _context, ...publicResult } = result
@@ -520,8 +522,8 @@ async function validateGitLabDedicatedWebhookSecret(c: any, platforms: Awaited<R
   return { verified: true }
 }
 
-type AcceptedGitLabReviewWithContext = Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }> & {
-  context: NonNullable<Extract<Awaited<ReturnType<typeof handleGitLabReviewWebhook>>, { accepted: true }>["context"]>
+type AcceptedGitLabReviewWithContext = Extract<GitLabReviewWebhookResult, { accepted: true }> & {
+  context: NonNullable<Extract<GitLabReviewWebhookResult, { accepted: true }>["context"]>
 }
 
 type GitLabReviewRuntimeRunInput = {
@@ -532,20 +534,9 @@ type GitLabReviewRuntimeRunInput = {
 }
 
 function isAcceptedGitLabReviewWithContext(
-  result: Awaited<ReturnType<typeof handleGitLabReviewWebhook>>,
+  result: GitLabReviewWebhookResult,
 ): result is AcceptedGitLabReviewWithContext {
   return result.accepted && Boolean(result.context)
-}
-
-function gitLabReviewRuntimeInputFromRecord(run: ReviewRunRecord): GitLabReviewRuntimeRunInput | { error: string } {
-  if (!run.idempotencyKey) return { error: "review_run_idempotency_key_missing" }
-  if (!run.trigger || !run.context) return { error: "review_run_context_missing" }
-  return {
-    runId: run.id,
-    idempotencyKey: run.idempotencyKey,
-    trigger: run.trigger as GitLabReviewRuntimeRunInput["trigger"],
-    context: run.context as GitLabReviewRuntimeRunInput["context"],
-  }
 }
 
 async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
@@ -714,48 +705,26 @@ export function gitLabReviewPublishStatus(error: string | undefined) {
   return 400
 }
 
-export function gitLabReviewRetryPatch(run: ReviewRunRecord) {
-  return {
-    status: "accepted",
-    error: undefined,
-    sessionId: undefined,
-    turnSnapshotId: undefined,
-    failureNotifiedAt: undefined,
-    retryCount: (run.retryCount ?? 0) + 1,
-    lastRetryAt: Date.now(),
-    warnings: uniqueStrings([
-      ...((run.warnings as string[] | undefined) ?? []),
-      "Review run manually retried from stored GitLab context.",
-    ]),
-    publishedAt: undefined,
-    ci: undefined,
-  } satisfies Parameters<typeof ReviewRunStore.update>[1]
-}
-
 async function retryGitLabReviewRun(c: any) {
   const runId = c.req.valid("param").runId
-  const run = ReviewRunStore.get(runId)
-  if (!run) return c.json({ accepted: false, error: "review_run_not_found" }, 404)
-  if (run.publishedAt) return c.json({ accepted: false, runId, error: "review_run_already_published" }, 409)
-  if (run.status === "running" || run.status === "accepted") {
-    return c.json({ accepted: false, runId, error: "review_run_already_active" }, 409)
-  }
-
-  const input = gitLabReviewRuntimeInputFromRecord(run)
-  if ("error" in input) return c.json({ accepted: false, runId, error: input.error }, 400)
-
-  ReviewRunStore.update(runId, gitLabReviewRetryPatch(run))
-
-  startGitLabReviewRuntimeRun(input).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error)
-    ReviewRunStore.update(runId, {
-      status: "failed",
-      error: message,
-    })
-    reportStoredGitLabReviewFailure(runId, "runtime_retry", message).catch(() => undefined)
+  const result = await retryGitLabReviewAttempt({
+    runId,
+    platforms: await readPlatformManagerConfig(),
+    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
   })
 
-  return c.json({ accepted: true, runId }, 202)
+  if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
+    startGitLabReviewRuntimeRun(result).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      ReviewRunStore.update(result.runId, {
+        status: "failed",
+        error: message,
+      })
+      reportStoredGitLabReviewFailure(result.runId, "runtime_retry", message).catch(() => undefined)
+    })
+  }
+
+  return c.json(publicGitLabReviewWebhookResult(result), result.accepted ? 202 : result.httpStatus as never)
 }
 
 function uniqueStrings(items: string[]) {

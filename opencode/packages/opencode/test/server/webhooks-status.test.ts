@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
-  gitLabReviewRetryPatch,
   gitLabReviewRuntimeTools,
   gitLabReviewSessionCreatedPatch,
   publicGitLabReviewWebhookResult,
@@ -50,6 +49,10 @@ describe("webhook status URL selection", () => {
   test("omits heavy GitLab review context from list records", () => {
     expect(publicGitLabReviewRun({
       id: "run_1",
+      rootRunId: "run_1",
+      attempt: 1,
+      triggerKey: "trigger_1",
+      generation: "generation_1",
       platform: "gitlab",
       status: "succeeded",
       createdAt: 1,
@@ -89,6 +92,10 @@ describe("webhook status URL selection", () => {
       },
     } as any)).toEqual({
       id: "run_1",
+      rootRunId: "run_1",
+      attempt: 1,
+      triggerKey: "trigger_1",
+      generation: "generation_1",
       platform: "gitlab",
       status: "succeeded",
       createdAt: 1,
@@ -125,45 +132,13 @@ describe("webhook status URL selection", () => {
     expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)
   })
 
-  test("clears stale GitLab review failure and session metadata on retry", () => {
-    const patch = gitLabReviewRetryPatch({
-      id: "run_1",
-      platform: "gitlab",
-      status: "failed",
-      createdAt: 1,
-      updatedAt: 2,
-      retryCount: 1,
-      ci: {
-        pipeline: { id: 41, sha: "old-head", status: "failed" },
-        diagnostics: [],
-        queryCount: 1,
-      },
-      error: "gitlab_review_result_missing",
-      sessionId: "session_old",
-      turnSnapshotId: "turn_old",
-      failureNotifiedAt: 123,
-      warnings: ["old warning"],
-    })
-
-    expect(patch).toMatchObject({
-      status: "accepted",
-      error: undefined,
-      sessionId: undefined,
-      turnSnapshotId: undefined,
-      failureNotifiedAt: undefined,
-      retryCount: 2,
-      publishedAt: undefined,
-      ci: undefined,
-      warnings: [
-        "old warning",
-        "Review run manually retried from stored GitLab context.",
-      ],
-    })
-  })
-
   test("records a nonblocking diagnostic when runtime finishes without querying CI", () => {
     const patch = gitLabReviewCiNotQueriedPatch({
       id: "run_1",
+      rootRunId: "run_1",
+      attempt: 1,
+      triggerKey: "trigger_1",
+      generation: "generation_1",
       platform: "gitlab",
       status: "succeeded",
       createdAt: 1,
@@ -185,6 +160,10 @@ describe("webhook status URL selection", () => {
     })
     expect(gitLabReviewCiNotQueriedPatch({
       id: "run_2",
+      rootRunId: "run_2",
+      attempt: 1,
+      triggerKey: "trigger_2",
+      generation: "generation_2",
       platform: "gitlab",
       status: "succeeded",
       createdAt: 1,
@@ -222,6 +201,9 @@ describe("webhook status URL selection", () => {
       status: "accepted",
       idempotencyKey: "gitlab:mr:3:4:head",
       runId: "run_1",
+      rootRunId: "run_0",
+      attempt: 2,
+      retryOf: "run_0",
       trigger: { host: "gitlab.example.com", projectId: 3, objectType: "mr", objectIid: 4, eventName: "note", mode: "mention" },
       warnings: [],
       context: {
@@ -233,6 +215,9 @@ describe("webhook status URL selection", () => {
       status: "accepted",
       idempotencyKey: "gitlab:mr:3:4:head",
       runId: "run_1",
+      rootRunId: "run_0",
+      attempt: 2,
+      retryOf: "run_0",
       trigger: { host: "gitlab.example.com", projectId: 3, objectType: "mr", objectIid: 4, eventName: "note", mode: "mention" },
       warnings: [],
     })

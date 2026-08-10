@@ -480,27 +480,27 @@ git commit -m "feat(gitlab): model review attempts explicitly"
 - Produces: `isRecoverableGitLabReviewRejection(error): boolean`
 - Removes: 原地修改同一 run 的 `gitLabReviewRetryPatch`
 
-- [ ] **Step 1: 写配置修复后 retry 失败测试**
+- [x] **Step 1: 写配置修复后 retry 失败测试**
 
 先以 `project_profile_missing` 创建 rejected run，再提供修复后的 profile 调用 retry。断言返回新 runId、`attempt: 2`、`retryOf` 指向原 run，重新请求 MR changes 并生成新 context；原 run 仍为 rejected。
 
-- [ ] **Step 2: 写不可恢复、仍未修复和并发 retry 测试**
+- [x] **Step 2: 写不可恢复、仍未修复和并发 retry 测试**
 
 payload/auth/policy 拒绝返回 409/400；配置仍无效不创建 attempt；两个并发请求只有一个创建 attempt 2；活动或已发布 latest attempt 返回 409。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts -t "retry.*attempt|recoverable rejection"`
 
-- [ ] **Step 4: 提取 trigger-based context rebuild**
+- [x] **Step 4: 提取 trigger-based context rebuild**
 
 把 webhook 已解析后的 profile resolve、changes load 和 context build 抽为可由首次 webhook与 retry 共享的函数。retry 只复用冻结 trigger identity，不复用旧 project snapshot/context。
 
-- [ ] **Step 5: 路由启动新 run**
+- [x] **Step 5: 路由启动新 run**
 
 OpenCode retry endpoint 调用 `retryGitLabReviewAttempt`，然后把新 run/context 传给 `startGitLabReviewRuntimeRun`。响应同时返回 `runId`、`retryOf` 和 `attempt`。
 
-- [ ] **Step 6: 运行 controller/runtime 回归并提交**
+- [x] **Step 6: 运行 controller/runtime 回归并提交**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts`
 
