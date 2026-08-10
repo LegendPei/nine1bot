@@ -16,12 +16,20 @@ import {
   createGitLabProjectProfile,
   gitLabProjectIdentityKey,
   optionalGitLabProfileNumber as optionalProfileNumber,
-  parseGitLabProjectProfiles,
   positiveGitLabProfileNumber as positiveProfileNumber,
-  serializeGitLabProjectProfiles,
   type GitLabProjectProfile,
   type GitLabProjectRef,
 } from '../lib/gitlab-project-profiles'
+import {
+  appendGitLabProjectProfileDocument,
+  parseGitLabProjectProfileDocument,
+  removeGitLabProjectProfileDocument,
+  renderGitLabProjectProfileDocument,
+  serializeGitLabProjectProfileDocument,
+  updateGitLabProjectProfileDocument,
+  validateGitLabProjectProfileDocument,
+  type GitLabProjectProfileDiagnostic,
+} from '../lib/gitlab-project-profile-document'
 
 const props = defineProps<{
   platforms: PlatformSummary[]
@@ -164,7 +172,11 @@ const authenticatedModelCount = computed(() => {
 const gitLabIncludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabIncludedProjectsFieldKey)))
 const gitLabExcludedProjects = computed(() => parseGitLabProjectRefs(textValue(gitLabExcludedProjectsFieldKey)))
 const gitLabHookGroups = computed(() => parseGitLabGroupRefs(textValue(gitLabHookGroupsFieldKey)))
-const gitLabProjectProfiles = computed(() => parseGitLabProjectProfiles(textValue(gitLabProjectProfilesFieldKey)))
+const gitLabProjectProfileDocument = computed(() => parseGitLabProjectProfileDocument(textValue(gitLabProjectProfilesFieldKey)))
+const gitLabProjectProfileDiagnostics = computed(() => validateGitLabProjectProfileDocument(gitLabProjectProfileDocument.value))
+const gitLabProjectProfiles = computed(() => gitLabProjectProfileDocument.value.editable.map((entry) => entry.profile))
+const gitLabProjectProfileFormError = computed(() => gitLabProjectProfilesValidationError())
+const gitLabProfileSaveBlocked = computed(() => isGitLabPlatform.value && Boolean(gitLabProjectProfileFormError.value))
 const gitLabScopeMode = computed(() => textValue(gitLabScopeModeFieldKey) || 'all-received')
 const gitLabRuntimeWebhookUrl = computed(() => {
   const actionWebhookUrl = props.actionResult?.data?.webhookUrl
@@ -478,28 +490,41 @@ function setGitLabProjectRefs(key: string, projects: GitLabProjectRef[]) {
   formValues[key] = JSON.stringify(projects, null, 2)
 }
 
-function setGitLabProjectProfiles(profiles: GitLabProjectProfile[]) {
-  formValues[gitLabProjectProfilesFieldKey] = serializeGitLabProjectProfiles(profiles)
+function setGitLabProjectProfileDocument(document: ReturnType<typeof parseGitLabProjectProfileDocument>) {
+  formValues[gitLabProjectProfilesFieldKey] = renderGitLabProjectProfileDocument(document)
 }
 
 function addGitLabProjectProfile(project: GitLabProjectRef) {
-  const profiles = gitLabProjectProfiles.value
+  const document = gitLabProjectProfileDocument.value
+  const profiles = document.editable.map((entry) => entry.profile)
   const profile = createGitLabProjectProfile(project, textValue('review.baseUrl'))
   const identity = gitLabProjectIdentityKey(profile.host, profile.projectId)
   if (profiles.some((candidate) => gitLabProjectIdentityKey(candidate.host, candidate.projectId) === identity)) return
-  setGitLabProjectProfiles([...profiles, profile])
+  setGitLabProjectProfileDocument(appendGitLabProjectProfileDocument(document, profile))
 }
 
-function updateGitLabProjectProfile(id: string, patch: Partial<GitLabProjectProfile>) {
-  setGitLabProjectProfiles(gitLabProjectProfiles.value.map((profile) => profile.id === id ? {
+function updateGitLabProjectProfile(profile: GitLabProjectProfile, patch: Partial<GitLabProjectProfile>) {
+  const document = gitLabProjectProfileDocument.value
+  const entry = document.editable.find((candidate) => candidate.profile === profile)
+  if (!entry) return
+  setGitLabProjectProfileDocument(updateGitLabProjectProfileDocument(document, entry.index, {
     ...profile,
     ...patch,
     ci: { ...profile.ci, ...patch.ci },
-  } : profile))
+  }))
 }
 
-function removeGitLabProjectProfile(id: string) {
-  setGitLabProjectProfiles(gitLabProjectProfiles.value.filter((profile) => profile.id !== id))
+function removeGitLabProjectProfile(profile: GitLabProjectProfile) {
+  const document = gitLabProjectProfileDocument.value
+  const entry = document.editable.find((candidate) => candidate.profile === profile)
+  if (!entry) return
+  setGitLabProjectProfileDocument(removeGitLabProjectProfileDocument(document, entry.index))
+}
+
+function gitLabProjectProfileDiagnosticLabel(diagnostic: GitLabProjectProfileDiagnostic) {
+  const entry = diagnostic.index === undefined ? '配置' : `条目 ${diagnostic.index + 1}`
+  const profile = diagnostic.profileId ? `（${diagnostic.profileId}）` : ''
+  return `${entry}${profile}：${diagnostic.message}`
 }
 
 function hasNine1BotProject(projectID: string) {
@@ -744,14 +769,22 @@ function buildSettingsPatch() {
   }
 
   if (isGitLabPlatform.value && !jsonErrors[gitLabProjectProfilesFieldKey]) {
-    const profileError = gitLabProjectProfilesValidationError()
-    if (profileError) jsonErrors[gitLabProjectProfilesFieldKey] = profileError
+    const serialized = serializeGitLabProjectProfileDocument(gitLabProjectProfileDocument.value)
+    if (!serialized.ok) {
+      jsonErrors[gitLabProjectProfilesFieldKey] = gitLabProjectProfileDiagnosticLabel(serialized.diagnostics[0])
+    } else {
+      settings[gitLabProjectProfilesFieldKey] = JSON.parse(serialized.value)
+      const profileError = gitLabProjectProfilesValidationError()
+      if (profileError) jsonErrors[gitLabProjectProfilesFieldKey] = profileError
+    }
   }
 
   return Object.keys(jsonErrors).length > 0 ? undefined : settings
 }
 
 function gitLabProjectProfilesValidationError() {
+  const diagnostic = gitLabProjectProfileDiagnostics.value[0]
+  if (diagnostic) return gitLabProjectProfileDiagnosticLabel(diagnostic)
   for (const profile of gitLabProjectProfiles.value) {
     if (!profile.nine1botProjectID) {
       return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 尚未绑定 Nine1Bot 项目。`
@@ -759,6 +792,9 @@ function gitLabProjectProfilesValidationError() {
     if (props.projects.length > 0 && !hasNine1BotProject(profile.nine1botProjectID)) {
       return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 绑定的 Nine1Bot 项目不存在。`
     }
+  }
+  if (Boolean(formValues['review.enabled']) && !gitLabProjectProfiles.value.some((profile) => profile.enabled)) {
+    return '启用 GitLab Review 时，至少需要一个已启用并完成绑定的项目档案。'
   }
   return ''
 }
@@ -1136,7 +1172,7 @@ function actionResultDetails(result: PlatformActionResult) {
                 </label>
               </div>
               <div class="gitlab-webhook-actions">
-                <button class="btn btn-primary btn-sm" type="submit" :disabled="operationLocked">
+                <button class="btn btn-primary btn-sm" type="submit" :disabled="operationLocked || gitLabProfileSaveBlocked">
                   <Save :size="13" />
                   <span>{{ saving ? '保存中' : '保存 MVP 配置' }}</span>
                 </button>
@@ -1269,8 +1305,28 @@ function actionResultDetails(result: PlatformActionResult) {
               <div v-if="jsonErrors[gitLabProjectProfilesFieldKey]" class="platform-alert error">
                 {{ jsonErrors[gitLabProjectProfilesFieldKey] }}
               </div>
+              <div v-if="gitLabProjectProfileFormError && !gitLabProjectProfileDiagnostics.length" class="platform-alert error">
+                {{ gitLabProjectProfileFormError }}
+              </div>
+              <div v-if="gitLabProjectProfileDiagnostics.length" class="platform-alert error">
+                <div
+                  v-for="diagnostic in gitLabProjectProfileDiagnostics"
+                  :key="`${diagnostic.code}:${diagnostic.index ?? 'root'}:${diagnostic.profileId ?? ''}`"
+                >
+                  {{ gitLabProjectProfileDiagnosticLabel(diagnostic) }}
+                </div>
+              </div>
+              <label v-if="gitLabProjectProfileDiagnostics.length" class="platform-field">
+                <span class="platform-field-label">项目档案原始 JSON</span>
+                <textarea
+                  :value="textValue(gitLabProjectProfilesFieldKey)"
+                  class="input platform-input platform-textarea"
+                  rows="10"
+                  @input="formValues[gitLabProjectProfilesFieldKey] = ($event.target as HTMLTextAreaElement).value"
+                />
+              </label>
               <div v-if="gitLabProjectProfiles.length" class="gitlab-profile-list">
-                <article v-for="profile in gitLabProjectProfiles" :key="profile.id" class="gitlab-profile-card">
+                <article v-for="(profile, profileIndex) in gitLabProjectProfiles" :key="`${profile.id}:${profileIndex}`" class="gitlab-profile-card">
                   <div class="gitlab-profile-heading">
                     <div>
                       <strong>{{ profile.displayName || profile.pathWithNamespace || profile.id }}</strong>
@@ -1281,11 +1337,11 @@ function actionResultDetails(result: PlatformActionResult) {
                         <input
                           :checked="profile.enabled"
                           type="checkbox"
-                          @change="updateGitLabProjectProfile(profile.id, { enabled: ($event.target as HTMLInputElement).checked })"
+                          @change="updateGitLabProjectProfile(profile, { enabled: ($event.target as HTMLInputElement).checked })"
                         />
                         <span>启用</span>
                       </label>
-                      <button type="button" class="btn btn-ghost btn-sm" @click="removeGitLabProjectProfile(profile.id)">
+                      <button type="button" class="btn btn-ghost btn-sm" @click="removeGitLabProjectProfile(profile)">
                         <Trash2 :size="13" />
                         <span>移除</span>
                       </button>
@@ -1297,7 +1353,7 @@ function actionResultDetails(result: PlatformActionResult) {
                       <input
                         :value="profile.displayName || ''"
                         class="input platform-input"
-                        @input="updateGitLabProjectProfile(profile.id, { displayName: ($event.target as HTMLInputElement).value || undefined })"
+                        @input="updateGitLabProjectProfile(profile, { displayName: ($event.target as HTMLInputElement).value || undefined })"
                       />
                     </label>
                     <label class="platform-field">
@@ -1307,7 +1363,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         :value="profile.nine1botProjectID"
                         class="input platform-input"
                         required
-                        @change="updateGitLabProjectProfile(profile.id, { nine1botProjectID: ($event.target as HTMLSelectElement).value })"
+                        @change="updateGitLabProjectProfile(profile, { nine1botProjectID: ($event.target as HTMLSelectElement).value })"
                       >
                         <option value="">请选择项目</option>
                         <option
@@ -1331,7 +1387,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         class="input platform-input platform-textarea"
                         rows="3"
                         placeholder="每行一个关注点，例如：鉴权边界"
-                        @input="updateGitLabProjectProfile(profile.id, { reviewFocus: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
+                        @input="updateGitLabProjectProfile(profile, { reviewFocus: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
                       />
                     </label>
                   </div>
@@ -1343,7 +1399,7 @@ function actionResultDetails(result: PlatformActionResult) {
                       class="input platform-input platform-textarea"
                       rows="5"
                       placeholder="例如：UF 的模块边界、关键约束、不可回归的兼容性要求"
-                      @input="updateGitLabProjectProfile(profile.id, { reviewContextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
+                      @input="updateGitLabProjectProfile(profile, { reviewContextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
                     />
                   </label>
                   <div class="gitlab-profile-grid">
@@ -1355,7 +1411,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         class="input platform-input platform-textarea"
                         rows="3"
                         placeholder="src/security/"
-                        @input="updateGitLabProjectProfile(profile.id, { includePathPrefixes: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
+                        @input="updateGitLabProjectProfile(profile, { includePathPrefixes: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
                       />
                     </label>
                     <label class="platform-field">
@@ -1366,7 +1422,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         class="input platform-input platform-textarea"
                         rows="3"
                         placeholder="**/*.generated.ts"
-                        @input="updateGitLabProjectProfile(profile.id, { excludePathPatterns: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
+                        @input="updateGitLabProjectProfile(profile, { excludePathPatterns: parseProfileLines(($event.target as HTMLTextAreaElement).value) })"
                       />
                     </label>
                   </div>
@@ -1380,7 +1436,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         step="1"
                         class="input platform-input"
                         placeholder="使用全局值"
-                        @input="updateGitLabProjectProfile(profile.id, { maxContextBytes: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
+                        @input="updateGitLabProjectProfile(profile, { maxContextBytes: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
                       />
                     </label>
                     <label class="platform-field">
@@ -1392,7 +1448,7 @@ function actionResultDetails(result: PlatformActionResult) {
                         step="1"
                         class="input platform-input"
                         placeholder="使用全局值"
-                        @input="updateGitLabProjectProfile(profile.id, { maxFiles: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
+                        @input="updateGitLabProjectProfile(profile, { maxFiles: optionalProfileNumber(Number(($event.target as HTMLInputElement).value)) })"
                       />
                     </label>
                   </div>
@@ -1406,7 +1462,7 @@ function actionResultDetails(result: PlatformActionResult) {
                           min="1"
                           step="1"
                           class="input platform-input"
-                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxJobLogs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
+                          @input="updateGitLabProjectProfile(profile, { ci: { ...profile.ci, maxJobLogs: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 3) } })"
                         />
                       </label>
                       <label class="platform-field">
@@ -1417,7 +1473,7 @@ function actionResultDetails(result: PlatformActionResult) {
                           min="1"
                           step="1"
                           class="input platform-input"
-                          @input="updateGitLabProjectProfile(profile.id, { ci: { ...profile.ci, maxJobLogBytes: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 8000) } })"
+                          @input="updateGitLabProjectProfile(profile, { ci: { ...profile.ci, maxJobLogBytes: positiveProfileNumber(Number(($event.target as HTMLInputElement).value), 8000) } })"
                         />
                       </label>
                     </div>
@@ -1713,7 +1769,7 @@ function actionResultDetails(result: PlatformActionResult) {
             </div>
 
             <div class="platform-actions-row">
-              <button class="btn btn-primary btn-sm" type="submit" :disabled="operationLocked">
+              <button class="btn btn-primary btn-sm" type="submit" :disabled="operationLocked || gitLabProfileSaveBlocked">
                 <Save :size="14" />
                 <span>{{ saving ? '保存中' : '保存配置' }}</span>
               </button>

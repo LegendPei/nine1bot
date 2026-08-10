@@ -4,6 +4,12 @@ import {
   parseGitLabProjectProfiles,
   serializeGitLabProjectProfiles,
 } from '../src/lib/gitlab-project-profiles'
+import {
+  parseGitLabProjectProfileDocument,
+  serializeGitLabProjectProfileDocument,
+  updateGitLabProjectProfileDocument,
+  validateGitLabProjectProfileDocument,
+} from '../src/lib/gitlab-project-profile-document'
 
 describe('GitLab project profiles', () => {
   test('round-trips every canonical review overlay and CI limit', () => {
@@ -101,5 +107,86 @@ describe('GitLab project profiles', () => {
 
     expect(profile.host).toBe('project-host.example.com:7443')
     expect(parseGitLabProjectProfiles('not-json')).toEqual([])
+  })
+
+  test('preserves malformed and duplicate entries while editing a valid profile document entry', () => {
+    const document = parseGitLabProjectProfileDocument(JSON.stringify([
+      { id: 'first', host: 'gitlab.example.com', projectId: 1, nine1botProjectID: 'project-one' },
+      { id: 'first', host: 'other.example.com', projectId: 2, nine1botProjectID: 'project-two' },
+      { id: 'same-identity', host: 'https://GITLAB.example.com', projectId: '1', nine1botProjectID: 'project-three' },
+      { malformed: true },
+      {
+        id: 'editable',
+        host: 'gitlab.example.com',
+        projectId: 5,
+        nine1botProjectID: 'project-five',
+        extensionField: { preserve: true },
+        ci: { maxFailedJobs: 4, maxJobLogBytes: 9_000 },
+      },
+    ]))
+
+    expect(document.entries).toHaveLength(5)
+    expect(document.editable).toHaveLength(4)
+    const editable = document.editable.find((entry) => entry.index === 4)
+    expect(editable).toBeDefined()
+    const updated = updateGitLabProjectProfileDocument(document, 4, {
+      ...editable!.profile,
+      displayName: 'Edited profile',
+    })
+
+    expect(updated.entries).toHaveLength(5)
+    expect(updated.entries[3]).toEqual({ malformed: true })
+    expect(updated.entries[4]).toMatchObject({
+      displayName: 'Edited profile',
+      extensionField: { preserve: true },
+      ci: { maxFailedJobs: 4, maxJobLogBytes: 9_000 },
+    })
+    expect(JSON.stringify(updated.entries[4])).not.toContain('maxJobLogs')
+    expect(validateGitLabProjectProfileDocument(updated).map((item) => item.code)).toEqual(expect.arrayContaining([
+      'profile_id_duplicate',
+      'profile_identity_duplicate',
+      'profile_id_missing',
+    ]))
+    expect(serializeGitLabProjectProfileDocument(updated)).toMatchObject({
+      ok: false,
+      diagnostics: expect.any(Array),
+    })
+  })
+
+  test('round-trips a valid profile document and migrates legacy fields only after validation', () => {
+    const document = parseGitLabProjectProfileDocument(JSON.stringify([{
+      id: 'legacy',
+      host: 'https://GITLAB.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      contextMarkdown: 'Legacy overlay',
+      extensionField: 'preserved',
+      ci: {
+        maxFailedJobs: 5,
+        maxJobLogBytes: 9_000,
+        extensionLimit: 12,
+      },
+    }]))
+    const result = serializeGitLabProjectProfileDocument(document)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('expected valid profile document')
+    const reloaded = JSON.parse(result.value)
+    expect(reloaded).toEqual([expect.objectContaining({
+      id: 'legacy',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      reviewContextMarkdown: 'Legacy overlay',
+      extensionField: 'preserved',
+      ci: {
+        maxJobLogs: 5,
+        maxJobLogBytes: 9_000,
+        extensionLimit: 12,
+      },
+    })])
+    expect(result.value).not.toContain('contextMarkdown')
+    expect(result.value).not.toContain('maxFailedJobs')
+    expect(parseGitLabProjectProfileDocument(result.value).entries).toEqual(reloaded)
   })
 })

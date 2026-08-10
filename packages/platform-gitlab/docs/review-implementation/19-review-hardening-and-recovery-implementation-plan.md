@@ -391,23 +391,23 @@ git commit -m "fix(gitlab): report invalid review profiles"
 - Produces: `validateGitLabProjectProfileDocument(document): GitLabProjectProfileDiagnostic[]`
 - Produces: `serializeGitLabProjectProfileDocument(document)`，仅在 diagnostics 为空时成功
 
-- [ ] **Step 1: 写 parse-edit-save 数据保留失败测试**
+- [x] **Step 1: 写 parse-edit-save 数据保留失败测试**
 
 输入 duplicate ID、duplicate identity、malformed object 和合法 profile 混合数组。断言 parse 后 entry 数量不变；修改合法项不删除其余条目；错误存在时 serialize 返回失败而不是缩水 JSON。
 
-- [ ] **Step 2: 写合法 round-trip 测试**
+- [x] **Step 2: 写合法 round-trip 测试**
 
 合法 profile 经 parse、edit、serialize、reload 后字段完全一致，legacy CI 字段只在无错误时迁移为 canonical 名称。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test web/test/gitlab-project-profile.test.ts`
 
-- [ ] **Step 4: 实现 document 模型并接入 UI**
+- [x] **Step 4: 实现 document 模型并接入 UI**
 
 document 保存原始 entries、可编辑合法 view 和 index 对应关系。`PlatformManager.vue` 显示逐条错误；错误存在时禁用保存动作并保留表单原始文本。
 
-- [ ] **Step 5: 运行 Web 测试、类型检查和构建并提交**
+- [x] **Step 5: 运行 Web 测试、类型检查和构建并提交**
 
 Run: `bun test web/test/gitlab-project-profile.test.ts`
 
