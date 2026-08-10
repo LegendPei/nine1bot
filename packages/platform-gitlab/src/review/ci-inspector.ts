@@ -219,7 +219,14 @@ export async function readGitLabCiJobLog(input: {
 export function sanitizeGitLabCiTrace(trace: string) {
   return trace
     .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, '')
-    .replace(/-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/gi, '[REDACTED_KEY_BLOCK]')
+    .replace(
+      /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/gi,
+      '[REDACTED_KEY_BLOCK]',
+    )
+    .replace(
+      /([?&#](?:[^?&#\s=]*(?:token|password|secret|api[_-]?key|access[_-]?key|client[_-]?secret)[^?&#\s=]*)=)[^&#\s"']*/gi,
+      '$1***',
+    )
     .replace(/\b(authorization\s*:\s*)(?:bearer|basic)\s+[^\r\n]+/gi, '$1***')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi, '$1***:***@')
     .replace(

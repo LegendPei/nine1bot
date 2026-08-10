@@ -176,6 +176,49 @@ describe('GitLab review foundation', () => {
     }, manifest.files, manifest.diffRefs)).toMatchObject({ ok: false })
   })
 
+  test('keeps inline positions synchronized for repeated diff prefixes', () => {
+    const manifest = buildGitLabDiffManifest({
+      changes: [{
+        old_path: 'src/prefixes.ts',
+        new_path: 'src/prefixes.ts',
+        diff: '@@ -10,3 +20,3 @@\n context\n+++counter\n---flag\n tail\n',
+      }],
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Added repeated prefix',
+      body: 'Added line',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      newLine: 21,
+    }, manifest.files)).toMatchObject({
+      ok: true,
+      position: { old_line: undefined, new_line: 21 },
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Deleted repeated prefix',
+      body: 'Deleted line',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      oldLine: 11,
+    }, manifest.files)).toMatchObject({
+      ok: true,
+      position: { old_line: 11, new_line: undefined },
+    })
+
+    expect(validateGitLabInlinePosition({
+      title: 'Following context',
+      body: 'Context line',
+      severity: 'major',
+      file: 'src/prefixes.ts',
+      newLine: 22,
+    }, manifest.files)).toMatchObject({
+      ok: true,
+      position: { old_line: 12, new_line: 22 },
+    })
+  })
+
   test('groups deterministic finding duplicates before PM polishing', () => {
     const findings: ReviewFinding[] = [
       { title: 'Auth gap', body: 'QA body', severity: 'major', category: 'auth', file: 'src/auth.ts', newLine: 20, source: 'qa' },
@@ -1866,6 +1909,19 @@ describe('GitLab review foundation', () => {
     }
     expect(sanitized).toContain('PASSWORD=***')
     expect(sanitized).toContain('DATABASE_URL=***')
+  })
+
+  test('sanitizes query and truncated PEM secrets from GitLab CI traces', () => {
+    const output = sanitizeGitLabCiTrace([
+      'curl https://ci.example/run?access_token=query-secret&mode=test',
+      'https://ci.example/#client_secret=fragment-secret',
+      '-----BEGIN PRIVATE KEY-----',
+      'partial-private-material',
+    ].join('\n'))
+
+    expect(output).not.toContain('query-secret')
+    expect(output).not.toContain('fragment-secret')
+    expect(output).not.toContain('partial-private-material')
   })
 
   test('rejects cross-authority redirects without forwarding the GitLab token', async () => {
