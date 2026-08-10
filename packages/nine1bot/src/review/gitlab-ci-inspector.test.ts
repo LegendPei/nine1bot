@@ -191,6 +191,94 @@ describe('GitLab CI session inspector', () => {
     ])
   })
 
+  test('allows only an active attempt before making any GitLab CI request', async () => {
+    let fetchCalls = 0
+    for (const [index, status] of (['succeeded', 'failed', 'rejected', 'blocked'] as const).entries()) {
+      const sessionId = `terminal-session-${index}`
+      const run = createReviewRun(sessionId, 3, 10, 'head-a')
+      ReviewRunStore.update(run.id, { status })
+
+      await expect(inspectGitLabCiForSession({
+        sessionId,
+        request: { action: 'list' },
+        platforms,
+        secrets,
+        fetch: (async () => {
+          fetchCalls += 1
+          return Response.json([])
+        }) as unknown as typeof fetch,
+      })).resolves.toEqual({
+        ok: false,
+        action: 'list',
+        diagnostic: 'ci_review_run_not_active',
+      })
+      expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+    }
+    expect(fetchCalls).toBe(0)
+  })
+
+  test('returns a stable diagnostic for aborted CI without persisting partial state', async () => {
+    const run = createReviewRun('session-abort', 3, 10, 'head-a')
+    const controller = new AbortController()
+    let fetchCalls = 0
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-abort',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      signal: controller.signal,
+      fetch: (async () => {
+        fetchCalls += 1
+        const privateReason = new Error('PRIVATE-TOKEN=must-not-leak')
+        controller.abort(privateReason)
+        throw privateReason
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_request_aborted',
+    })
+    expect(JSON.stringify(result)).not.toContain('must-not-leak')
+    expect(fetchCalls).toBe(1)
+    expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+  })
+
+  test('does not persist a deferred CI response for a stale attempt', async () => {
+    const run = createReviewRun('session-old', 3, 10, 'head-a')
+    const requestStarted = deferred<void>()
+    const response = deferred<Response>()
+    const calls: string[] = []
+    const pending = inspectGitLabCiForSession({
+      sessionId: 'session-old',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        calls.push(url)
+        if (url.includes('/merge_requests/10/pipelines')) {
+          requestStarted.resolve()
+          return await response.promise
+        }
+        throw new Error(`stale attempt made an unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+    await requestStarted.promise
+    const retry = createRetryRun(run, 'session-new')
+    response.resolve(Response.json([{ id: 55, sha: 'head-a', status: 'success' }]))
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_review_attempt_stale',
+    })
+    expect(calls).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+    expect(ReviewRunStore.get(retry.id)?.ci).toBeUndefined()
+  })
+
   test('allows success and failed logs on demand while enforcing one shared limit without persisting traces', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
     const calls: string[] = []
@@ -333,6 +421,97 @@ describe('GitLab CI session inspector', () => {
     expect(traceCalls).toBe(10)
   })
 
+  test('reserves job-log quota only when trace starts for a stale attempt', async () => {
+    const beforeTraceRun = createReviewRun('session-before-trace', 3, 10, 'head-a')
+    const jobsStarted = deferred<void>()
+    const jobsResponse = deferred<Response>()
+    let beforeTraceJobsCalls = 0
+    let beforeTraceCalls = 0
+    const beforeTrace = inspectGitLabCiForSession({
+      sessionId: 'session-before-trace',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/merge_requests/10/pipelines')) {
+          return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+        }
+        const mergeRequest = currentMergeRequestMetadataResponse(url)
+        if (mergeRequest) return mergeRequest
+        if (url.includes('/pipelines/55/jobs')) {
+          beforeTraceJobsCalls += 1
+          if (beforeTraceJobsCalls === 2) {
+            jobsStarted.resolve()
+            return await jobsResponse.promise
+          }
+          return Response.json([{ id: 56, name: 'test', status: 'failed' }])
+        }
+        if (url.includes('/jobs/56/trace')) {
+          beforeTraceCalls += 1
+          return new Response('must not be read')
+        }
+        throw new Error(`unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+    await jobsStarted.promise
+    const beforeTraceRetry = createRetryRun(beforeTraceRun, 'session-before-trace-new')
+    jobsResponse.resolve(Response.json([{ id: 56, name: 'test', status: 'failed' }]))
+
+    await expect(beforeTrace).resolves.toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_review_attempt_stale',
+    })
+    expect(beforeTraceCalls).toBe(0)
+    expect(ReviewRunStore.get(beforeTraceRun.id)?.ci?.jobLogReadCount).toBeUndefined()
+    expect(ReviewRunStore.get(beforeTraceRetry.id)?.ci).toBeUndefined()
+
+    const afterTraceRun = createReviewRun('session-after-trace', 3, 10, 'head-a')
+    const traceStarted = deferred<void>()
+    const traceResponse = deferred<Response>()
+    let afterTraceCalls = 0
+    const afterTrace = inspectGitLabCiForSession({
+      sessionId: 'session-after-trace',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/merge_requests/10/pipelines')) {
+          return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+        }
+        const mergeRequest = currentMergeRequestMetadataResponse(url)
+        if (mergeRequest) return mergeRequest
+        if (url.includes('/pipelines/55/jobs')) {
+          return Response.json([{ id: 56, name: 'test', status: 'failed' }])
+        }
+        if (url.includes('/jobs/56/trace')) {
+          afterTraceCalls += 1
+          traceStarted.resolve()
+          return await traceResponse.promise
+        }
+        throw new Error(`unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+    await traceStarted.promise
+    const afterTraceRetry = createRetryRun(afterTraceRun, 'session-after-trace-new')
+    traceResponse.resolve(new Response('stale trace'))
+
+    await expect(afterTrace).resolves.toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_review_attempt_stale',
+    })
+    expect(afterTraceCalls).toBe(1)
+    expect(ReviewRunStore.get(afterTraceRun.id)?.ci).toEqual({
+      diagnostics: [],
+      jobLogReadCount: 1,
+      queriedJobIds: [56],
+    })
+    expect(ReviewRunStore.get(afterTraceRetry.id)?.ci).toBeUndefined()
+  })
+
   test('bounds the complete CI session list payload including its review target', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
     ReviewRunStore.update(run.id, {
@@ -464,4 +643,26 @@ function currentMergeRequestMetadataResponse(url: string) {
     project_id: 3,
     diff_refs: { head_sha: 'head-a' },
   })
+}
+
+function createRetryRun(previous: ReturnType<typeof createReviewRun>, sessionId: string) {
+  const retry = ReviewRunStore.createRetryAttempt(previous, {
+    platform: 'gitlab',
+    status: 'running',
+    sessionId,
+    trigger: previous.trigger,
+    project: previous.project,
+  })
+  if (!retry) throw new Error('expected retry attempt')
+  return retry
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
 }

@@ -30,7 +30,13 @@ describe("gitlab_ci_inspect tool", () => {
             mrIid: 10,
             headSha: "head-a",
           },
-          pipeline: { id: 55, sha: "head-a", status: "success" },
+          pipeline: {
+            id: 55,
+            sha: "head-a",
+            status: "success",
+            kind: "source",
+            verification: ["mr_pipeline_candidate", "head_sha_exact"],
+          },
           jobs: [{ id: 56, name: "build", status: "success" }],
           diagnostics: [],
           truncated: false,
@@ -80,7 +86,13 @@ describe("gitlab_ci_inspect tool", () => {
             mrIid: 10,
             headSha: "head-a",
           },
-          pipeline: { id: 55, sha: "head-a", status: "success" },
+          pipeline: {
+            id: 55,
+            sha: "head-a",
+            status: "success",
+            kind: "source",
+            verification: ["mr_pipeline_candidate", "head_sha_exact"],
+          },
           jobs: [{ id: 56, name: "build", status: "success" }],
           diagnostics: ["ci_jobs_truncated"],
           truncated: true,
@@ -127,5 +139,29 @@ describe("gitlab_ci_inspect tool", () => {
     expect(result.metadata).toEqual({ truncated: true })
     expect(result.metadata).not.toHaveProperty("outputPath")
     expect(result.output).toContain("bounded trace")
+  })
+
+  test("maps aborted inspection failures to a stable diagnostic", async () => {
+    const controller = new AbortController()
+    const privateReason = new Error("PRIVATE-TOKEN=must-not-leak")
+    controller.abort(privateReason)
+    const tool = createGitLabCiInspectTool({
+      async inspect() {
+        throw privateReason
+      },
+    })
+    const initialized = await tool.init()
+
+    const result = await initialized.execute({ action: "list" }, {
+      ...context,
+      abort: controller.signal,
+    })
+
+    expect(JSON.parse(result.output)).toEqual({
+      ok: false,
+      action: "list",
+      diagnostic: "ci_request_aborted",
+    })
+    expect(result.output).not.toContain("must-not-leak")
   })
 })

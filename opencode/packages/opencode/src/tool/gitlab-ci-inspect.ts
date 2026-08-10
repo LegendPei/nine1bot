@@ -31,7 +31,18 @@ export function createGitLabCiInspectTool(dependencies: GitLabCiInspectDependenc
       ].join(" "),
       parameters,
       async execute(args, context) {
-        const result = await dependencies.inspect(context.sessionID, args, context.abort)
+        let result: GitLabCiToolOutput
+        try {
+          result = await dependencies.inspect(context.sessionID, args, context.abort)
+        } catch (error) {
+          result = {
+            ok: false,
+            action: args.action,
+            diagnostic: context.abort.aborted || (error instanceof Error && error.name === "AbortError")
+              ? "ci_request_aborted"
+              : `gitlab_ci_tool_unavailable:${error instanceof Error ? error.name : "unknown"}`,
+          }
+        }
         return {
           title: "GitLab CI inspection",
           output: JSON.stringify(result),
@@ -47,20 +58,12 @@ export function createGitLabCiInspectTool(dependencies: GitLabCiInspectDependenc
 
 export const GitLabCiInspectTool = createGitLabCiInspectTool({
   async inspect(sessionId, request, signal) {
-    try {
-      return await inspectGitLabCiForSession({
-        sessionId,
-        request,
-        platforms: await readPlatformManagerConfig(),
-        secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
-        signal,
-      })
-    } catch (error) {
-      return {
-        ok: false,
-        action: request.action,
-        diagnostic: `gitlab_ci_tool_unavailable:${error instanceof Error ? error.name : "unknown"}`,
-      }
-    }
+    return await inspectGitLabCiForSession({
+      sessionId,
+      request,
+      platforms: await readPlatformManagerConfig(),
+      secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+      signal,
+    })
   },
 })

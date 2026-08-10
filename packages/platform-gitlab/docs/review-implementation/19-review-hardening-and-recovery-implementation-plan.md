@@ -572,31 +572,31 @@ git commit -m "feat(gitlab): verify MR pipeline provenance"
 - Consumes: Task 10 `selectTrustedGitLabCiPipeline`
 - Produces: `ci_review_attempt_stale`、`ci_review_run_not_active`、`ci_request_aborted`
 
-- [ ] **Step 1: 写 terminal run 与 abort 失败测试**
+- [x] **Step 1: 写 terminal run 与 abort 失败测试**
 
 status 为 succeeded/failed/rejected/blocked 时不得发 fetch。查询中 abort 后返回 `ci_request_aborted`，不更新 queryCount、pipeline 或新 attempt。
 
-- [ ] **Step 2: 写 deferred fetch + retry 竞争失败测试**
+- [x] **Step 2: 写 deferred fetch + retry 竞争失败测试**
 
 旧 attempt 发起 list，fetch 尚未完成时创建 attempt 2 并绑定新 session；释放旧 fetch 后断言 attempt 2 无旧 pipeline/diagnostic，attempt 1 也不产生 terminal 后写入。
 
-- [ ] **Step 3: 写日志额度条件 reserve 测试**
+- [x] **Step 3: 写日志额度条件 reserve 测试**
 
 真正发出 trace 前 stale 则不消耗额度；已经发出 trace 后 stale 保留旧 attempt 审计计数，但不能写入新 attempt。
 
-- [ ] **Step 4: 运行测试并确认失败**
+- [x] **Step 4: 运行测试并确认失败**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-ci-inspector.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts -t "active attempt|stale attempt|aborted CI"`
 
-- [ ] **Step 5: 捕获 identity 并在每个 await 后条件校验**
+- [x] **Step 5: 捕获 identity 并在每个 await 后条件校验**
 
 查询开始保存 `{ runId, sessionId, generation }`。token resolve、pipeline list、commit metadata、jobs 和 trace 每次 await 后调用 store 条件判断；失败立即返回，不再持久化。
 
-- [ ] **Step 6: 贯穿 Tool.Context.abort 并规范错误**
+- [x] **Step 6: 贯穿 Tool.Context.abort 并规范错误**
 
 wrapper 把 signal 传给 session inspector；AbortError 和 signal.reason 统一映射为 `ci_request_aborted`，公开结果不包含原始异常正文。
 
-- [ ] **Step 7: 运行 CI inspector 回归并提交**
+- [x] **Step 7: 运行 CI inspector 回归并提交**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-ci-inspector.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts`
 

@@ -147,14 +147,26 @@ describe("webhook status URL selection", () => {
       warnings: ["existing warning"],
       trigger: { objectType: "mr" },
       ci: {
-        pipeline: { id: 41, sha: "head", status: "success" },
+        pipeline: {
+          id: 41,
+          sha: "head",
+          status: "success",
+          kind: "source",
+          verification: ["mr_pipeline_candidate", "head_sha_exact"],
+        },
         diagnostics: ["existing_diagnostic"],
       },
     })
 
     expect(patch).toEqual({
       ci: {
-        pipeline: { id: 41, sha: "head", status: "success" },
+        pipeline: {
+          id: 41,
+          sha: "head",
+          status: "success",
+          kind: "source",
+          verification: ["mr_pipeline_candidate", "head_sha_exact"],
+        },
         diagnostics: ["existing_diagnostic", "ci_not_queried"],
       },
     })
