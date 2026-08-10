@@ -3,6 +3,7 @@ import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
   gitLabReviewControllerResponsePatch,
+  gitLabReviewRuntimePublishFailurePatch,
   gitLabReviewRuntimeTools,
   gitLabReviewRuntimeFailure,
   gitLabReviewSessionCreatedPatch,
@@ -29,6 +30,20 @@ describe("webhook status URL selection", () => {
       .toBeUndefined()
     expect(gitLabReviewControllerResponsePatch({ ...run, status: "running", publishedAt: undefined }, response))
       .toEqual({ status: "running", turnSnapshotId: "turn_fast_completion" })
+  })
+
+  test("preserves a rejected GitLab review when publication refuses a stale MR head", () => {
+    const rejected = {
+      id: "run_rejected",
+      status: "rejected",
+      error: "gitlab_review_head_changed",
+    } as any
+
+    expect(gitLabReviewRuntimePublishFailurePatch(rejected, {
+      published: false,
+      runId: "run_rejected",
+      error: "gitlab_review_head_changed",
+    })).toBeUndefined()
   })
 
   test("normalizes runtime failures without exposing exception text", () => {

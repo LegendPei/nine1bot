@@ -346,6 +346,7 @@ describe('GitLab review controller', () => {
           last_commit: { id: 'path-secret-head' },
         },
         changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'path-secret-head' },
           changes: [
             { old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
           ],
@@ -364,6 +365,75 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('rejects MR context when the supplied diff does not verify the trigger head', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: { iid: 10, last_commit: { id: 'trigger-head' } },
+        changes: {
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      httpStatus: 409,
+      error: 'gitlab_review_diff_head_unverified',
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_diff_head_unverified',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId)?.context : undefined).toBeUndefined()
+  })
+
+  test('rejects MR context when the supplied diff head differs from the trigger head', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: { iid: 10, last_commit: { id: 'trigger-head' } },
+        changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'different-head' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      httpStatus: 409,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId)?.context : undefined).toBeUndefined()
+  })
+
   test('accepts merge request webhook and builds dry-run context when changes are supplied', async () => {
     const result = await handleGitLabReviewWebhook({
       payload: {
@@ -378,6 +448,7 @@ describe('GitLab review controller', () => {
           last_commit: { id: 'abc123' },
         },
         changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'abc123' },
           changes: [
             { old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
           ],
@@ -422,6 +493,7 @@ describe('GitLab review controller', () => {
           last_commit: { id: 'project-limits-head' },
         },
         changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'project-limits-head' },
           changes: [
             { old_path: 'src/one.ts', new_path: 'src/one.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
             { old_path: 'src/two.ts', new_path: 'src/two.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' },
@@ -497,6 +569,7 @@ describe('GitLab review controller', () => {
           last_commit: { id: 'unprofiled-head' },
         },
         changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'unprofiled-head' },
           changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
         },
       },
@@ -623,6 +696,7 @@ describe('GitLab review controller', () => {
       fetch: (async (url: string | URL | Request) => {
         requests.push(String(url))
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'retry-head' },
           changes: [{ old_path: 'src/retry.ts', new_path: 'src/retry.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
         })
       }) as typeof fetch,
@@ -730,6 +804,7 @@ describe('GitLab review controller', () => {
       },
       secrets: liveSecrets,
       fetch: (async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'concurrent-head' },
         changes: [{ old_path: 'src/a.ts', new_path: 'src/a.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
       })) as typeof fetch,
     }
@@ -768,6 +843,7 @@ describe('GitLab review controller', () => {
         const pathname = new URL(value).pathname
         if (pathname.endsWith('/changes')) {
           return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'ci-head' },
             changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
           })
         }
@@ -799,7 +875,10 @@ describe('GitLab review controller', () => {
         object_kind: 'merge_request',
         project: { id: 123, path_with_namespace: 'nine1/nine1bot', web_url: 'https://gitlab.example.com/nine1/nine1bot' },
         object_attributes: { iid: 12, last_commit: { id: 'ci-secret-failure' } },
-        changes: { changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }] },
+        changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'ci-secret-failure' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+        },
       },
       headers: { 'x-gitlab-token': 'secret' },
       platforms: { gitlab: { enabled: true, settings: {
@@ -872,7 +951,10 @@ describe('GitLab review controller', () => {
         iid: 10,
         last_commit: { id: 'accepted-before-disabled' },
       },
-      changes: { changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }] },
+      changes: {
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'accepted-before-disabled' },
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+      },
     }
     const first = await handleGitLabReviewWebhook({
       payload,
@@ -908,6 +990,7 @@ describe('GitLab review controller', () => {
         last_commit: { id: 'abc123' },
       },
       changes: {
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'abc123' },
         changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
       },
     }
@@ -1109,6 +1192,7 @@ describe('GitLab review controller', () => {
       calls.push({ url: String(url), init })
       if (String(url).includes('/changes')) {
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'overflow-sha' },
           overflow: true,
           changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
         })
@@ -1158,6 +1242,7 @@ describe('GitLab review controller', () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-comment-fail-sha' },
           overflow: true,
           changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
         })
@@ -1566,6 +1651,9 @@ describe('GitLab review controller', () => {
           }],
         })
       }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-sha' } })
+      }
       return Response.json({ id: 1 })
     }) as typeof fetch
 
@@ -1665,8 +1753,73 @@ describe('GitLab review controller', () => {
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
+    ])
+  })
+
+  test('rejects an MR publish when bounded metadata no longer matches the trigger head', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      calls.push({ url: value, init })
+      if (value.includes('/changes')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-head' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+        })
+      }
+      if (value.endsWith('/merge_requests/10')) {
+        return Response.json({
+          iid: 10,
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'newer-head' },
+        })
+      }
+      throw new Error(`unexpected request: ${value}`)
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: { id: 123, web_url: 'https://gitlab.example.com/nine1/nine1bot' },
+        object_attributes: { iid: 10, last_commit: { id: 'publish-head' } },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: { stage: 'verification', status: 'ok', summary: 'Review complete.', findings: [] },
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'gitlab_review_head_changed',
+    })
+
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
     ])
   })
 
@@ -1794,12 +1947,16 @@ describe('GitLab review controller', () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-result-sha' },
           changes: [{
             old_path: 'src/app.ts',
             new_path: 'src/app.ts',
             diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
           }],
         })
+      }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-result-sha' } })
       }
       return Response.json({ id: 1 })
     }) as typeof fetch
@@ -1867,6 +2024,7 @@ describe('GitLab review controller', () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'invalid-stage-result-sha' },
           changes: [{
             old_path: 'src/app.ts',
             new_path: 'src/app.ts',
@@ -1941,12 +2099,16 @@ describe('GitLab review controller', () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {
         return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-forbidden-sha' },
           changes: [{
             old_path: 'src/app.ts',
             new_path: 'src/app.ts',
             diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
           }],
         })
+      }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-forbidden-sha' } })
       }
       return new Response('Forbidden', {
         status: 403,

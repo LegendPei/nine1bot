@@ -610,11 +610,9 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
           secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
         })
         if (published.published) return
-        ReviewRunStore.update(result.runId, {
-          status: "failed",
-          error: published.error,
-          warnings: published.warnings,
-        })
+        const patch = gitLabReviewRuntimePublishFailurePatch(ReviewRunStore.get(result.runId), published)
+        if (!patch) return
+        ReviewRunStore.update(result.runId, patch)
         await reportStoredGitLabReviewFailure(result.runId, "publish_result", published.error)
       } catch (error) {
         const diagnostic = gitLabReviewRuntimeFailure("runtime_publish", error)
@@ -673,6 +671,18 @@ export function gitLabReviewControllerResponsePatch(
     status: response.accepted ? "running" as const : "failed" as const,
     turnSnapshotId: response.turnSnapshotId,
     ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
+  } satisfies Parameters<typeof ReviewRunStore.update>[1]
+}
+
+export function gitLabReviewRuntimePublishFailurePatch(
+  run: ReviewRunRecord | undefined,
+  result: Extract<Awaited<ReturnType<typeof publishGitLabReviewRunResult>>, { published: false }>,
+) {
+  if (!run || run.status === "rejected") return undefined
+  return {
+    status: "failed" as const,
+    error: result.error,
+    warnings: result.warnings,
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
 }
 

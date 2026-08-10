@@ -237,6 +237,17 @@ export function isRecoverableGitLabReviewRejection(error: string | undefined) {
   return Boolean(error && recoverableGitLabReviewRejections.has(error))
 }
 
+export function gitLabReviewChangesHeadError(
+  trigger: GitLabReviewTrigger,
+  changes: Pick<GitLabRawChangesResponse, 'diff_refs'>,
+) {
+  if (trigger.objectType !== 'mr') return undefined
+  const headSha = changes.diff_refs?.head_sha
+  if (!headSha) return 'gitlab_review_diff_head_unverified'
+  if (headSha !== trigger.headSha) return 'gitlab_review_head_changed'
+  return undefined
+}
+
 export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput): Promise<GitLabReviewWebhookResult> {
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (!settings.enabled) {
@@ -470,6 +481,19 @@ async function executeGitLabReviewAttempt(input: {
   }
 
   if (changes) {
+    const headError = gitLabReviewChangesHeadError(input.trigger, changes)
+    if (headError) {
+      ReviewRunStore.update(input.run.id, {
+        status: 'rejected',
+        error: headError,
+        rejectionKind: 'policy',
+        recoverable: false,
+      })
+      return retryRejected(input.run, 409, headError)
+    }
+  }
+
+  if (changes) {
     const context = buildGitLabReviewContext({
       trigger: input.trigger,
       changes,
@@ -651,6 +675,19 @@ export async function publishGitLabReviewRunResult(input: {
   const client = new GitLabApiClient({ baseUrl: apiBaseUrl.baseUrl, token, fetch: input.fetch })
   let published: Awaited<ReturnType<typeof publishGitLabReviewResult>>
   try {
+    if (trigger.objectType === 'mr') {
+      const mergeRequest = await client.getMergeRequest(trigger.projectId, objectId)
+      const headError = gitLabReviewChangesHeadError(trigger, mergeRequest)
+      if (headError) {
+        ReviewRunStore.update(input.runId, {
+          status: 'rejected',
+          error: headError,
+          rejectionKind: 'policy',
+          recoverable: false,
+        })
+        return { published: false, runId: input.runId, error: headError }
+      }
+    }
     published = await publishGitLabReviewResult({
       client,
       projectId: trigger.projectId,
