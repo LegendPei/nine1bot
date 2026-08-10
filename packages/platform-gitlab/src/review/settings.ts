@@ -101,12 +101,12 @@ export const defaultGitLabReviewSettings: GitLabReviewSettings = {
 export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSettings {
   const record = isRecord(input) ? input : {}
   const allowedHosts = allowedHostList(setting(record, 'allowedHosts'))
-  const projects = projectProfileList(setting(record, 'review.projects', 'projects'))
+  const parsedProjects = parseGitLabReviewProjectProfiles(setting(record, 'review.projects', 'projects'))
   const legacyAllowedProjectIds = idList(setting(record, 'review.allowedProjectIds', 'allowedProjectIds'))
   const explicitScopeMode = scopeModeValue(setting(record, 'review.scopeMode', 'scopeMode'))
   const includedProjects = projectRefList(setting(record, 'review.includedProjects', 'includedProjects'))
   const scopeMode = explicitScopeMode ?? (legacyAllowedProjectIds.length > 0 && includedProjects.length === 0 ? 'selected-only' : defaultGitLabReviewSettings.scopeMode)
-  return {
+  const settings: GitLabReviewSettings = {
     ...defaultGitLabReviewSettings,
     enabled: booleanValue(setting(record, 'review.enabled', 'enabled'), defaultGitLabReviewSettings.enabled),
     baseUrl: optionalString(setting(record, 'review.baseUrl', 'baseUrl')),
@@ -116,7 +116,7 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     scopeMode,
     includedProjects: includedProjects.length > 0 ? includedProjects : legacyAllowedProjectIds.map((id) => ({ id })),
     excludedProjects: projectRefList(setting(record, 'review.excludedProjects', 'excludedProjects')),
-    projects,
+    projects: parsedProjects.profiles,
     hookGroups: groupRefList(setting(record, 'review.hookGroups', 'hookGroups')),
     webhookSecretRef: optionalSecretRef(setting(record, 'review.webhookSecretRef', 'webhookSecretRef')) ?? defaultGitLabReviewSettings.webhookSecretRef,
     tokenSecretRef: optionalSecretRef(setting(record, 'review.tokenSecretRef', 'tokenSecretRef')),
@@ -131,9 +131,112 @@ export function normalizeGitLabReviewSettings(input: unknown): GitLabReviewSetti
     modelId: optionalString(setting(record, 'review.modelId', 'modelId')),
     configurationErrors: [
       ...(allowedHosts.valid ? [] : ['allowed_hosts_invalid']),
-      ...projectProfileConfigurationErrors(projects),
+      ...parsedProjects.errors,
     ],
   }
+  if (settings.enabled && !hasUsableGitLabReviewProjectProfile(settings)) {
+    settings.configurationErrors.push('project_profile_usable_missing:review.projects')
+  }
+  return settings
+}
+
+export function parseGitLabReviewProjectProfiles(input: unknown): {
+  profiles: GitLabReviewProjectProfile[]
+  errors: string[]
+} {
+  if (input === undefined) return { profiles: [], errors: [] }
+  if (!Array.isArray(input)) {
+    return { profiles: [], errors: ['project_profiles_not_array:review.projects'] }
+  }
+
+  const profiles: GitLabReviewProjectProfile[] = []
+  const errors: string[] = []
+  const ids = new Set<string>()
+  const identities = new Set<string>()
+
+  for (const [index, item] of input.entries()) {
+    if (!isRecord(item)) {
+      errors.push(`project_profile_invalid:index:${index}`)
+      continue
+    }
+
+    const id = optionalString(item.id)
+    if (!id) {
+      errors.push(`project_profile_id_missing:index:${index}`)
+      continue
+    }
+
+    const projectId = item.projectId ?? item.project_id
+    if (!validProjectId(projectId)) {
+      errors.push(`project_profile_project_id_missing:${id}`)
+      continue
+    }
+
+    const host = normalizeGitLabAuthority(optionalString(item.host))
+    if (!host) errors.push(`project_profile_host_invalid:${id}`)
+
+    const ci = recordValue(item.ci)
+    const maxJobLogsInput = ci?.maxJobLogs
+      ?? ci?.max_job_logs
+      ?? ci?.maxFailedJobs
+      ?? ci?.max_failed_jobs
+    const maxJobLogBytesInput = ci?.maxJobLogBytes ?? ci?.max_job_log_bytes
+    if (maxJobLogsInput !== undefined && !isPositiveNumber(maxJobLogsInput)) {
+      errors.push(`project_profile_ci_max_job_logs_invalid:${id}`)
+    }
+    if (maxJobLogBytesInput !== undefined && !isPositiveNumber(maxJobLogBytesInput)) {
+      errors.push(`project_profile_ci_max_job_log_bytes_invalid:${id}`)
+    }
+
+    const profile: GitLabReviewProjectProfile = {
+      id,
+      host,
+      projectId,
+      nine1botProjectID: optionalString(item.nine1botProjectID) ?? optionalString(item.nine1bot_project_id) ?? '',
+      pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
+      displayName: optionalString(item.displayName) ?? optionalString(item.display_name),
+      enabled: booleanValue(item.enabled, true),
+      reviewContextMarkdown: optionalString(item.reviewContextMarkdown) ?? optionalString(item.review_context_markdown) ??
+        optionalString(item.contextMarkdown) ?? optionalString(item.context_markdown),
+      reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
+      includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
+      excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),
+      maxContextBytes: optionalPositiveNumber(item.maxContextBytes ?? item.max_context_bytes),
+      maxFiles: optionalPositiveNumber(item.maxFiles ?? item.max_files),
+      ci: {
+        maxJobLogs: positiveNumber(maxJobLogsInput, 3),
+        maxJobLogBytes: positiveNumber(maxJobLogBytesInput, 8_000),
+      },
+    }
+
+    if (ids.has(profile.id)) errors.push(`project_profile_id_duplicate:${profile.id}`)
+    ids.add(profile.id)
+    if (profile.host) {
+      const identity = projectProfileIdentity(profile)
+      if (identities.has(identity)) errors.push(`project_profile_identity_duplicate:${identity}`)
+      identities.add(identity)
+    }
+    if (!profile.nine1botProjectID) errors.push(`project_binding_missing:${profile.id}`)
+    profiles.push(profile)
+  }
+
+  return { profiles, errors }
+}
+
+export function hasUsableGitLabReviewProjectProfile(settings: GitLabReviewSettings) {
+  const idCounts = new Map<string, number>()
+  const identityCounts = new Map<string, number>()
+  for (const profile of settings.projects) {
+    idCounts.set(profile.id, (idCounts.get(profile.id) ?? 0) + 1)
+    if (profile.host) {
+      const identity = projectProfileIdentity(profile)
+      identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1)
+    }
+  }
+  return settings.projects.some((profile) => {
+    if (!profile.enabled || !profile.host || !profile.nine1botProjectID) return false
+    return idCounts.get(profile.id) === 1 && identityCounts.get(projectProfileIdentity(profile)) === 1
+  })
 }
 
 export function isGitLabReviewProjectInScope(
@@ -259,59 +362,8 @@ function projectRefList(input: unknown): GitLabProjectRef[] {
     .filter((item): item is GitLabProjectRef => Boolean(item))
 }
 
-function projectProfileList(input: unknown): GitLabReviewProjectProfile[] {
-  if (!Array.isArray(input)) return []
-  return input.flatMap((item) => {
-    if (!isRecord(item)) return []
-    const id = optionalString(item.id)
-    const projectId = item.projectId ?? item.project_id
-    if (!id || (typeof projectId !== 'string' && typeof projectId !== 'number')) return []
-    return [{
-      id,
-      host: normalizeGitLabAuthority(optionalString(item.host)),
-      projectId,
-      nine1botProjectID: optionalString(item.nine1botProjectID) ?? optionalString(item.nine1bot_project_id) ?? '',
-      pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
-      displayName: optionalString(item.displayName) ?? optionalString(item.display_name),
-      enabled: booleanValue(item.enabled, true),
-      reviewContextMarkdown: optionalString(item.reviewContextMarkdown) ?? optionalString(item.review_context_markdown) ??
-        optionalString(item.contextMarkdown) ?? optionalString(item.context_markdown),
-      reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
-      includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
-      excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),
-      maxContextBytes: optionalPositiveNumber(item.maxContextBytes ?? item.max_context_bytes),
-      maxFiles: optionalPositiveNumber(item.maxFiles ?? item.max_files),
-      ci: {
-        maxJobLogs: positiveNumber(
-          recordValue(item.ci)?.maxJobLogs
-            ?? recordValue(item.ci)?.max_job_logs
-            ?? recordValue(item.ci)?.maxFailedJobs
-            ?? recordValue(item.ci)?.max_failed_jobs,
-          3,
-        ),
-        maxJobLogBytes: positiveNumber(recordValue(item.ci)?.maxJobLogBytes ?? recordValue(item.ci)?.max_job_log_bytes, 8_000),
-      },
-    }]
-  })
-}
-
-function projectProfileConfigurationErrors(projects: GitLabReviewProjectProfile[]) {
-  const errors: string[] = []
-  const ids = new Set<string>()
-  const identities = new Set<string>()
-  for (const project of projects) {
-    if (ids.has(project.id)) errors.push(`project_profile_id_duplicate:${project.id}`)
-    ids.add(project.id)
-    if (!project.host) {
-      errors.push(`project_profile_host_invalid:${project.id}`)
-    } else {
-      const identity = `${project.host}:${String(project.projectId)}`
-      if (identities.has(identity)) errors.push(`project_profile_identity_duplicate:${identity}`)
-      identities.add(identity)
-    }
-    if (!project.nine1botProjectID) errors.push(`project_binding_missing:${project.id}`)
-  }
-  return errors
+function projectProfileIdentity(project: Pick<GitLabReviewProjectProfile, 'host' | 'projectId'>) {
+  return `${project.host}:${String(project.projectId)}`
 }
 
 function groupRefList(input: unknown): GitLabGroupRef[] {
@@ -332,7 +384,16 @@ function groupRefList(input: unknown): GitLabGroupRef[] {
 }
 
 function positiveNumber(input: unknown, fallback: number) {
-  return typeof input === 'number' && Number.isFinite(input) && input > 0 ? input : fallback
+  return isPositiveNumber(input) ? input : fallback
+}
+
+function isPositiveNumber(input: unknown): input is number {
+  return typeof input === 'number' && Number.isFinite(input) && input > 0
+}
+
+function validProjectId(input: unknown): input is string | number {
+  if (typeof input === 'string') return input.trim().length > 0
+  return typeof input === 'number' && Number.isFinite(input)
 }
 
 function optionalPositiveNumber(input: unknown) {

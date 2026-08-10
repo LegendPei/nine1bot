@@ -65,6 +65,37 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('reports degraded status and validation when review has no usable project profile', async () => {
+    const settings = {
+      'review.enabled': true,
+      'review.dryRun': false,
+      'review.tokenSecretRef': 'token-value',
+      'review.projects': [{
+        id: 'disabled',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-disabled',
+        enabled: false,
+      }],
+    }
+    const status = await gitlabPlatformContribution.getStatus?.({
+      ...platformContext(),
+      settings,
+    })
+    const validation = await gitlabPlatformContribution.validateConfig?.(settings)
+
+    expect(status).toMatchObject({
+      status: 'degraded',
+      message: expect.stringContaining('usable project profile'),
+    })
+    expect(validation).toMatchObject({
+      ok: false,
+      fieldErrors: {
+        'review.projects': expect.stringContaining('enabled'),
+      },
+    })
+  })
+
   test('parses GitLab repository, file, tree, merge request, and issue URLs', () => {
     expect(parseGitLabUrl('https://gitlab.com/nine1/nine1bot')).toMatchObject({
       host: 'gitlab.com',
@@ -669,6 +700,7 @@ describe('GitLab platform adapter package', () => {
     ]))
 
     const pm = await readFile(join(reviewAgentsDir, 'pm-coordinator.agent.md'), 'utf8')
+    expect(pm).toEqual(expect.stringContaining('"*": deny'))
     expect(pm).toEqual(expect.stringContaining('task:'))
     expect(pm).toEqual(expect.stringContaining('gitlab_ci_inspect: allow'))
     expect(pm).toEqual(expect.stringContaining('platform.gitlab.tech-architect'))
@@ -679,8 +711,7 @@ describe('GitLab platform adapter package', () => {
     for (const filename of files.filter((file) => file !== 'pm-coordinator.agent.md' && file.endsWith('.agent.md'))) {
       const content = await readFile(join(reviewAgentsDir, filename), 'utf8')
       expect(content).toEqual(expect.stringContaining('mode: subagent'))
-      expect(content).toEqual(expect.stringContaining('edit: deny'))
-      expect(content).toEqual(expect.stringContaining('bash: deny'))
+      expect(content).toEqual(expect.stringContaining('"*": deny'))
       expect(content).toEqual(expect.stringContaining('"stage"'))
       expect(content).toEqual(expect.stringContaining('"findings"'))
     }

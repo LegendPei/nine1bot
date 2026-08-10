@@ -11,7 +11,9 @@ import {
   GitLabApiClient,
   inspectGitLabCi,
   minimumGitLabReviewDiffEvidenceBytes,
+  hasUsableGitLabReviewProjectProfile,
   normalizeGitLabReviewSettings,
+  parseGitLabReviewProjectProfiles,
   parseSubagentStageResult,
   parseReviewStageResult,
   parseGitLabWebhookEvent,
@@ -396,6 +398,78 @@ describe('GitLab review foundation', () => {
     })
 
     expect(settings.configurationErrors).toContain('project_profile_identity_duplicate:gitlab.example.com:3')
+  })
+
+  test('reports profile diagnostics without silently dropping malformed entries', () => {
+    expect(parseGitLabReviewProjectProfiles({ invalid: true })).toEqual({
+      profiles: [],
+      errors: ['project_profiles_not_array:review.projects'],
+    })
+
+    const result = parseGitLabReviewProjectProfiles([
+      null,
+      { projectId: 1 },
+      { id: 'missing-project', host: 'gitlab.example.com', nine1botProjectID: 'project-missing' },
+      { id: 'duplicate', host: 'gitlab.example.com', projectId: 4, nine1botProjectID: 'project-four' },
+      { id: 'duplicate', host: 'other.example.com', projectId: 5, nine1botProjectID: 'project-five' },
+      { id: 'same-identity', host: 'https://GITLAB.example.com', projectId: '4', nine1botProjectID: 'project-other' },
+      { id: 'bad-host', host: '://invalid-host', projectId: 6, nine1botProjectID: 'project-six' },
+      {
+        id: 'bad-ci',
+        host: 'gitlab.example.com',
+        projectId: 7,
+        nine1botProjectID: 'project-seven',
+        ci: { maxJobLogs: 0, maxJobLogBytes: 'unbounded' },
+      },
+    ])
+
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'project_profile_invalid:index:0',
+      'project_profile_id_missing:index:1',
+      'project_profile_project_id_missing:missing-project',
+      'project_profile_id_duplicate:duplicate',
+      'project_profile_identity_duplicate:gitlab.example.com:4',
+      'project_profile_host_invalid:bad-host',
+      'project_profile_ci_max_job_logs_invalid:bad-ci',
+      'project_profile_ci_max_job_log_bytes_invalid:bad-ci',
+    ]))
+    expect(result.profiles.find((profile) => profile.id === 'bad-ci')?.ci).toEqual({
+      maxJobLogs: 3,
+      maxJobLogBytes: 8_000,
+    })
+  })
+
+  test('requires an enabled and bound usable project profile when review is enabled', () => {
+    const settings = normalizeGitLabReviewSettings({
+      'review.enabled': true,
+      'review.projects': [
+        {
+          id: 'disabled',
+          host: 'gitlab.example.com',
+          projectId: 3,
+          nine1botProjectID: 'project-disabled',
+          enabled: false,
+        },
+        {
+          id: 'unbound',
+          host: 'gitlab.example.com',
+          projectId: 4,
+          enabled: true,
+        },
+      ],
+    })
+
+    expect(hasUsableGitLabReviewProjectProfile(settings)).toBe(false)
+    expect(settings.configurationErrors).toContain('project_profile_usable_missing:review.projects')
+    expect(hasUsableGitLabReviewProjectProfile(normalizeGitLabReviewSettings({
+      'review.projects': [{
+        id: 'usable',
+        host: 'gitlab.example.com',
+        projectId: 5,
+        nine1botProjectID: 'project-five',
+        enabled: true,
+      }],
+    }))).toBe(true)
   })
 
   test('migrates legacy project context into a review overlay and requires a project binding', () => {

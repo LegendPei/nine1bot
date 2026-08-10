@@ -8,7 +8,11 @@ import {
 import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
-import { gitLabReviewProjectIdsForHookSync, normalizeGitLabReviewSettings } from './review/settings'
+import {
+  gitLabReviewProjectIdsForHookSync,
+  hasUsableGitLabReviewProjectProfile,
+  normalizeGitLabReviewSettings,
+} from './review/settings'
 import type {
   PlatformActionResult,
   PlatformAdapterContext,
@@ -349,6 +353,22 @@ async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<Pla
     }
   }
 
+  if (!hasUsableGitLabReviewProjectProfile(settings)) {
+    return {
+      status: 'degraded',
+      message: 'GitLab code review is enabled but has no enabled, bound, usable project profile.',
+      cards,
+    }
+  }
+
+  if (settings.configurationErrors.length > 0) {
+    return {
+      status: 'degraded',
+      message: 'GitLab code review configuration contains invalid project profile or host settings.',
+      cards,
+    }
+  }
+
   return {
     status: settings.dryRun ? 'degraded' : 'available',
     message: settings.dryRun
@@ -371,8 +391,12 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
     if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
       fieldErrors.allowedHosts = 'Allowed GitLab hosts must contain only valid host or host:port values.'
     }
-    const projectErrors = settings.configurationErrors.filter((error) => error.startsWith('project_'))
-    if (projectErrors.length > 0) {
+    if (!hasUsableGitLabReviewProjectProfile(settings)) {
+      fieldErrors['review.projects'] = [
+        'At least one GitLab review profile must be enabled, use a valid host,',
+        'and bind an existing Nine1Bot project with a unique identity.',
+      ].join(' ')
+    } else if (settings.configurationErrors.some((error) => error.startsWith('project_'))) {
       fieldErrors['review.projects'] = [
         'Every GitLab review profile must use a valid host, bind an existing Nine1Bot project,',
         'and have unique profile and (host, projectId) identities.',

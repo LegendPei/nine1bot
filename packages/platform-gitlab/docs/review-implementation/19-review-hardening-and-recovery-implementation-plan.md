@@ -345,27 +345,27 @@ git commit -m "fix(runtime): observe automated runs before send"
 - Produces: `hasUsableGitLabReviewProjectProfile(settings): boolean`
 - Keeps: `normalizeGitLabReviewSettings()` 返回 `GitLabReviewSettings`
 
-- [ ] **Step 1: 写 malformed 与全无效 profile 失败测试**
+- [x] **Step 1: 写 malformed 与全无效 profile 失败测试**
 
 覆盖非数组、非对象、缺失 ID/projectId、非法 host、重复 ID、重复 identity、非法 CI 数值，以及 Review 启用但没有 enabled+bound profile。每条错误包含 index 或 profile ID。
 
-- [ ] **Step 2: 写 runtime degraded 失败测试**
+- [x] **Step 2: 写 runtime degraded 失败测试**
 
 token 已配置但全部 profile 无效/禁用时，`getStatus` 必须为 degraded，`validateConfig` 必须给出 `review.projects` 错误。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/platform-gitlab/test/gitlab-platform.test.ts -t "profile diagnostics|usable project profile"`
 
-- [ ] **Step 4: 分离解析与校验**
+- [x] **Step 4: 分离解析与校验**
 
 遍历原始数组时同时收集 errors；合法 profile 才进入运行时 `profiles`，但任何被跳过条目都有稳定诊断。对 `maxJobLogs` 和 `maxJobLogBytes` 同时报告非法值并使用安全默认值。
 
-- [ ] **Step 5: 接入 status 与 config validation**
+- [x] **Step 5: 接入 status 与 config validation**
 
 Review enabled 时要求至少一个 enabled、identity 唯一、已绑定的 profile；否则 status 为 degraded，保存校验失败。
 
-- [ ] **Step 6: 运行平台包回归并提交**
+- [x] **Step 6: 运行平台包回归并提交**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/platform-gitlab/test/gitlab-platform.test.ts`
 
