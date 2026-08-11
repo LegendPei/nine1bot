@@ -18,6 +18,7 @@ import {
   handleGitLabReviewWebhook,
   gitLabReviewRuntimeSkillIds,
   publishGitLabReviewRunResult,
+  rejectGitLabReviewRuntimeConfiguration,
   reportGitLabReviewRunFailure,
   resolveGitLabReviewModelSelection,
   retryGitLabReviewAttempt,
@@ -502,10 +503,8 @@ async function triggerGitLabReviewWebhook(c: any) {
   })
 
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
-    startGitLabReviewRuntimeRun(result).catch((error) => {
-      const message = gitLabReviewRuntimeFailure("runtime_start", error)
-      failGitLabReviewRuntimeRun(result.runId, "runtime_start", message).catch(() => undefined)
-    })
+    const runtimeResult = await startGitLabReviewRuntime(result, "runtime_start")
+    return c.json(publicGitLabReviewWebhookResult(runtimeResult), runtimeResult.accepted ? 202 : runtimeResult.httpStatus as never)
   }
 
   return c.json(publicGitLabReviewWebhookResult(result), result.accepted ? 202 : result.httpStatus as never)
@@ -537,9 +536,33 @@ type GitLabReviewRuntimeRunInput = {
 
 export type GitLabReviewRuntimeRunOptions = {
   runner?: AutomatedControllerRunner
-  directory?: string
   platforms?: Awaited<ReturnType<typeof readPlatformManagerConfig>>
   secrets?: FilePlatformSecretStore
+}
+
+export type GitLabReviewRuntimePreflightOptions = {
+  getProject?: Parameters<typeof resolveGitLabReviewRuntimeDirectory>[1]
+  start?: (result: GitLabReviewRuntimeRunInput, directory: string) => Promise<unknown>
+}
+
+export async function startGitLabReviewRuntime(
+  result: AcceptedGitLabReviewWithContext,
+  phase: "runtime_start" | "runtime_retry",
+  options: GitLabReviewRuntimePreflightOptions = {},
+) {
+  let directory: string
+  try {
+    directory = await resolveGitLabReviewRuntimeDirectory(result.context.project, options.getProject)
+  } catch {
+    return rejectGitLabReviewRuntimeConfiguration(result.runId, "project_binding_missing")
+  }
+
+  const start = options.start ?? startGitLabReviewRuntimeRun
+  start(result, directory).catch((error) => {
+    const message = gitLabReviewRuntimeFailure(phase, error)
+    failGitLabReviewRuntimeRun(result.runId, phase, message).catch(() => undefined)
+  })
+  return result
 }
 
 function isAcceptedGitLabReviewWithContext(
@@ -550,9 +573,9 @@ function isAcceptedGitLabReviewWithContext(
 
 export async function startGitLabReviewRuntimeRun(
   result: GitLabReviewRuntimeRunInput,
+  directory: string,
   options: GitLabReviewRuntimeRunOptions = {},
 ) {
-  const directory = options.directory ?? await resolveGitLabReviewRuntimeDirectory(result.context.project)
   const platforms = options.platforms ?? await readPlatformManagerConfig()
   const secrets = options.secrets ?? new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH)
   registerBuiltinPlatformAdapters({
@@ -772,10 +795,8 @@ async function retryGitLabReviewRun(c: any) {
   })
 
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
-    startGitLabReviewRuntimeRun(result).catch((error) => {
-      const message = gitLabReviewRuntimeFailure("runtime_retry", error)
-      failGitLabReviewRuntimeRun(result.runId, "runtime_retry", message).catch(() => undefined)
-    })
+    const runtimeResult = await startGitLabReviewRuntime(result, "runtime_retry")
+    return c.json(publicGitLabReviewWebhookResult(runtimeResult), runtimeResult.accepted ? 202 : runtimeResult.httpStatus as never)
   }
 
   return c.json(publicGitLabReviewWebhookResult(result), result.accepted ? 202 : result.httpStatus as never)

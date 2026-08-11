@@ -1094,6 +1094,30 @@ function reject(
   }
 }
 
+export function rejectGitLabReviewRuntimeConfiguration(
+  runId: string,
+  error: string,
+): GitLabReviewWebhookResult {
+  const run = ReviewRunStore.get(runId)
+  if (!run) return rejectWithoutRun(404, 'review_run_not_found')
+  if (run.status === 'rejected') return retryRejected(run, 202, run.error ?? error)
+  const rejected = ReviewRunStore.update(runId, {
+    status: 'rejected',
+    error,
+    rejectionKind: 'configuration',
+    recoverable: true,
+  })
+  if (!rejected) return rejectWithoutRun(404, 'review_run_not_found')
+  return {
+    accepted: false,
+    status: 'rejected',
+    error,
+    httpStatus: 202,
+    runId: rejected.id,
+    ...reviewAttemptMetadata(rejected),
+  }
+}
+
 function gitLabReviewRejectionKind(error: string) {
   if (error === 'project-not-allowed' || error === 'host-not-allowed') return 'policy'
   if (error.includes('token') || error.includes('secret')) return 'authentication'

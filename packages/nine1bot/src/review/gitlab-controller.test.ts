@@ -8,6 +8,7 @@ import {
   handleGitLabReviewWebhook,
   isRecoverableGitLabReviewRejection,
   publishGitLabReviewRunResult,
+  rejectGitLabReviewRuntimeConfiguration,
   reportGitLabReviewRunFailure,
   retryGitLabReviewAttempt,
   validateGitLabDedicatedWebhookSecret,
@@ -718,6 +719,101 @@ describe('GitLab review controller', () => {
       attempt: 1,
     })
     expect(ReviewRunStore.get(rejected.runId)?.context).toBeUndefined()
+  })
+
+  test('rejects a stale runtime project binding as recoverable configuration and retries it as a new attempt', async () => {
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: { iid: 23, last_commit: { id: 'stale-binding-head' } },
+        changes: {
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'stale-binding-head' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: { ...platforms.gitlab.settings, 'review.dryRun': false },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: (async () => Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'stale-binding-head' },
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+      })) as unknown as typeof fetch,
+    })
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    const rejected = rejectGitLabReviewRuntimeConfiguration(accepted.runId, 'project_binding_missing')
+    expect(rejected).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      error: 'project_binding_missing',
+      httpStatus: 202,
+      runId: accepted.runId,
+      attempt: 1,
+    })
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'rejected',
+      error: 'project_binding_missing',
+      rejectionKind: 'configuration',
+      recoverable: true,
+      attempt: 1,
+    })
+
+    const retried = await retryGitLabReviewAttempt({
+      runId: accepted.runId,
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: { ...platforms.gitlab.settings, 'review.dryRun': true },
+        },
+      },
+      secrets: memorySecrets,
+    })
+    expect(retried).toMatchObject({
+      accepted: true,
+      status: 'dry-run',
+      attempt: 2,
+      retryOf: accepted.runId,
+    })
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'rejected',
+      error: 'project_binding_missing',
+      attempt: 1,
+    })
+  })
+
+  test('does not rewrite a policy-rejected attempt as recoverable runtime configuration', () => {
+    const policyRejected = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+
+    const result = rejectGitLabReviewRuntimeConfiguration(policyRejected.id, 'project_binding_missing')
+
+    expect(result).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      runId: policyRejected.id,
+    })
+    expect(ReviewRunStore.get(policyRejected.id)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
   })
 
   test('allows only one concurrent retry attempt and rejects nonrecoverable or active runs', async () => {

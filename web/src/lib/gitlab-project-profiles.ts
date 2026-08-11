@@ -24,6 +24,22 @@ export type GitLabProjectProfile = {
   }
 }
 
+export function validateGitLabProjectBindings(
+  profiles: readonly GitLabProjectProfile[],
+  projects: readonly { id: string }[],
+): string | undefined {
+  for (const profile of profiles) {
+    const label = profile.displayName || profile.pathWithNamespace || profile.id
+    if (!profile.nine1botProjectID) {
+      return `项目档案 ${label} 尚未绑定 Nine1Bot 项目。`
+    }
+    if (!projects.some((project) => project.id === profile.nine1botProjectID)) {
+      return `项目档案 ${label} 绑定的 Nine1Bot 项目不存在。`
+    }
+  }
+  return undefined
+}
+
 export function parseGitLabProjectProfiles(input: string | unknown): GitLabProjectProfile[] {
   let parsed: unknown
   try {

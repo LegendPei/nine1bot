@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
-import { reportGitLabReviewRunFailure } from "../../../../../packages/nine1bot/src/review/gitlab-controller"
+import {
+  rejectGitLabReviewRuntimeConfiguration,
+  reportGitLabReviewRunFailure,
+} from "../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore } from "../../../../../packages/nine1bot/src/review/run-store"
 import {
   gitLabReviewPublishStatus,
@@ -15,6 +18,7 @@ import {
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
   resolveGitLabReviewRuntimeDirectory,
+  startGitLabReviewRuntime,
   startGitLabReviewRuntimeRun,
   webhookLocalOrigin,
 } from "../../src/server/routes/webhooks"
@@ -354,8 +358,7 @@ describe("webhook status URL selection", () => {
           diff: { files: [], skipped: [], blocked: false, stats: { fileCount: 0, includedFileCount: 0, skippedFileCount: 0, includedBytes: 0, truncated: false } },
           contextBlocks: [],
         },
-      } as any, {
-        directory: directory,
+      } as any, directory, {
         platforms: {},
         runner: async (input: any) => {
           const onFinished = input.onFinished
@@ -438,5 +441,55 @@ describe("webhook status URL selection", () => {
         throw new Error("not found")
       },
     )).rejects.toThrow("project_binding_missing")
+  })
+
+  test("keeps a stale runtime project binding recoverable without creating a session", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-stale-binding-"))
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const run = ReviewRunStore.create({
+      platform: "gitlab",
+      status: "running",
+      trigger: {
+        host: "gitlab.example.com",
+        projectId: 123,
+        objectType: "mr",
+        objectIid: 10,
+        headSha: "stale-binding-head",
+        mode: "webhook",
+      },
+    })
+    let sessionsCreated = 0
+
+    try {
+      const rejected = await startGitLabReviewRuntime({
+        runId: run.id,
+        idempotencyKey: "gitlab:gitlab.example.com:123:mr:10:head_sha:stale-binding-head:auto:merge_request",
+        trigger: run.trigger as any,
+        context: {
+          project: { nine1botProjectID: "deleted-project" },
+          diff: { files: [], skipped: [], blocked: false, stats: { fileCount: 0, includedFileCount: 0, skippedFileCount: 0, includedBytes: 0, truncated: false } },
+          contextBlocks: [],
+        },
+      } as any, "runtime_start", {
+        getProject: async () => {
+          throw new Error("not found")
+        },
+        start: async () => {
+          sessionsCreated++
+        },
+      })
+
+      expect(sessionsCreated).toBe(0)
+      expect(rejected).toMatchObject({ accepted: false, error: "project_binding_missing", httpStatus: 202 })
+      expect(ReviewRunStore.get(run.id)).toMatchObject({
+        status: "rejected",
+        rejectionKind: "configuration",
+        recoverable: true,
+        attempt: 1,
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 })

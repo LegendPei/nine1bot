@@ -17,6 +17,7 @@ import {
   gitLabProjectIdentityKey,
   optionalGitLabProfileNumber as optionalProfileNumber,
   positiveGitLabProfileNumber as positiveProfileNumber,
+  validateGitLabProjectBindings,
   type GitLabProjectProfile,
   type GitLabProjectRef,
 } from '../lib/gitlab-project-profiles'
@@ -785,14 +786,8 @@ function buildSettingsPatch() {
 function gitLabProjectProfilesValidationError() {
   const diagnostic = gitLabProjectProfileDiagnostics.value[0]
   if (diagnostic) return gitLabProjectProfileDiagnosticLabel(diagnostic)
-  for (const profile of gitLabProjectProfiles.value) {
-    if (!profile.nine1botProjectID) {
-      return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 尚未绑定 Nine1Bot 项目。`
-    }
-    if (props.projects.length > 0 && !hasNine1BotProject(profile.nine1botProjectID)) {
-      return `项目档案 ${profile.displayName || profile.pathWithNamespace || profile.id} 绑定的 Nine1Bot 项目不存在。`
-    }
-  }
+  const bindingError = validateGitLabProjectBindings(gitLabProjectProfiles.value, props.projects)
+  if (bindingError) return bindingError
   if (Boolean(formValues['review.enabled']) && !gitLabProjectProfiles.value.some((profile) => profile.enabled)) {
     return '启用 GitLab Review 时，至少需要一个已启用并完成绑定的项目档案。'
   }

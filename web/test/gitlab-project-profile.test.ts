@@ -3,6 +3,7 @@ import {
   createGitLabProjectProfile,
   parseGitLabProjectProfiles,
   serializeGitLabProjectProfiles,
+  validateGitLabProjectBindings,
 } from '../src/lib/gitlab-project-profiles'
 import {
   parseGitLabProjectProfileDocument,
@@ -107,6 +108,17 @@ describe('GitLab project profiles', () => {
 
     expect(profile.host).toBe('project-host.example.com:7443')
     expect(parseGitLabProjectProfiles('not-json')).toEqual([])
+  })
+
+  test('rejects stale project bindings even when the project list is empty', () => {
+    const profileWithBinding = {
+      ...createGitLabProjectProfile({ id: 3, pathWithNamespace: 'root/uftest' }, 'https://gitlab.example.com'),
+      nine1botProjectID: 'project-uf',
+    }
+    const matchingProject = { id: 'project-uf' }
+
+    expect(validateGitLabProjectBindings([profileWithBinding], [])).toContain('不存在')
+    expect(validateGitLabProjectBindings([profileWithBinding], [matchingProject])).toBeUndefined()
   })
 
   test('preserves malformed and duplicate entries while editing a valid profile document entry', () => {
