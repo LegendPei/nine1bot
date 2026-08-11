@@ -585,25 +585,55 @@ export class GitLabApiClient {
       if (!REDIRECT_STATUSES.has(response.status)) return response
 
       if (redirects >= MAX_REDIRECTS) {
-        await response.body?.cancel().catch(() => undefined)
+        await disposeResponse(response, requestGuard)
         throw new GitLabApiRedirectError('gitlab_redirect_limit_exceeded')
       }
       const location = response.headers.get('location')
       const target = location ? parseHttpUrl(location, currentUrl) : undefined
       if (!target || (currentUrl.protocol === 'https:' && target.protocol !== 'https:')) {
-        await response.body?.cancel().catch(() => undefined)
+        await disposeResponse(response, requestGuard)
         throw new GitLabApiRedirectError('gitlab_redirect_invalid')
       }
       if (target.host.toLowerCase() !== authority) {
-        await response.body?.cancel().catch(() => undefined)
+        await disposeResponse(response, requestGuard)
         throw new GitLabApiRedirectError('gitlab_redirect_cross_authority')
       }
 
-      await response.body?.cancel().catch(() => undefined)
+      await disposeResponse(response, requestGuard)
       redirects += 1
       currentInit = redirectedRequestInit(currentInit, response.status)
       currentUrl = target
     }
+  }
+}
+
+async function disposeResponse(response: Response, requestGuard?: () => void) {
+  if (!requestGuard) {
+    await cancelResponseBody(response)
+    return
+  }
+
+  let preGuardError: unknown
+  let preGuardFailed = false
+  try {
+    requestGuard()
+  } catch (error) {
+    preGuardFailed = true
+    preGuardError = error
+  }
+  try {
+    await cancelResponseBody(response)
+  } finally {
+    requestGuard()
+  }
+  if (preGuardFailed) throw preGuardError
+}
+
+async function cancelResponseBody(response: Response) {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Response disposal is best-effort; ownership and redirect errors carry the request outcome.
   }
 }
 

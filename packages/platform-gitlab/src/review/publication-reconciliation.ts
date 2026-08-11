@@ -50,6 +50,13 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
     notes: input.notes,
     manifest: input.manifest,
     candidates: layout.inlineFindings,
+    warnings: [
+      ...layout.warnings,
+      ...layout.summaryFindings.flatMap((finding) => {
+        const warning = layout.summaryWarnings.get(finding)
+        return warning ? [warning] : []
+      }),
+    ],
     knownNoteMarkers,
     completed,
   })
@@ -124,6 +131,7 @@ function reconcileLegacyRunFallbacks(input: {
   notes: GitLabPublishedComment[]
   manifest: GitLabDiffManifest
   candidates: PublicationFinding[]
+  warnings: string[]
   knownNoteMarkers: ReadonlySet<string>
   completed: Set<string>
 }) {
@@ -131,23 +139,36 @@ function reconcileLegacyRunFallbacks(input: {
   const legacyNotes = input.notes.filter(({ body }) => body.includes(legacyMarker))
   for (const note of legacyNotes) {
     const body = stripKnownTrailingMarkers(note.body, input.knownNoteMarkers)
-    if (body === undefined) throw new GitLabReviewPublicationCompatibilityError()
+    if (body === undefined || containsKnownMarker(body, input.knownNoteMarkers)) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
     const matched = input.candidates.filter(({ finding }) => {
       return body.includes(`\n${renderReviewFindingItem(finding)}`)
     })
     if (matched.length === 0) throw new GitLabReviewPublicationCompatibilityError()
-    if (matched.some(({ finding }) => !hasLegacyFallbackWarning(body, finding))) {
-      throw new GitLabReviewPublicationCompatibilityError()
-    }
     const expected = renderReviewSummaryComment({
       title: 'Nine1bot Inline Publish Fallback',
       summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
       findings: matched.map(({ finding }) => finding),
       manifest: input.manifest,
     })
-    if (withoutRenderedWarnings(body) !== expected) {
+    const dynamicWarnings = legacyFallbackDynamicWarnings({
+      body,
+      expectedWithoutWarnings: expected,
+      fixedWarnings: input.warnings,
+      findings: matched,
+    })
+    if (!dynamicWarnings) {
       throw new GitLabReviewPublicationCompatibilityError()
     }
+    const roundTrip = renderReviewSummaryComment({
+      title: 'Nine1bot Inline Publish Fallback',
+      summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+      findings: matched.map(({ finding }) => finding),
+      manifest: input.manifest,
+      warnings: [...input.warnings, ...dynamicWarnings],
+    })
+    if (body !== roundTrip) throw new GitLabReviewPublicationCompatibilityError()
     for (const finding of matched) {
       if (!finding.markers) throw new GitLabReviewPublicationCompatibilityError()
       input.completed.add(finding.markers.fallbackMarker)
@@ -169,10 +190,13 @@ function reconcileLegacySummaryFindings(input: {
 }) {
   const incomplete = input.summaryFindings.filter((finding) => !findingCompleted(finding, input.completed))
   if (incomplete.length === 0) return
+  let matchedAny = false
   for (const { body: noteBody } of input.notes) {
     if (!noteBody.includes(input.summaryMarker)) continue
     const body = stripKnownTrailingMarkers(noteBody, input.knownNoteMarkers)
-    if (body === undefined) continue
+    if (body === undefined || containsKnownMarker(body, input.knownNoteMarkers)) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
     const matched = input.summaryFindings.filter(({ finding }) => {
       return body.includes(`\n${renderReviewFindingItem(finding)}`)
     })
@@ -189,14 +213,14 @@ function reconcileLegacySummaryFindings(input: {
         }),
       ],
     })
-    if (body !== expected) continue
+    if (body !== expected) throw new GitLabReviewPublicationCompatibilityError()
+    matchedAny = true
     for (const finding of matched) {
       if (!finding.markers) throw new GitLabReviewPublicationCompatibilityError()
       input.completed.add(finding.markers.fallbackMarker)
     }
-    return
   }
-  throw new GitLabReviewPublicationCompatibilityError()
+  if (!matchedAny) throw new GitLabReviewPublicationCompatibilityError()
 }
 
 function markersInComments(comments: GitLabPublishedComment[], markers: string[]) {
@@ -215,18 +239,92 @@ function stripKnownTrailingMarkers(body: string, knownMarkers: ReadonlySet<strin
   return lines.join('\n')
 }
 
-function withoutRenderedWarnings(body: string) {
-  const warningsHeading = '\n\n### Warnings\n'
-  const warningsIndex = body.indexOf(warningsHeading)
-  if (warningsIndex < 0) return body
-  const nextSectionIndex = body.indexOf('\n\n### ', warningsIndex + warningsHeading.length)
-  if (nextSectionIndex < 0) return body
-  return `${body.slice(0, warningsIndex)}${body.slice(nextSectionIndex)}`
+function containsKnownMarker(body: string, knownMarkers: ReadonlySet<string>) {
+  return Array.from(knownMarkers).some((marker) => body.includes(marker))
 }
 
-function hasLegacyFallbackWarning(body: string, finding: PublicationFinding['finding']) {
-  const prefix = `- Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400`
-  return body.split('\n').some((line) => line === `${prefix}.` || line.startsWith(`${prefix}: `))
+function legacyFallbackDynamicWarnings(input: {
+  body: string
+  expectedWithoutWarnings: string
+  fixedWarnings: string[]
+  findings: PublicationFinding[]
+}) {
+  const findingsHeading = '\n\n### Findings'
+  const findingsIndex = input.expectedWithoutWarnings.indexOf(findingsHeading)
+  if (findingsIndex < 0) return undefined
+  const bodyPrefix = `${input.expectedWithoutWarnings.slice(0, findingsIndex)}\n\n### Warnings\n`
+  const bodySuffix = input.expectedWithoutWarnings.slice(findingsIndex)
+  if (!input.body.startsWith(bodyPrefix) || !input.body.endsWith(bodySuffix)) return undefined
+
+  const warningSection = input.body.slice(bodyPrefix.length, input.body.length - bodySuffix.length)
+  const fixedSection = input.fixedWarnings.map((warning) => `- ${warning}`).join('\n')
+  let dynamicSection = warningSection
+  if (fixedSection) {
+    if (!warningSection.startsWith(`${fixedSection}\n`)) return undefined
+    dynamicSection = warningSection.slice(fixedSection.length + 1)
+  }
+  return parseLegacyFallbackDynamicWarnings(dynamicSection, input.findings)
+}
+
+function parseLegacyFallbackDynamicWarnings(section: string, findings: PublicationFinding[]) {
+  const memo = new Map<string, string[] | null>()
+
+  const parseAt = (findingIndex: number, position: number): string[] | undefined => {
+    const key = `${findingIndex}:${position}`
+    const cached = memo.get(key)
+    if (cached !== undefined) return cached ?? undefined
+    if (findingIndex === findings.length) {
+      const result = position === section.length ? [] : undefined
+      memo.set(key, result ?? null)
+      return result
+    }
+
+    let warningStart = position
+    if (findingIndex > 0) {
+      if (section[warningStart] !== '\n') {
+        memo.set(key, null)
+        return undefined
+      }
+      warningStart += 1
+    }
+    const finding = findings[findingIndex]!.finding
+    const warningPrefix = `Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400`
+    const renderedPrefix = `- ${warningPrefix}`
+    if (!section.startsWith(renderedPrefix, warningStart)) {
+      memo.set(key, null)
+      return undefined
+    }
+    const suffixStart = warningStart + renderedPrefix.length
+    const candidates: Array<{ end: number; warning: string }> = []
+    if (section[suffixStart] === '.') {
+      candidates.push({ end: suffixStart + 1, warning: `${warningPrefix}.` })
+    }
+    if (section.startsWith(': ', suffixStart)) {
+      const detailStart = suffixStart + 2
+      const detailLimit = Math.min(section.length, detailStart + 240)
+      for (let terminal = detailStart + 1; terminal <= detailLimit; terminal += 1) {
+        if (section[terminal] !== '.') continue
+        const detail = section.slice(detailStart, terminal)
+        if (detail.trim() !== detail || detail.includes('\n- ')) continue
+        candidates.push({
+          end: terminal + 1,
+          warning: `${warningPrefix}: ${detail}.`,
+        })
+      }
+    }
+
+    for (const candidate of candidates) {
+      const remaining = parseAt(findingIndex + 1, candidate.end)
+      if (!remaining) continue
+      const result = [candidate.warning, ...remaining]
+      memo.set(key, result)
+      return result
+    }
+    memo.set(key, null)
+    return undefined
+  }
+
+  return parseAt(0, 0)
 }
 
 function findingCompleted(finding: PublicationFinding, completed: ReadonlySet<string>) {

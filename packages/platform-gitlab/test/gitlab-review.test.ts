@@ -21,6 +21,7 @@ import {
   parseReviewStageResult,
   parseGitLabWebhookEvent,
   publishGitLabReviewResult,
+  reconcileGitLabReviewPublicationMarkers,
   sliceGitLabReviewDiff,
   resolveGitLabReviewProjectProfile,
   renderGitLabReviewSliceEvidence,
@@ -2675,6 +2676,262 @@ describe('GitLab review foundation', () => {
     })).toBe(true)
   })
 
+  test('unions exact legacy summary subsets independently of note order', () => {
+    const runId = 'run-legacy-summary-union'
+    const findings: ReviewFinding[] = [{
+      title: 'Summary finding A',
+      body: 'Summary A body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 99,
+    }, {
+      title: 'Summary finding B',
+      body: 'Summary B body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 100,
+    }]
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const fallbackMarkers = findings.map((finding) => gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    const summaryA = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy split summary.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Summary finding A (src/app.ts:99)',
+      '',
+      'Summary A body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const summaryB = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy split summary.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 100 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **CRITICAL** Summary finding B (src/app.ts:100)',
+      '',
+      'Summary B body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+
+    const reconcile = (bodies: string[]) => reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      summary: 'Legacy split summary.',
+      findings,
+      manifest,
+      notes: bodies.map((body, index) => ({ id: index + 1, body })),
+      discussions: [],
+    })
+
+    expect(reconcile([summaryA, summaryB])).toEqual([summaryMarker, ...fallbackMarkers])
+    expect(reconcile([summaryB, summaryA])).toEqual([summaryMarker, ...fallbackMarkers])
+  })
+
+  test('deduplicates overlapping exact legacy summaries without crediting unrelated findings', () => {
+    const runId = 'run-legacy-summary-overlap'
+    const findings: ReviewFinding[] = [{
+      title: 'Summary finding A',
+      body: 'Summary A body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 99,
+    }, {
+      title: 'Summary finding B',
+      body: 'Summary B body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 100,
+    }]
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const fallbackMarkers = findings.map((finding) => gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    const summaryA = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy overlap summary.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Summary finding A (src/app.ts:99)',
+      '',
+      'Summary A body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const summaryAB = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy overlap summary.',
+      '',
+      'Findings: 2',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '- Inline fallback for src/app.ts: Line 100 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Summary finding A (src/app.ts:99)',
+      '',
+      'Summary A body.',
+      '',
+      '- **CRITICAL** Summary finding B (src/app.ts:100)',
+      '',
+      'Summary B body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const reconcile = (bodies: string[]) => reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      summary: 'Legacy overlap summary.',
+      findings,
+      manifest,
+      notes: bodies.map((body, index) => ({ id: index + 1, body })),
+      discussions: [],
+    })
+
+    expect(reconcile([summaryA, summaryA])).toEqual([summaryMarker, fallbackMarkers[0]])
+    expect(reconcile([summaryA, summaryAB, summaryA])).toEqual([summaryMarker, ...fallbackMarkers])
+  })
+
+  test('accepts only the exact historical fallback warning grammar and rendered body', () => {
+    const runId = 'run-legacy-fallback-exact'
+    const finding: ReviewFinding = {
+      title: 'Inline finding',
+      body: 'Historical fallback body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const legacyMarker = gitLabReviewPublicationMarker({ runId, kind: 'fallback' })
+    const findingMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    })
+    const dynamicWarning = '- Inline fallback for src/app.ts: GitLab API returned 400: {"message":"position is invalid"}.'
+    const validBody = [
+      '## Nine1bot Inline Publish Fallback',
+      '',
+      'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Existing stage warning.',
+      dynamicWarning,
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Inline finding (src/app.ts:2)',
+      '',
+      'Historical fallback body.',
+      '',
+      legacyMarker,
+    ].join('\n')
+    const reconcile = (body: string) => reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      summary: 'Legacy fallback summary.',
+      findings: [finding],
+      manifest,
+      warnings: ['Existing stage warning.'],
+      notes: [{ id: 1, body }],
+      discussions: [],
+    })
+
+    expect(reconcile(validBody)).toEqual([findingMarker])
+
+    const invalidBodies = [
+      validBody.replace(`${dynamicWarning}\n`, `${dynamicWarning.slice(0, -1)}\n`),
+      validBody.replace(`${dynamicWarning}\n`, `${dynamicWarning}\n- Unexpected warning.\n`),
+      validBody.replace(`${dynamicWarning}\n`, ''),
+      validBody.replace(`${dynamicWarning}\n`, `${dynamicWarning}\n${legacyMarker}\n`),
+      validBody.replace(dynamicWarning, `${dynamicWarning.slice(0, -1)}\n${legacyMarker}.`),
+      validBody.replace('Historical fallback body.', 'Edited fallback body.'),
+    ]
+    for (const body of invalidBodies) {
+      expect(() => reconcile(body)).toThrow('gitlab_review_publication_legacy_ambiguous')
+    }
+  })
+
   test('lists only bounded comment DTOs through the review endpoints', async () => {
     const urls: string[] = []
     const client = new GitLabApiClient({
@@ -2797,6 +3054,99 @@ describe('GitLab review foundation', () => {
     expect(guardCalls).toBe(2)
     expect(urls).toHaveLength(1)
     expect(new URL(urls[0]!).pathname).toBe('/api/v4/projects/3/merge_requests/2/notes')
+  })
+
+  test('lets claim loss during redirect-limit response cancellation override the redirect error', async () => {
+    const cancellationStarted = deferred()
+    const releaseCancellation = deferred()
+    const urls: string[] = []
+    let ownerIsCurrent = true
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        urls.push(String(url))
+        const responseNumber = urls.length
+        return new Response(new ReadableStream<Uint8Array>({
+          async cancel() {
+            if (responseNumber !== 4) return
+            cancellationStarted.resolve()
+            await releaseCancellation.promise
+          },
+        }), {
+          status: 302,
+          headers: { location: `/redirect-${responseNumber}` },
+        })
+      }) as typeof fetch,
+    })
+
+    const listing = client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (!ownerIsCurrent) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )
+
+    await cancellationStarted.promise
+    ownerIsCurrent = false
+    releaseCancellation.resolve()
+
+    await expect(listing).rejects.toThrow('review_run_publish_claim_lost')
+    expect(guardCalls).toBe(16)
+    expect(urls.map((url) => new URL(url).pathname)).toEqual([
+      '/api/v4/projects/3/merge_requests/2/notes',
+      '/redirect-1',
+      '/redirect-2',
+      '/redirect-3',
+    ])
+  })
+
+  test('lets claim loss during cross-authority response cancellation override the redirect error', async () => {
+    const cancellationStarted = deferred()
+    const releaseCancellation = deferred()
+    const urls: string[] = []
+    let ownerIsCurrent = true
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        urls.push(String(url))
+        return new Response(new ReadableStream<Uint8Array>({
+          async cancel() {
+            cancellationStarted.resolve()
+            await releaseCancellation.promise
+          },
+        }), {
+          status: 302,
+          headers: { location: 'https://other.example.com/redirected-notes' },
+        })
+      }) as typeof fetch,
+    })
+
+    const listing = client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (!ownerIsCurrent) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )
+
+    await cancellationStarted.promise
+    ownerIsCurrent = false
+    releaseCancellation.resolve()
+
+    await expect(listing).rejects.toThrow('review_run_publish_claim_lost')
+    expect(guardCalls).toBe(4)
+    expect(urls).toEqual([
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/notes?per_page=100&page=1',
+    ])
   })
 
   test('guards successful response consumption before requesting a later page', async () => {
