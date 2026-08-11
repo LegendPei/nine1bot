@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { createHash } from 'crypto'
 import { mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import {
+  gitLabReviewFindingKey,
+  gitLabReviewPublicationMarker,
+  parseReviewStageResult,
+} from '@nine1bot/platform-gitlab/review'
 import {
   buildGitLabReviewRuntimePrompt,
   extractGitLabReviewStageResultFromRuntimeText,
@@ -72,6 +78,114 @@ const platforms = {
 }
 
 const tempDirs: string[] = []
+
+function publishingPlatforms() {
+  return {
+    gitlab: {
+      enabled: true,
+      settings: {
+        ...platforms.gitlab.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      },
+    },
+  }
+}
+
+function createPublishableReviewRun(input: {
+  objectType?: 'mr' | 'commit'
+  headSha?: string
+}) {
+  const objectType = input.objectType ?? 'mr'
+  const headSha = input.headSha ?? 'publication-head'
+  const trigger = objectType === 'mr'
+    ? {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'mr' as const,
+        objectIid: 10,
+        headSha,
+        mode: 'webhook' as const,
+      }
+    : {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'commit' as const,
+        commitSha: headSha,
+        headSha,
+        mode: 'webhook' as const,
+      }
+  return ReviewRunStore.create({
+    platform: 'gitlab',
+    status: 'running',
+    trigger,
+    context: {
+      trigger,
+      idempotencyKey: `publication:${objectType}:${headSha}`,
+      diff: {
+        files: [{
+          oldPath: 'src/app.ts',
+          newPath: 'src/app.ts',
+          diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+          added: false,
+          renamed: false,
+          deleted: false,
+          generated: false,
+        }],
+        skipped: [],
+        blocked: false,
+        diffRefs: objectType === 'mr'
+          ? { baseSha: 'base', startSha: 'start', headSha }
+          : undefined,
+        stats: {
+          fileCount: 1,
+          includedFileCount: 1,
+          skippedFileCount: 0,
+          includedBytes: 42,
+          truncated: false,
+        },
+      },
+      contextBlocks: [],
+    },
+  })
+}
+
+function publicationStageResult(summary = 'Publication review complete.') {
+  return {
+    stage: 'verification',
+    status: 'ok' as const,
+    summary,
+    findings: [{
+      title: 'Changed line',
+      body: 'Inline body',
+      severity: 'major' as const,
+      file: 'src/app.ts',
+      newLine: 2,
+    }],
+  }
+}
+
+function publicationPayloadHash(stageResult: unknown) {
+  return createHash('sha256')
+    .update(JSON.stringify(parseReviewStageResult(stageResult)))
+    .digest('hex')
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+function requestMethod(init?: RequestInit) {
+  return (init?.method ?? 'GET').toUpperCase()
+}
+
+function requestFormField(init: RequestInit | undefined, field: string) {
+  return new URLSearchParams(String(init?.body ?? '')).get(field)
+}
 
 describe('GitLab review controller', () => {
   beforeEach(async () => {
@@ -1766,6 +1880,387 @@ describe('GitLab review controller', () => {
     expect(calls).toEqual([])
   })
 
+  test('persists a publication claim before POST and rejects a concurrent publisher', async () => {
+    const run = createPublishableReviewRun({ headSha: 'concurrent-publication-head' })
+    const stageResult = publicationStageResult()
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const firstSummaryStarted = deferred()
+    const releaseFirstSummary = deferred()
+    let summaryPosts = 0
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      calls.push({ url: value, init })
+      if (value.endsWith('/merge_requests/10') && requestMethod(init) === 'GET') {
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'concurrent-publication-head' } })
+      }
+      if (value.includes('/notes') && requestMethod(init) === 'POST') {
+        summaryPosts += 1
+        if (summaryPosts === 1) {
+          firstSummaryStarted.resolve()
+          await releaseFirstSummary.promise
+        }
+        return Response.json({ id: summaryPosts })
+      }
+      if (value.includes('/discussions') && requestMethod(init) === 'POST') {
+        return Response.json({ id: 10 })
+      }
+      throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+    }) as typeof fetch
+
+    const firstPublishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'publisher-a',
+    })
+
+    await firstSummaryStarted.promise
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'publishing',
+      ownerId: 'publisher-a',
+      claimId: expect.any(String),
+      payloadHash: publicationPayloadHash(stageResult),
+    })
+
+    const concurrent = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'publisher-a',
+    })
+    releaseFirstSummary.resolve()
+    const first = await firstPublishing
+
+    expect(concurrent).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_in_progress',
+    })
+    expect(first).toMatchObject({ published: true, summaryPosted: true, inlinePosted: 1 })
+    const posts = calls.filter((call) => requestMethod(call.init) === 'POST')
+    expect(posts).toHaveLength(2)
+    expect(posts.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
+    ])
+    expect(requestFormField(posts[0]?.init, 'body')).toContain(
+      gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' }),
+    )
+    expect(requestFormField(posts[1]?.init, 'body')).toContain(gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    }))
+  })
+
+  test('resumes the same payload after an inline 5xx without duplicating its summary', async () => {
+    const run = createPublishableReviewRun({ headSha: 'partial-publication-head' })
+    const stageResult = publicationStageResult('Partial publication review.')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const postedBodies: Array<{ url: string; body: string }> = []
+    let summaryBody = ''
+    let discussionPosts = 0
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      const method = requestMethod(init)
+      calls.push({ url: value, init })
+      if (value.endsWith('/merge_requests/10') && method === 'GET') {
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'partial-publication-head' } })
+      }
+      if (value.includes('/notes') && method === 'GET') {
+        return Response.json([{ id: 1, body: summaryBody }])
+      }
+      if (value.includes('/discussions') && method === 'GET') return Response.json([])
+      if (value.includes('/notes') && method === 'POST') {
+        const body = requestFormField(init, 'body') ?? ''
+        postedBodies.push({ url: value, body })
+        if (!summaryBody) summaryBody = body
+        return Response.json({ id: postedBodies.length })
+      }
+      if (value.includes('/discussions') && method === 'POST') {
+        const body = requestFormField(init, 'body') ?? ''
+        postedBodies.push({ url: value, body })
+        discussionPosts += 1
+        if (discussionPosts === 1) {
+          return new Response('upstream failure', { status: 503, statusText: 'Service Unavailable' })
+        }
+        return Response.json({ id: 20 })
+      }
+      throw new Error(`unexpected request: ${method} ${value}`)
+    }) as typeof fetch
+
+    const first = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'publisher-a',
+    })
+
+    expect(first).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_api_publish_result_failed:503:Service Unavailable',
+    })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      ownerId: undefined,
+      claimId: undefined,
+      completedMarkers: [summaryMarker],
+    })
+
+    const resumed = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'publisher-a',
+    })
+
+    expect(resumed).toMatchObject({
+      published: true,
+      summaryPosted: false,
+      inlinePosted: 1,
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(3)
+    expect(postedBodies.filter((post) => post.url.includes('/notes'))).toHaveLength(1)
+    const inlineBodies = postedBodies.filter((post) => post.url.includes('/discussions')).map((post) => post.body)
+    expect(inlineBodies).toHaveLength(2)
+    const inlineMarker = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    expect(inlineBodies).toEqual([expect.stringContaining(inlineMarker), expect.stringContaining(inlineMarker)])
+    expect(calls.filter((call) => requestMethod(call.init) === 'GET' && call.url.includes('/notes'))).toHaveLength(1)
+    expect(calls.filter((call) => requestMethod(call.init) === 'GET' && call.url.includes('/discussions'))).toHaveLength(1)
+  })
+
+  test('keeps a resumed publication partial with zero POSTs when remote reconciliation fails', async () => {
+    const run = createPublishableReviewRun({ headSha: 'reconcile-failure-head' })
+    const stageResult = publicationStageResult('Reconciliation failure review.')
+    const payloadHash = publicationPayloadHash(stageResult)
+    const claim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!claim.ok) throw new Error(`expected initial claim: ${claim.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: claim.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'simulated_partial',
+    })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'reconcile-failure-head' } })
+        }
+        if (value.includes('/notes')) {
+          return new Response('reconciliation unavailable', { status: 502, statusText: 'Bad Gateway' })
+        }
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_api_publish_reconcile_failed:502:Bad Gateway',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes?per_page=100&page=1',
+    ])
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      ownerId: undefined,
+      claimId: undefined,
+      payloadHash,
+      error: 'gitlab_api_publish_reconcile_failed:502:Bad Gateway',
+    })
+  })
+
+  test('rejects a different payload after partial publication without reconciling or posting', async () => {
+    const run = createPublishableReviewRun({ headSha: 'payload-mismatch-head' })
+    const original = publicationStageResult('Original payload.')
+    const payloadHash = publicationPayloadHash(original)
+    const claim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!claim.ok) throw new Error(`expected initial claim: ${claim.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: claim.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'simulated_partial',
+    })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: publicationStageResult('Changed payload.'),
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init })
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'payload-mismatch-head' } })
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_payload_mismatch',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      payloadHash,
+      completedMarkers: [],
+    })
+  })
+
+  test('does not publish a configuration-rejected attempt after its retry lifecycle has ended', async () => {
+    const run = createPublishableReviewRun({ headSha: 'configuration-rejected-head' })
+    ReviewRunStore.update(run.id, {
+      status: 'rejected',
+      error: 'project_binding_missing',
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    const calls: string[] = []
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: publicationStageResult(),
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url) => {
+        calls.push(String(url))
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'configuration-rejected-head' } })
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'project_binding_missing',
+    })
+    expect(calls).toEqual([])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'rejected',
+      error: 'project_binding_missing',
+      rejectionKind: 'configuration',
+      recoverable: true,
+      publication: undefined,
+    })
+  })
+
+  test('recovers an abandoned owner from commit notes and rejects stale owner mutations', async () => {
+    const run = createPublishableReviewRun({ objectType: 'commit', headSha: 'abandoned-commit' })
+    const stageResult = { ...publicationStageResult('Abandoned commit review.'), findings: [] }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const ownerAClaim = ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-a',
+    })
+    if (!ownerAClaim.ok) throw new Error(`expected owner A claim: ${ownerAClaim.error}`)
+
+    ReviewRunStore.reloadForTesting()
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'publishing',
+      claimId: ownerAClaim.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+    })
+
+    const reconciliationStarted = deferred()
+    const releaseReconciliation = deferred()
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const publishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.includes('/repository/commits/abandoned-commit/comments') && requestMethod(init) === 'GET') {
+          reconciliationStarted.resolve()
+          await releaseReconciliation.promise
+          return Response.json([{ id: 1, note: `existing summary\n\n${summaryMarker}` }])
+        }
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    await reconciliationStarted.promise
+    const ownerBPublication = ReviewRunStore.get(run.id)?.publication
+    expect(ownerBPublication).toMatchObject({
+      state: 'publishing',
+      ownerId: 'publisher-b',
+      payloadHash,
+    })
+    expect(ownerBPublication?.claimId).not.toBe(ownerAClaim.claimId)
+
+    const staleIdentity = {
+      runId: run.id,
+      claimId: ownerAClaim.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+    }
+    expect(ReviewRunStore.recordPublicationMarker({ ...staleIdentity, marker: 'stale-marker' })).toBe(false)
+    expect(ReviewRunStore.failPublication({ ...staleIdentity, error: 'stale-failure' })).toBe(false)
+    expect(ReviewRunStore.completePublication({
+      ...staleIdentity,
+      status: 'failed',
+      warnings: ['stale-completion'],
+    })).toBe(false)
+
+    releaseReconciliation.resolve()
+    await expect(publishing).resolves.toMatchObject({
+      published: true,
+      summaryPosted: false,
+      inlinePosted: 0,
+    })
+    expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/repository/commits/abandoned-commit/comments?per_page=100&page=1',
+    ])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'succeeded',
+      publishedAt: expect.any(Number),
+      publication: {
+        state: 'published',
+        ownerId: undefined,
+        claimId: undefined,
+        payloadHash,
+        completedMarkers: [summaryMarker],
+        error: undefined,
+      },
+    })
+  })
+
   test('publishes runtime stage results through GitLab publisher', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -1950,6 +2445,24 @@ describe('GitLab review controller', () => {
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
     ])
+
+    calls.length = 0
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: { stage: 'verification', status: 'ok', summary: 'Replay.', findings: [] },
+    })).resolves.toEqual({
+      published: false,
+      runId: accepted.runId,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(calls).toEqual([])
   })
 
   test('rejects an MR publish when bounded metadata omits the head SHA', async () => {

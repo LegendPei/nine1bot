@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
@@ -8,6 +9,8 @@ import {
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
   gitLabAuthorityFromUrl,
+  gitLabReviewFindingKey,
+  gitLabReviewPublicationMarker,
   isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
@@ -16,6 +19,7 @@ import {
   buildGitLabReviewDiffEvidence,
   validateGitLabWebhookToken,
   type GitLabRawChangesResponse,
+  type GitLabPublishedComment,
   type GitLabReviewSecretRef,
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
@@ -25,6 +29,7 @@ import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
 export const gitLabReviewRuntimeSkillIds = gitLabReviewSkillIds
+const gitLabReviewPublisherOwnerId = randomUUID()
 
 export type GitLabReviewWebhookInput = {
   payload: unknown
@@ -619,11 +624,15 @@ export async function publishGitLabReviewRunResult(input: {
   platforms: PlatformManagerConfig
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
+  publisherOwnerId?: string
 }): Promise<PublishGitLabReviewRunResult> {
   const run = ReviewRunStore.get(input.runId)
   if (!run) return { published: false, runId: input.runId, error: 'review_run_not_found' }
-  if (run.publishedAt) {
+  if (run.publishedAt || run.publication?.state === 'published') {
     return { published: false, runId: input.runId, error: 'review_run_already_published' }
+  }
+  if (run.status === 'rejected') {
+    return { published: false, runId: input.runId, error: run.error ?? 'review_run_rejected' }
   }
   const context = run.context as ReturnType<typeof buildGitLabReviewContext> | undefined
   const trigger = run.trigger as GitLabReviewTrigger | undefined
@@ -673,7 +682,6 @@ export async function publishGitLabReviewRunResult(input: {
   }
 
   const client = new GitLabApiClient({ baseUrl: apiBaseUrl.baseUrl, token, fetch: input.fetch })
-  let published: Awaited<ReturnType<typeof publishGitLabReviewResult>>
   try {
     if (trigger.objectType === 'mr') {
       const mergeRequest = await client.getMergeRequest(trigger.projectId, objectId)
@@ -688,8 +696,46 @@ export async function publishGitLabReviewRunResult(input: {
         return { published: false, runId: input.runId, error: headError }
       }
     }
+  } catch (error) {
+    const message = gitLabApiFailureMessage('publish_result', error)
+    ReviewRunStore.update(input.runId, { status: 'failed', error: message })
+    return { published: false, runId: input.runId, error: message }
+  }
+
+  const payloadHash = reviewStageResultHash(parsed)
+  const ownerId = input.publisherOwnerId ?? gitLabReviewPublisherOwnerId
+  const claim = ReviewRunStore.claimPublication({ runId: input.runId, payloadHash, ownerId })
+  if (!claim.ok) return { published: false, runId: input.runId, error: claim.error }
+  const claimIdentity = {
+    runId: input.runId,
+    claimId: claim.claimId,
+    ownerId,
+    payloadHash,
+  }
+  const completedMarkers = new Set(claim.completedMarkers)
+
+  if (claim.resume) {
+    try {
+      await reconcileGitLabReviewPublication({
+        client,
+        trigger,
+        objectId,
+        parsed,
+        claimIdentity,
+        completedMarkers,
+      })
+    } catch (error) {
+      const message = publicationFailureMessage('publish_reconcile', error)
+      ReviewRunStore.failPublication({ ...claimIdentity, error: message })
+      return { published: false, runId: input.runId, error: message }
+    }
+  }
+
+  let published: Awaited<ReturnType<typeof publishGitLabReviewResult>>
+  try {
+    assertPublicationClaimCurrent(claimIdentity)
     published = await publishGitLabReviewResult({
-      client,
+      client: guardedPublicationClient(client, claimIdentity),
       projectId: trigger.projectId,
       objectType: trigger.objectType,
       objectId,
@@ -698,33 +744,36 @@ export async function publishGitLabReviewRunResult(input: {
       findings: parsed.findings,
       inlineComments: settings.inlineComments,
       warnings: parsed.nextActions,
+      publication: {
+        runId: input.runId,
+        completedMarkers,
+        onMarkerCompleted(marker) {
+          if (!ReviewRunStore.recordPublicationMarker({ ...claimIdentity, marker })) {
+            throw new PublicationClaimLostError()
+          }
+          completedMarkers.add(marker)
+        },
+      },
     })
+    assertPublicationClaimCurrent(claimIdentity)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: input.runId, kind: 'summary' })
+    if (!completedMarkers.has(summaryMarker)) throw new Error('review_run_publication_incomplete')
   } catch (error) {
-    const message = gitLabApiFailureMessage('publish_result', error)
-    ReviewRunStore.update(input.runId, {
-      status: 'failed',
-      error: message,
-    })
-    await reportGitLabReviewRunFailure({
-      runId: input.runId,
-      platforms: input.platforms,
-      secrets: input.secrets,
-      fetch: input.fetch,
-      phase: 'publish_result',
-      error: message,
-    })
+    const message = publicationFailureMessage('publish_result', error)
+    ReviewRunStore.failPublication({ ...claimIdentity, error: message })
     return {
       published: false,
       runId: input.runId,
       error: message,
     }
   }
-  ReviewRunStore.update(input.runId, {
+  if (!ReviewRunStore.completePublication({
+    ...claimIdentity,
     status: reviewRunStatusForStageResult(parsed.status),
-    error: undefined,
-    publishedAt: Date.now(),
     warnings: published.warnings,
-  })
+  })) {
+    return { published: false, runId: input.runId, error: 'review_run_publish_claim_lost' }
+  }
 
   return {
     published: true,
@@ -1037,6 +1086,104 @@ async function maybeWriteBlockedComment(input: {
   } catch (error) {
     return gitLabApiFailureMessage('blocked_comment', error)
   }
+}
+
+export function reviewStageResultHash(parsed: ReturnType<typeof parseReviewStageResult>) {
+  return createHash('sha256').update(JSON.stringify(parsed)).digest('hex')
+}
+
+class PublicationClaimLostError extends Error {
+  constructor() {
+    super('review_run_publish_claim_lost')
+  }
+}
+
+function assertPublicationClaimCurrent(identity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0]) {
+  if (!ReviewRunStore.isPublicationClaimCurrent(identity)) throw new PublicationClaimLostError()
+}
+
+function guardedPublicationClient(
+  client: Pick<GitLabApiClient, 'createNote' | 'createDiscussion'>,
+  identity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0],
+) {
+  return {
+    async createNote(input: Parameters<typeof client.createNote>[0]) {
+      assertPublicationClaimCurrent(identity)
+      try {
+        return await client.createNote(input)
+      } finally {
+        assertPublicationClaimCurrent(identity)
+      }
+    },
+    async createDiscussion(input: Parameters<typeof client.createDiscussion>[0]) {
+      assertPublicationClaimCurrent(identity)
+      try {
+        return await client.createDiscussion(input)
+      } finally {
+        assertPublicationClaimCurrent(identity)
+      }
+    },
+  }
+}
+
+async function reconcileGitLabReviewPublication(input: {
+  client: GitLabApiClient
+  trigger: GitLabReviewTrigger
+  objectId: string | number
+  parsed: ReturnType<typeof parseReviewStageResult>
+  claimIdentity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0]
+  completedMarkers: Set<string>
+}) {
+  const resource = input.trigger.objectType === 'mr' ? 'merge_requests' : 'repository/commits'
+  assertPublicationClaimCurrent(input.claimIdentity)
+  const notes = await input.client.listNotes({
+    projectId: input.trigger.projectId,
+    resource,
+    resourceId: input.objectId,
+  })
+  assertPublicationClaimCurrent(input.claimIdentity)
+
+  const summaryMarker = gitLabReviewPublicationMarker({ runId: input.claimIdentity.runId, kind: 'summary' })
+  const noteMarkers = input.trigger.objectType === 'commit'
+    ? [summaryMarker]
+    : [
+        summaryMarker,
+        gitLabReviewPublicationMarker({ runId: input.claimIdentity.runId, kind: 'fallback' }),
+      ]
+  const remoteMarkers = markersInPublishedComments(notes, noteMarkers)
+
+  if (input.trigger.objectType === 'mr') {
+    assertPublicationClaimCurrent(input.claimIdentity)
+    const discussions = await input.client.listDiscussions({
+      projectId: input.trigger.projectId,
+      resourceId: input.objectId,
+    })
+    assertPublicationClaimCurrent(input.claimIdentity)
+    const inlineMarkers = input.parsed.findings.map((finding) => gitLabReviewPublicationMarker({
+      runId: input.claimIdentity.runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    remoteMarkers.push(...markersInPublishedComments(discussions, inlineMarkers))
+  }
+
+  for (const marker of new Set(remoteMarkers)) {
+    if (input.completedMarkers.has(marker)) continue
+    if (!ReviewRunStore.recordPublicationMarker({ ...input.claimIdentity, marker })) {
+      throw new PublicationClaimLostError()
+    }
+    input.completedMarkers.add(marker)
+  }
+}
+
+function markersInPublishedComments(comments: GitLabPublishedComment[], markers: string[]) {
+  return markers.filter((marker) => comments.some((comment) => comment.body.includes(marker)))
+}
+
+function publicationFailureMessage(operation: string, error: unknown) {
+  return error instanceof PublicationClaimLostError
+    ? error.message
+    : gitLabApiFailureMessage(operation, error)
 }
 
 function gitLabApiClientForHost(input: {

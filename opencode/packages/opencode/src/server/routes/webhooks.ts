@@ -682,7 +682,7 @@ export function gitLabReviewRuntimePatch(
   run: ReviewRunRecord | undefined,
   patch: Parameters<typeof ReviewRunStore.update>[1],
 ) {
-  if (!run || run.status === "rejected") return undefined
+  if (!run || run.status === "rejected" || run.publication) return undefined
   return patch
 }
 
@@ -781,7 +781,13 @@ export function gitLabReviewRuntimeFailure(
 export function gitLabReviewPublishStatus(error: string | undefined) {
   if (!error) return 400
   if (error === "review_run_not_found") return 404
-  if (error === "review_run_already_published" || error === "review_run_already_active") return 409
+  if (
+    error === "review_run_already_published"
+    || error === "review_run_already_active"
+    || error === "review_run_publish_in_progress"
+    || error === "review_run_publish_payload_mismatch"
+    || error === "review_run_publish_claim_lost"
+  ) return 409
   if (error.startsWith("gitlab_api_")) return 502
   return 400
 }

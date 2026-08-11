@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDataDir } from '../config/loader'
-import type { GitLabCiPipeline, GitLabReviewProjectSnapshot } from '@nine1bot/platform-gitlab/review'
+import {
+  gitLabReviewPublicationMarker,
+  type GitLabCiPipeline,
+  type GitLabReviewProjectSnapshot,
+} from '@nine1bot/platform-gitlab/review'
 
 export type ReviewRunStatus = 'accepted' | 'rejected' | 'blocked' | 'running' | 'succeeded' | 'failed'
 
@@ -13,6 +17,36 @@ export type ReviewRunCiSummary = {
   queryCount?: number
   jobLogReadCount?: number
   queriedJobIds?: number[]
+}
+
+export type ReviewRunPublication = {
+  state: 'publishing' | 'partial' | 'published'
+  claimId?: string
+  ownerId?: string
+  payloadHash: string
+  startedAt?: number
+  updatedAt: number
+  summaryMarker: string
+  completedMarkers: string[]
+  error?: string
+}
+
+export type PublicationClaimResult =
+  | { ok: true; claimId: string; resume: boolean; completedMarkers: string[] }
+  | {
+      ok: false
+      error:
+        | 'review_run_already_published'
+        | 'review_run_publish_in_progress'
+        | 'review_run_publish_payload_mismatch'
+        | 'review_run_not_found'
+    }
+
+export type PublicationClaimIdentity = {
+  runId: string
+  claimId: string
+  ownerId: string
+  payloadHash: string
 }
 
 export type ReviewRunRecord = {
@@ -34,6 +68,7 @@ export type ReviewRunRecord = {
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number
+  publication?: ReviewRunPublication
   failureNotifiedAt?: number
   retryCount?: number
   lastRetryAt?: number
@@ -88,32 +123,32 @@ export namespace ReviewRunStore {
     const run = createRecord(input)
     runs.set(run.id, run)
     save()
-    return { ...run }
+    return copyReviewRunRecord(run)
   }
 
   export function findByIdempotencyKey(idempotencyKey: string): ReviewRunRecord | undefined {
     load()
     const matches = [...runs.values()].filter((run) => run.idempotencyKey === idempotencyKey)
     const latest = matches.sort(compareLatestAttemptFirst)[0]
-    return latest ? { ...latest } : undefined
+    return latest ? copyReviewRunRecord(latest) : undefined
   }
 
   export function findLatestByTriggerKey(triggerKey: string): ReviewRunRecord | undefined {
     load()
     const latest = findLatestByTriggerKeyInternal(triggerKey)
-    return latest ? { ...latest } : undefined
+    return latest ? copyReviewRunRecord(latest) : undefined
   }
 
   export function findBySessionId(sessionId: string): ReviewRunRecord | undefined {
     load()
     const matches = [...runs.values()].filter((run) => run.sessionId === sessionId)
-    return matches.length === 1 ? { ...matches[0] } : undefined
+    return matches.length === 1 ? copyReviewRunRecord(matches[0]!) : undefined
   }
 
   export function get(id: string): ReviewRunRecord | undefined {
     load()
     const run = runs.get(id)
-    return run ? { ...run } : undefined
+    return run ? copyReviewRunRecord(run) : undefined
   }
 
   export function update(id: string, patch: Partial<Omit<ReviewRunRecord, 'id' | 'createdAt'>>): ReviewRunRecord | undefined {
@@ -127,7 +162,7 @@ export namespace ReviewRunStore {
     }
     runs.set(id, next)
     save()
-    return { ...next }
+    return copyReviewRunRecord(next)
   }
 
   export function updateIfCurrent(
@@ -143,6 +178,131 @@ export namespace ReviewRunStore {
       ...existing,
       ...patch,
       updatedAt: Date.now(),
+    })
+    save()
+    return true
+  }
+
+  export function claimPublication(input: {
+    runId: string
+    payloadHash: string
+    ownerId: string
+  }): PublicationClaimResult {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing) return { ok: false, error: 'review_run_not_found' }
+    const publication = existing.publication
+    if (existing.publishedAt || publication?.state === 'published') {
+      return { ok: false, error: 'review_run_already_published' }
+    }
+    if (publication && publication.payloadHash !== input.payloadHash) {
+      return { ok: false, error: 'review_run_publish_payload_mismatch' }
+    }
+    if (publication?.state === 'publishing' && publication.ownerId === input.ownerId) {
+      return { ok: false, error: 'review_run_publish_in_progress' }
+    }
+
+    const now = Date.now()
+    const claimId = randomUUID()
+    const completedMarkers = publication ? [...publication.completedMarkers] : []
+    runs.set(existing.id, {
+      ...existing,
+      updatedAt: now,
+      publication: {
+        state: 'publishing',
+        claimId,
+        ownerId: input.ownerId,
+        payloadHash: input.payloadHash,
+        startedAt: publication?.startedAt ?? now,
+        updatedAt: now,
+        summaryMarker: publication?.summaryMarker ?? gitLabReviewPublicationMarker({
+          runId: existing.id,
+          kind: 'summary',
+        }),
+        completedMarkers,
+        error: undefined,
+      },
+    })
+    save()
+    return {
+      ok: true,
+      claimId,
+      resume: publication !== undefined,
+      completedMarkers,
+    }
+  }
+
+  export function isPublicationClaimCurrent(input: PublicationClaimIdentity): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    return Boolean(existing && publicationClaimMatches(existing, input))
+  }
+
+  export function recordPublicationMarker(input: PublicationClaimIdentity & { marker: string }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input)) return false
+    if (existing.publication!.completedMarkers.includes(input.marker)) return true
+    const now = Date.now()
+    runs.set(existing.id, {
+      ...existing,
+      updatedAt: now,
+      publication: {
+        ...existing.publication!,
+        updatedAt: now,
+        completedMarkers: [...existing.publication!.completedMarkers, input.marker],
+      },
+    })
+    save()
+    return true
+  }
+
+  export function failPublication(input: PublicationClaimIdentity & { error: string }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input)) return false
+    const now = Date.now()
+    runs.set(existing.id, {
+      ...existing,
+      status: 'failed',
+      error: input.error,
+      updatedAt: now,
+      publication: {
+        ...existing.publication!,
+        state: 'partial',
+        claimId: undefined,
+        ownerId: undefined,
+        updatedAt: now,
+        error: input.error,
+      },
+    })
+    save()
+    return true
+  }
+
+  export function completePublication(input: PublicationClaimIdentity & {
+    status: Extract<ReviewRunStatus, 'blocked' | 'succeeded' | 'failed'>
+    warnings: string[]
+  }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input)) return false
+    const now = Date.now()
+    runs.set(existing.id, {
+      ...existing,
+      status: input.status,
+      error: undefined,
+      warnings: [...input.warnings],
+      publishedAt: now,
+      updatedAt: now,
+      publication: {
+        ...existing.publication!,
+        state: 'published',
+        claimId: undefined,
+        ownerId: undefined,
+        updatedAt: now,
+        error: undefined,
+      },
     })
     save()
     return true
@@ -167,14 +327,14 @@ export namespace ReviewRunStore {
     })
     runs.set(run.id, run)
     save()
-    return { ...run }
+    return copyReviewRunRecord(run)
   }
 
   export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
     load()
     const sorted = [...runs.values()].sort(compareNewestFirst)
     const limit = options.limit && Number.isFinite(options.limit) && options.limit > 0 ? Math.floor(options.limit) : undefined
-    return (limit ? sorted.slice(0, limit) : sorted).map((run) => ({ ...run }))
+    return (limit ? sorted.slice(0, limit) : sorted).map(copyReviewRunRecord)
   }
 
   export function clearForTesting() {
@@ -227,6 +387,26 @@ function findLatestByTriggerKeyInternal(triggerKey: string) {
   return [...runs.values()]
     .filter((run) => run.triggerKey === triggerKey)
     .sort(compareLatestAttemptFirst)[0]
+}
+
+function publicationClaimMatches(run: ReviewRunRecord, identity: PublicationClaimIdentity) {
+  const publication = run.publication
+  return publication?.state === 'publishing'
+    && publication.claimId === identity.claimId
+    && publication.ownerId === identity.ownerId
+    && publication.payloadHash === identity.payloadHash
+}
+
+function copyReviewRunRecord(run: ReviewRunRecord): ReviewRunRecord {
+  return {
+    ...run,
+    publication: run.publication
+      ? {
+          ...run.publication,
+          completedMarkers: [...run.publication.completedMarkers],
+        }
+      : undefined,
+  }
 }
 
 function load() {

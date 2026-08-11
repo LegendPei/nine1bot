@@ -55,6 +55,33 @@ describe("webhook status URL selection", () => {
     })).toBeUndefined()
   })
 
+  test("preserves publication-owned states across late runtime callbacks", () => {
+    const patch = { status: "failed" as const, error: "late_runtime_failure" }
+    const run = {
+      id: "run_publication",
+      status: "failed",
+      publication: {
+        state: "partial",
+        payloadHash: "payload-a",
+        summaryMarker: "summary-marker",
+        completedMarkers: ["summary-marker"],
+        updatedAt: 42,
+      },
+    } as any
+
+    expect(gitLabReviewRuntimePatch(run, patch)).toBeUndefined()
+    expect(gitLabReviewRuntimePatch({
+      ...run,
+      status: "running",
+      publication: { ...run.publication, state: "publishing", claimId: "claim-b", ownerId: "owner-b" },
+    }, patch)).toBeUndefined()
+    expect(gitLabReviewRuntimePatch({
+      ...run,
+      status: "succeeded",
+      publication: { ...run.publication, state: "published" },
+    }, patch)).toBeUndefined()
+  })
+
   test("normalizes runtime failures without exposing exception text", () => {
     expect(gitLabReviewRuntimeFailure("runtime_start", new Error("PRIVATE-TOKEN=secret at C:\\private\\config")))
       .toBe("gitlab_review_runtime_start_failed")
@@ -182,6 +209,8 @@ describe("webhook status URL selection", () => {
   test("maps GitLab review publish failures to specific HTTP statuses", () => {
     expect(gitLabReviewPublishStatus("review_run_not_found")).toBe(404)
     expect(gitLabReviewPublishStatus("review_run_already_published")).toBe(409)
+    expect(gitLabReviewPublishStatus("review_run_publish_in_progress")).toBe(409)
+    expect(gitLabReviewPublishStatus("review_run_publish_payload_mismatch")).toBe(409)
     expect(gitLabReviewPublishStatus("review_run_already_active")).toBe(409)
     expect(gitLabReviewPublishStatus("gitlab_api_publish_failed:403:Forbidden")).toBe(502)
     expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)
