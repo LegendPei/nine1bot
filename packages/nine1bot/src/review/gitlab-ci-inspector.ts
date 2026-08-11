@@ -29,6 +29,8 @@ type GitLabCiTarget = {
   mrUrl?: string
 }
 
+const MAX_TOOL_OUTPUT_BYTES = 32 * 1024
+
 export type GitLabCiToolOutput =
   | {
       ok: true
@@ -114,6 +116,11 @@ export async function inspectGitLabCiForSession(input: {
     return failure(input.request.action, 'ci_token_missing')
   }
 
+  if (input.request.action === 'read_job_log') {
+    const reservationFailure = reserveJobLogRead(identity, input.request.jobId)
+    if (reservationFailure) return failure(input.request.action, reservationFailure)
+  }
+
   const rawClient = new GitLabApiClient({
     baseUrl: resolvedBaseUrl.baseUrl,
     token,
@@ -179,13 +186,7 @@ export async function inspectGitLabCiForSession(input: {
   const result = await readGitLabCiJobLog({
     client: {
       getPipelineJobs: client.getPipelineJobs,
-      async getJobTrace(...args) {
-        const lifecycleFailure = reviewRunLifecycleFailure(identity, input.signal)
-        if (lifecycleFailure) stopCiRequest(requestState, lifecycleFailure)
-        const reservationFailure = reserveJobLogRead(identity, jobId)
-        if (reservationFailure) stopCiRequest(requestState, reservationFailure)
-        return await client.getJobTrace(...args)
-      },
+      getJobTrace: client.getJobTrace,
     },
     projectId: target.projectId,
     pipelineId: pipelineResult.pipeline.id,
@@ -226,7 +227,12 @@ function targetForRun(run: ReviewRunRecord): GitLabCiTarget | undefined {
   if (!trigger || trigger.objectType !== 'mr') return undefined
   if (typeof trigger.host !== 'string' || !normalizeGitLabAuthority(trigger.host)) return undefined
   if (!isId(trigger.projectId) || !isId(trigger.objectIid)) return undefined
-  if (typeof trigger.headSha !== 'string' || !trigger.headSha.trim()) return undefined
+  if (
+    typeof trigger.headSha !== 'string'
+    || !trigger.headSha.trim()
+    || trigger.headSha.length > 128
+    || /\s/.test(trigger.headSha)
+  ) return undefined
   return {
     host: normalizeGitLabAuthority(trigger.host)!,
     projectId: trigger.projectId,
@@ -255,10 +261,10 @@ function mergeRequestUrl(baseUrl: string, run: ReviewRunRecord, target: GitLabCi
 
 function boundListToolOutput(
   output: Extract<GitLabCiToolOutput, { ok: true; action: 'list' }>,
-): Extract<GitLabCiToolOutput, { ok: true; action: 'list' }> {
+): GitLabCiToolOutput {
   const jobs = [...output.jobs]
   let next = { ...output, jobs }
-  while (toolOutputBytes(next) > 32 * 1024 && jobs.length > 0) {
+  while (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES && jobs.length > 0) {
     jobs.pop()
     next = {
       ...next,
@@ -268,13 +274,18 @@ function boundListToolOutput(
       returnedJobs: jobs.length,
     }
   }
-  if (toolOutputBytes(next) <= 32 * 1024 || !next.target.mrUrl) return next
-  return {
-    ...next,
-    target: { ...next.target, mrUrl: undefined },
-    diagnostics: mergeDiagnostics(next.diagnostics, ['ci_target_url_omitted']),
-    truncated: true,
+  if (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES && next.target.mrUrl) {
+    next = {
+      ...next,
+      target: { ...next.target, mrUrl: undefined },
+      diagnostics: mergeDiagnostics(next.diagnostics, ['ci_target_url_omitted']),
+      truncated: true,
+    }
   }
+  if (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES) {
+    return failure('list', 'ci_tool_output_limit_exceeded')
+  }
+  return next
 }
 
 function toolOutputBytes(output: GitLabCiToolOutput) {

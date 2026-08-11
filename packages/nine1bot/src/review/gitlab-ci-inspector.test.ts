@@ -421,7 +421,7 @@ describe('GitLab CI session inspector', () => {
     expect(traceCalls).toBe(10)
   })
 
-  test('reserves job-log quota only when trace starts for a stale attempt', async () => {
+  test('reserves job-log quota before GitLab access for stale attempts', async () => {
     const beforeTraceRun = createReviewRun('session-before-trace', 3, 10, 'head-a')
     const jobsStarted = deferred<void>()
     const jobsResponse = deferred<Response>()
@@ -464,7 +464,11 @@ describe('GitLab CI session inspector', () => {
       diagnostic: 'ci_review_attempt_stale',
     })
     expect(beforeTraceCalls).toBe(0)
-    expect(ReviewRunStore.get(beforeTraceRun.id)?.ci?.jobLogReadCount).toBeUndefined()
+    expect(ReviewRunStore.get(beforeTraceRun.id)?.ci).toEqual({
+      diagnostics: [],
+      jobLogReadCount: 1,
+      queriedJobIds: [56],
+    })
     expect(ReviewRunStore.get(beforeTraceRetry.id)?.ci).toBeUndefined()
 
     const afterTraceRun = createReviewRun('session-after-trace', 3, 10, 'head-a')
@@ -510,6 +514,104 @@ describe('GitLab CI session inspector', () => {
       queriedJobIds: [56],
     })
     expect(ReviewRunStore.get(afterTraceRetry.id)?.ci).toBeUndefined()
+  })
+
+  test('rejects a 40,000-character head SHA before GitLab access with a small failure DTO', async () => {
+    createReviewRun('session-a', 3, 10, 'a'.repeat(40_000))
+    let fetchCalls = 0
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async () => {
+        fetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'gitlab_review_mr_identity_missing',
+    })
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThan(32 * 1024)
+    expect(fetchCalls).toBe(0)
+  })
+
+  test('returns a small failure DTO when a final list payload cannot fit within 32 KiB', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    ReviewRunStore.update(run.id, {
+      trigger: {
+        ...run.trigger,
+        objectIid: 'm'.repeat(40_000),
+      },
+    })
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async () => Response.json([])) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_tool_output_limit_exceeded',
+    })
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThan(32 * 1024)
+  })
+
+  test('exhausts job-log quota for repeated invalid job IDs before any further GitLab endpoint access', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    const calls: string[] = []
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('/merge_requests/10/pipelines')) {
+        return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+      }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
+      if (url.includes('/pipelines/55/jobs')) return Response.json([])
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    for (const jobId of [100, 101]) {
+      await expect(inspectGitLabCiForSession({
+        sessionId: 'session-a',
+        request: { action: 'read_job_log', jobId },
+        platforms,
+        secrets,
+        fetch: fetchMock,
+      })).resolves.toEqual({
+        ok: false,
+        action: 'read_job_log',
+        diagnostic: 'ci_job_not_in_head_pipeline',
+      })
+    }
+    const callsBeforeLimit = calls.length
+
+    await expect(inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 102 },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })).resolves.toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_job_log_limit_reached',
+    })
+
+    expect(calls).toHaveLength(callsBeforeLimit)
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({
+      jobLogReadCount: 2,
+      queriedJobIds: [100, 101],
+    })
   })
 
   test('bounds the complete CI session list payload including its review target', async () => {
