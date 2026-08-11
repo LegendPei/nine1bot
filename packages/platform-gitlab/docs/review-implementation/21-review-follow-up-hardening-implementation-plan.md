@@ -379,7 +379,9 @@ Task 6 的 publication 状态机由 `d265a47` 建立，随后按独立复审结�
 
 CPU 生产修复已按补充计划 [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md) 实现：`3a5f60e` + `9c905ce` 在高成本处理前加入原始输入预算，`873ce7d` + `33b3393` 以单向线性 scanner 替换 marker 正则，Task 1/2 的 scoped re-review 均已批准且为 `0 open findings`。以 prerequisite `c99195a` 为基线的 fresh 验证为 Task 6 聚焦矩阵 `235/235 pass`（`235 pass / 0 fail`）、维护范围 `330/330 pass`（`330 pass / 0 fail`），platform、nine1bot、opencode 三处 typecheck 全部通过。初始 Task 3 验证/文档提交的 2 个状态 finding 已由 `3f5126009963f79e8e23c56ec45783a591522001` 修复，其 scoped re-review verdict 为 `Approved`、`0 open findings`。
 
-据此 CPU blocker 正式解除，Task 6 完成。`c99195a` 仅隔离 permission reply 测试的 autonomous 配置并证明 pending/reply 生命周期，不是 CPU 生产修复；该前置提交自身已通过独立复审。外部 GitLab 人工联调仍待后续执行，broad whole-batch review 也将在本状态最终化提交后执行；Task 7、Task 8、Task 9 的范围和顺序不变，下一步从 Task 7 开始。
+broad whole-batch review 后续发现 comment 预算快照和低文本高基数 finding 聚合两个 CPU Important；`7a733c6df0a19be40c2e3168baeac972641570d8` 通过单次输入快照和 plan build 前固定 500 findings 上限关闭二者。修复后 focused `201 pass / 0 fail`、维护范围 `337 pass / 0 fail`，三处 typecheck 与 diff check 通过；scoped final re-review verdict 为 `Ready to proceed to original Task7: Yes`，Critical、Important、Minor 均为 0。
+
+据此 CPU blocker 正式解除，Task 6 完成。`c99195a` 仅隔离 permission reply 测试的 autonomous 配置并证明 pending/reply 生命周期，不是 CPU 生产修复；该前置提交自身已通过独立复审。外部 GitLab 人工联调仍待后续执行；Task 7、Task 8、Task 9 的范围和顺序不变，下一步从 Task 7 开始。
 
 ---
 

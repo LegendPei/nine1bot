@@ -29,7 +29,8 @@
 - Task 3 prerequisite 为 `c99195a`（`test(opencode): isolate permission reply tests`）：它只隔离 permission reply 测试的 autonomous 配置并补强 pending/reply 断言，不是 CPU 生产修复。prerequisite 验证为 permission `63 pass / 0 fail`、platform-agent-source `10 pass / 0 fail`、OpenCode typecheck 通过，独立复审为 `0 findings`。
 - Task 3 已完成：以 `c99195af2504041853844e295ab2082726a5b28f` 为 fresh 基线，Task 6 聚焦矩阵 `235/235 pass`（`235 pass / 0 fail`），维护范围 `330/330 pass`（`330 pass / 0 fail`），platform、nine1bot、opencode 三处 typecheck 均通过；diff/status/敏感信息扫描也已完成。
 - 初始 Task 3 验证/文档提交为 `1e1602e443cb20a626e254fadd585b25d1dbcdb6`（`docs(gitlab): close publication reconciliation cpu hardening`）。独立 reviewer 对该提交给出的 2 个 Important 文档状态 finding 已由状态修复提交 `3f5126009963f79e8e23c56ec45783a591522001`（`docs(gitlab): correct cpu hardening review status`）关闭；`task-3-rereview-1.md` 的 scoped re-review verdict 为 `Approved`，`0 open findings`。
-- 外部 GitLab 人工联调仍未执行，原计划 Task 7、Task 8、Task 9 的范围与顺序不变，下一步从 Task 7 开始。本次批准仅覆盖 Task 3 状态修复的 scoped re-review，不表示 broad whole-batch review 已完成；后者将在本状态最终化提交后执行。
+- broad whole-batch review 发现 comment 预算快照和低文本高基数 finding 聚合两个 Important；最终修复提交 `7a733c6df0a19be40c2e3168baeac972641570d8` 为全部对账输入建立单次快照，并在 plan build 前加入固定 500 findings 上限。修复后 focused 为 `201 pass / 0 fail`、维护范围为 `337 pass / 0 fail`，三处 typecheck 和 diff check 均通过；`final-rereview.md` verdict 为 `Ready to proceed to original Task7: Yes`，Critical、Important、Minor 均为 0。
+- 外部 GitLab 人工联调仍未执行，原计划 Task 7、Task 8、Task 9 的范围与顺序不变，下一步从 Task 7 开始。
 
 ---
 
@@ -264,9 +265,11 @@ reviewer 必须复查：前置预算调用顺序、重复正文只计费一次�
 
 初始提交 `1e1602e443cb20a626e254fadd585b25d1dbcdb6` 的 2 个文档状态 Important finding 已由 `3f5126009963f79e8e23c56ec45783a591522001` 修复；随后 scoped re-review verdict 为 `Approved`，`0 open findings`。
 
+broad whole-batch review 随后提出 2 个 CPU Important，已由 `7a733c6df0a19be40c2e3168baeac972641570d8` 关闭；唯一一次 scoped final re-review 结论为 `Ready to proceed to original Task7: Yes`，`0 open findings`。
+
 - [x] **Step 5: 更新文档状态并提交**
 
-本文件已记录 Task 1 到 Task 3 的提交 SHA、测试数量和真实复审结论；原计划 Task 6 已记录本批次链接并依据通过的 scoped re-review 解除 CPU blocker。README 索引已由初始文档提交加入，本轮状态最终化不改 README。
+本文件已记录 Task 1 到 Task 3、broad review 最终修复的提交 SHA、测试数量和真实复审结论；原计划 Task 6 已记录本批次链接并依据通过的 scoped final re-review 解除 CPU blocker。README 索引已由初始文档提交加入，本轮状态最终化不改 README。
 
 ```powershell
 git add packages/platform-gitlab/docs/review-implementation/21-review-follow-up-hardening-implementation-plan.md packages/platform-gitlab/docs/review-implementation/22-publication-reconciliation-cpu-hardening-implementation-plan.md packages/platform-gitlab/docs/review-implementation/README.md
@@ -275,4 +278,4 @@ git commit -m "docs(gitlab): close publication reconciliation cpu hardening"
 
 - [x] **Step 6: 恢复原计划**
 
-scoped re-review 已通过，CPU blocker 已解除；回到 `21-review-follow-up-hardening-implementation-plan.md`，下一步从 Task 7“收紧 CI 请求配额和最终输出上限”开始。本批次未提前实现 Task 7、Task 8 或 Task 9，其范围和顺序保持不变。
+scoped final re-review 已通过且 broad review open findings 为 0，CPU blocker 已解除；回到 `21-review-follow-up-hardening-implementation-plan.md`，下一步从 Task 7“收紧 CI 请求配额和最终输出上限”开始。本批次未提前实现 Task 7、Task 8 或 Task 9，其范围和顺序保持不变。
