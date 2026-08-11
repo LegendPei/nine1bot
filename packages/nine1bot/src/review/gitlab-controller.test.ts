@@ -1393,6 +1393,70 @@ describe('GitLab review controller', () => {
     })).toMatchObject({ ok: true, resume: false })
   })
 
+  test('discards malformed persisted payload hashes and downgrades incomplete publishing identities', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'malformed-publication-identities.json')
+    const validHash = 'a'.repeat(64)
+    const malformedHashes = ['not-a-stage-hash', 'A'.repeat(64), 'b'.repeat(63)]
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 4,
+      runs: [
+        ...malformedHashes.map((payloadHash, index) => ({
+          id: `review_invalid_hash_${index}`,
+          platform: 'gitlab',
+          status: 'failed',
+          createdAt: 10 + index,
+          updatedAt: 20 + index,
+          publication: {
+            state: 'partial',
+            payloadHash,
+            updatedAt: 20 + index,
+            summaryMarker: 'persisted-summary',
+            completedMarkers: [],
+          },
+        })),
+        {
+          id: 'review_incomplete_identity',
+          platform: 'gitlab',
+          status: 'failed',
+          createdAt: 20,
+          updatedAt: 30,
+          publication: {
+            state: 'publishing',
+            claimId: 'claim-without-owner',
+            payloadHash: validHash,
+            updatedAt: 30,
+            summaryMarker: 'persisted-summary',
+            completedMarkers: [],
+          },
+        },
+      ],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+
+    for (let index = 0; index < malformedHashes.length; index += 1) {
+      const runId = `review_invalid_hash_${index}`
+      expect(ReviewRunStore.get(runId)?.publication).toBeUndefined()
+      expect(ReviewRunStore.claimPublication({
+        runId,
+        payloadHash: 'c'.repeat(64),
+        ownerId: `replacement-owner-${index}`,
+      })).toMatchObject({ ok: true, resume: false })
+    }
+
+    expect(ReviewRunStore.get('review_incomplete_identity')?.publication).toMatchObject({
+      state: 'partial',
+      claimId: undefined,
+      ownerId: undefined,
+      payloadHash: validHash,
+    })
+    expect(ReviewRunStore.claimPublication({
+      runId: 'review_incomplete_identity',
+      payloadHash: validHash,
+      ownerId: 'replacement-owner',
+    })).toMatchObject({ ok: true, resume: true })
+  })
+
   test('rolls back a failed publication claim save without wedging owner liveness', async () => {
     const run = createPublishableReviewRun({ headSha: 'claim-save-failure-head' })
     const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
@@ -2544,6 +2608,94 @@ describe('GitLab review controller', () => {
     expect(posts).toHaveLength(1)
     expect(requestFormField(posts[0]?.init, 'body')).toContain(summaryMarker)
     expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker])
+  })
+
+  test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
+    const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
+    const stageResult = {
+      ...publicationStageResult('Per-finding fallback recovery.'),
+      findings: [{
+        title: 'Finding A',
+        body: 'Fallback A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }, {
+        title: 'Finding B',
+        body: 'Fallback B body.',
+        severity: 'critical' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const fallbackMarkers = stageResult.findings.map((finding) => gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    const inlineMarkers = stageResult.findings.map((finding) => gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    const originalIdentity = {
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+    }
+    expect(ReviewRunStore.recordPublicationMarker({ ...originalIdentity, marker: summaryMarker })).toBe(true)
+    expect(ReviewRunStore.recordPublicationMarker({ ...originalIdentity, marker: fallbackMarkers[0]! })).toBe(true)
+    expect(ReviewRunStore.failPublication({ ...originalIdentity, error: 'crashed_after_fallback_a' })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'per-finding-fallback-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 1, body: `remote summary and fallback A\n\n${summaryMarker}\n${fallbackMarkers[0]}` }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/discussions') && requestMethod(init) === 'POST') {
+          const body = requestFormField(init, 'body') ?? ''
+          expect(body).not.toContain(inlineMarkers[0]!)
+          expect(body).toContain(inlineMarkers[1]!)
+          return new Response('invalid position', { status: 400, statusText: 'Bad Request' })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'POST') {
+          const body = requestFormField(init, 'body') ?? ''
+          expect(body).toContain('Fallback B body.')
+          expect(body).toContain(fallbackMarkers[1]!)
+          expect(body).not.toContain(fallbackMarkers[0]!)
+          return Response.json({ id: 2 })
+        }
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 0, fallbackPosted: 1 })
+    const posts = calls.filter((call) => requestMethod(call.init) === 'POST')
+    expect(posts).toHaveLength(2)
+    expect(posts.filter((call) => call.url.includes('/discussions'))).toHaveLength(1)
+    expect(posts.filter((call) => call.url.includes('/notes'))).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([
+      summaryMarker,
+      fallbackMarkers[0],
+      fallbackMarkers[1],
+    ])
   })
 
   test('stops reconciliation pagination when a reloaded owner replaces the claim during page 2', async () => {

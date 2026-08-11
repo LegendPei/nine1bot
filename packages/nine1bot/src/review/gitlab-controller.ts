@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
-  aggregateGitLabReviewPublicationFindings,
+  buildGitLabReviewPublicationPlan,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
@@ -10,8 +10,7 @@ import {
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
   gitLabAuthorityFromUrl,
-  gitLabReviewFindingKey,
-  gitLabReviewPublicationMarker,
+  isGitLabReviewPublicationComplete,
   isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
@@ -765,8 +764,13 @@ export async function publishGitLabReviewRunResult(input: {
       },
     })
     assertPublicationClaimCurrent(claimIdentity)
-    const summaryMarker = gitLabReviewPublicationMarker({ runId: input.runId, kind: 'summary' })
-    if (!completedMarkers.has(summaryMarker)) throw new Error('review_run_publication_incomplete')
+    if (!isGitLabReviewPublicationComplete({
+      runId: input.runId,
+      findings: parsed.findings,
+      completedMarkers,
+    })) {
+      throw new Error('review_run_publication_incomplete')
+    }
   } catch (error) {
     const message = publicationFailureMessage('publish_result', error)
     ReviewRunStore.failPublication({ ...claimIdentity, error: message })
@@ -1167,13 +1171,14 @@ async function reconcileGitLabReviewPublication(input: {
   })
   requestGuard()
 
-  const summaryMarker = gitLabReviewPublicationMarker({ runId: input.claimIdentity.runId, kind: 'summary' })
-  const noteMarkers = input.trigger.objectType === 'commit'
-    ? [summaryMarker]
-    : [
-        summaryMarker,
-        gitLabReviewPublicationMarker({ runId: input.claimIdentity.runId, kind: 'fallback' }),
-      ]
+  const publicationPlan = buildGitLabReviewPublicationPlan({
+    runId: input.claimIdentity.runId,
+    findings: input.parsed.findings,
+  })
+  const noteMarkers = [
+    publicationPlan.summaryMarker,
+    ...publicationPlan.findings.map(({ markers }) => markers?.fallbackMarker),
+  ].filter((marker): marker is string => Boolean(marker))
   const remoteMarkers = markersInPublishedComments(notes, noteMarkers)
 
   if (input.trigger.objectType === 'mr') {
@@ -1185,11 +1190,9 @@ async function reconcileGitLabReviewPublication(input: {
       requestGuard,
     })
     requestGuard()
-    const inlineMarkers = aggregateGitLabReviewPublicationFindings(input.parsed.findings).map((finding) => gitLabReviewPublicationMarker({
-      runId: input.claimIdentity.runId,
-      kind: 'inline',
-      findingKey: gitLabReviewFindingKey(finding),
-    }))
+    const inlineMarkers = publicationPlan.findings
+      .map(({ markers }) => markers?.inlineMarker)
+      .filter((marker): marker is string => Boolean(marker))
     remoteMarkers.push(...markersInPublishedComments(discussions, inlineMarkers))
   }
 

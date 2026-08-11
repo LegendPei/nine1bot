@@ -82,6 +82,67 @@ describe("webhook status URL selection", () => {
     }, patch)).toBeUndefined()
   })
 
+  test("preserves publishing, partial, and published records through actual runtime callbacks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-publication-callbacks-"))
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const payloadHash = "a".repeat(64)
+
+    try {
+      for (const state of ["publishing", "partial", "published"] as const) {
+        const run = ReviewRunStore.create({
+          platform: "gitlab",
+          status: state === "published" ? "succeeded" : state === "partial" ? "failed" : "running",
+          error: state === "partial" ? "preserved_partial_error" : undefined,
+          publishedAt: state === "published" ? 42 : undefined,
+          trigger: {
+            host: "gitlab.example.com",
+            projectId: 123,
+            objectType: "mr",
+            objectIid: 10,
+            headSha: `${state}-head`,
+            mode: "webhook",
+          },
+          publication: {
+            state,
+            claimId: state === "publishing" ? `claim-${state}` : undefined,
+            ownerId: state === "publishing" ? `owner-${state}` : undefined,
+            payloadHash,
+            startedAt: 10,
+            updatedAt: 20,
+            summaryMarker: `summary-${state}`,
+            completedMarkers: [`marker-${state}`],
+            error: state === "partial" ? "preserved_partial_error" : undefined,
+          },
+        })
+        const beforeCallbacks = ReviewRunStore.get(run.id)
+
+        await startGitLabReviewRuntimeRun({
+          runId: run.id,
+          idempotencyKey: `callback:${state}`,
+          trigger: run.trigger as any,
+          context: {
+            project: { nine1botProjectID: "test-project" },
+            diff: { files: [], skipped: [], blocked: false, stats: { fileCount: 0, includedFileCount: 0, skippedFileCount: 0, includedBytes: 0, truncated: false } },
+            contextBlocks: [],
+          },
+        } as any, directory, {
+          platforms: {},
+          runner: async (input: any) => {
+            await input.onSessionCreated({ sessionID: `late-session-${state}` })
+            await input.onControllerResponse({ accepted: false, turnSnapshotId: `late-turn-${state}` })
+            await input.onFinished({ status: "failed", error: `late-failure-${state}` })
+            return { accepted: true, sessionID: `late-session-${state}`, status: 202, response: {} } as any
+          },
+        })
+
+        expect(ReviewRunStore.get(run.id)).toEqual(beforeCallbacks)
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test("normalizes runtime failures without exposing exception text", () => {
     expect(gitLabReviewRuntimeFailure("runtime_start", new Error("PRIVATE-TOKEN=secret at C:\\private\\config")))
       .toBe("gitlab_review_runtime_start_failed")
@@ -268,6 +329,10 @@ describe("webhook status URL selection", () => {
       trigger: { objectType: "mr" },
       ci: { diagnostics: [], queryCount: 1 },
     })).toBeUndefined()
+  })
+
+  test("maps a lost publication claim directly to HTTP 409", () => {
+    expect(gitLabReviewPublishStatus("review_run_publish_claim_lost")).toBe(409)
   })
 
   test("enables only the bounded GitLab CI tool in the automated review message", () => {

@@ -437,16 +437,11 @@ export class GitLabApiClient {
     for (let index = 0; index < pageLimit && !visitedPages.has(page); index += 1) {
       visitedPages.add(page)
       const separator = path.includes('?') ? '&' : '?'
-      options.requestGuard?.()
-      let result: { data: T[]; nextPage?: string }
-      try {
-        result = await this.requestPage<T[]>(
-          `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
-          { signal: options.signal },
-        )
-      } finally {
-        options.requestGuard?.()
-      }
+      const result = await this.requestPage<T[]>(
+        `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
+        { signal: options.signal },
+        options.requestGuard,
+      )
       if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
       values.push(...result.data.slice(0, itemLimit - values.length))
       if (values.length >= itemLimit) break
@@ -457,7 +452,11 @@ export class GitLabApiClient {
     return values
   }
 
-  private async requestPage<T>(path: string, init: RequestInit = {}): Promise<{ data: T; nextPage?: string }> {
+  private async requestPage<T>(
+    path: string,
+    init: RequestInit = {},
+    requestGuard?: () => void,
+  ): Promise<{ data: T; nextPage?: string }> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
         const errorBody = await readBoundedText(response, this.maxErrorResponseBytes).catch(() => undefined)
@@ -469,7 +468,7 @@ export class GitLabApiClient {
       const data = text.trim() ? JSON.parse(text) as T : undefined as T
       const nextPage = response.headers.get('x-next-page')?.trim() || undefined
       return { data, nextPage }
-    })
+    }, requestGuard)
   }
 
   async listNotes(input: GitLabListNotesInput, options: GitLabRequestOptions = {}): Promise<GitLabPublishedComment[]> {
@@ -512,6 +511,7 @@ export class GitLabApiClient {
     path: string,
     init: RequestInit,
     consume: (response: Response) => Promise<T>,
+    requestGuard?: () => void,
   ): Promise<T> {
     const controller = new AbortController()
     const upstreamSignal = init.signal
@@ -528,7 +528,12 @@ export class GitLabApiClient {
     })
     try {
       const operation = (async () => {
-        const response = await this.fetchWithSafeRedirects(`${this.baseUrl}${path}`, init, controller.signal)
+        const response = await this.fetchWithSafeRedirects(
+          `${this.baseUrl}${path}`,
+          init,
+          controller.signal,
+          requestGuard,
+        )
         return await consume(response)
       })()
       return await Promise.race([operation, deadline])
@@ -538,7 +543,12 @@ export class GitLabApiClient {
     }
   }
 
-  private async fetchWithSafeRedirects(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  private async fetchWithSafeRedirects(
+    url: string,
+    init: RequestInit,
+    signal: AbortSignal,
+    requestGuard?: () => void,
+  ): Promise<Response> {
     const initialUrl = parseHttpUrl(url)
     if (!initialUrl) throw new GitLabApiRedirectError('gitlab_redirect_invalid')
     const authority = initialUrl.host.toLowerCase()
@@ -549,12 +559,23 @@ export class GitLabApiClient {
     while (true) {
       const headers = new Headers(currentInit.headers)
       headers.set('PRIVATE-TOKEN', this.token)
-      const response = await this.fetchImpl(currentUrl, {
-        ...currentInit,
-        redirect: 'manual',
-        signal,
-        headers,
-      })
+      requestGuard?.()
+      let response: Response | undefined
+      try {
+        response = await this.fetchImpl(currentUrl, {
+          ...currentInit,
+          redirect: 'manual',
+          signal,
+          headers,
+        })
+      } finally {
+        try {
+          requestGuard?.()
+        } catch (error) {
+          response?.body?.cancel().catch(() => undefined)
+          throw error
+        }
+      }
       if (!REDIRECT_STATUSES.has(response.status)) return response
 
       if (redirects >= MAX_REDIRECTS) {

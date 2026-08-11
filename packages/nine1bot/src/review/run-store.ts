@@ -569,7 +569,7 @@ function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt:
   if (publication.state !== 'publishing' && publication.state !== 'partial' && publication.state !== 'published') {
     return undefined
   }
-  if (typeof publication.payloadHash !== 'string' || !publication.payloadHash) return undefined
+  if (typeof publication.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(publication.payloadHash)) return undefined
   if (
     !Array.isArray(publication.completedMarkers)
     || publication.completedMarkers.some((marker) => typeof marker !== 'string')
@@ -577,8 +577,8 @@ function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt:
     return undefined
   }
 
-  const claimId = typeof publication.claimId === 'string' && publication.claimId ? publication.claimId : undefined
-  const ownerId = typeof publication.ownerId === 'string' && publication.ownerId ? publication.ownerId : undefined
+  const claimId = normalizedIdentityField(publication.claimId)
+  const ownerId = normalizedIdentityField(publication.ownerId)
   const state = publication.state === 'publishing' && (!claimId || !ownerId)
     ? 'partial'
     : publication.state
@@ -600,6 +600,10 @@ function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt:
     completedMarkers: [...new Set(publication.completedMarkers)],
     error: typeof publication.error === 'string' ? publication.error : undefined,
   }
+}
+
+function normalizedIdentityField(input: unknown) {
+  return typeof input === 'string' && input.trim() ? input : undefined
 }
 
 function isStoredReviewRunRecord(input: unknown): input is Record<string, unknown> {

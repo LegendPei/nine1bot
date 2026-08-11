@@ -21,6 +21,26 @@ export function gitLabReviewFindingKey(finding: ReviewFinding): string {
   ])
 }
 
+export function gitLabReviewFindingPublicationMarkers(input: {
+  runId: string
+  finding: ReviewFinding
+}) {
+  const findingKey = gitLabReviewFindingKey(input.finding)
+  return {
+    findingKey,
+    inlineMarker: gitLabReviewPublicationMarker({
+      runId: input.runId,
+      kind: 'inline',
+      findingKey,
+    }),
+    fallbackMarker: gitLabReviewPublicationMarker({
+      runId: input.runId,
+      kind: 'fallback',
+      findingKey,
+    }),
+  }
+}
+
 export function gitLabReviewPublicationMarker(input: GitLabReviewPublicationMarkerInput): string {
   const runId = encodeURIComponent(input.runId)
   const hash = input.findingKey && /^[a-f0-9]{24}$/.test(input.findingKey)

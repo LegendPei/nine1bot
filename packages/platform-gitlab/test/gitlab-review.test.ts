@@ -12,6 +12,7 @@ import {
   GitLabApiError,
   GitLabApiClient,
   inspectGitLabCi,
+  isGitLabReviewPublicationComplete,
   minimumGitLabReviewDiffEvidenceBytes,
   hasUsableGitLabReviewProjectProfile,
   normalizeGitLabReviewSettings,
@@ -2627,6 +2628,45 @@ describe('GitLab review foundation', () => {
     expect(untrustedMarker).not.toContain(finding.body)
   })
 
+  test('requires summary plus an accepted inline or fallback marker for every aggregate finding', () => {
+    const runId = 'run-required-markers'
+    const findings: ReviewFinding[] = [{
+      title: 'Finding A',
+      body: 'Finding A body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }, {
+      title: 'Finding B',
+      body: 'Finding B body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 3,
+    }]
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const inlineA = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(findings[0]!),
+    })
+    const fallbackB = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(findings[1]!),
+    })
+
+    expect(isGitLabReviewPublicationComplete({
+      runId,
+      findings,
+      completedMarkers: new Set([summaryMarker, inlineA]),
+    })).toBe(false)
+    expect(isGitLabReviewPublicationComplete({
+      runId,
+      findings,
+      completedMarkers: new Set([summaryMarker, inlineA, fallbackB]),
+    })).toBe(true)
+  })
+
   test('lists only bounded comment DTOs through the review endpoints', async () => {
     const urls: string[] = []
     const client = new GitLabApiClient({
@@ -2715,6 +2755,40 @@ describe('GitLab review foundation', () => {
     expect(guardCalls).toBe(4)
     expect(urls).toHaveLength(2)
     expect(urls.map((url) => new URL(url).searchParams.get('page'))).toEqual(['1', '2'])
+  })
+
+  test('guards the actual fetch boundary before following a same-authority redirect', async () => {
+    const urls: string[] = []
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        urls.push(value)
+        if (urls.length === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: '/redirected-notes' },
+          })
+        }
+        return Response.json([])
+      }) as typeof fetch,
+    })
+
+    await expect(client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (guardCalls === 2) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )).rejects.toThrow('review_run_publish_claim_lost')
+
+    expect(guardCalls).toBe(2)
+    expect(urls).toHaveLength(1)
+    expect(new URL(urls[0]!).pathname).toBe('/api/v4/projects/3/merge_requests/2/notes')
   })
 
   test('caps flattened discussion notes globally at 500 projected comments', async () => {
@@ -2822,7 +2896,11 @@ describe('GitLab review foundation', () => {
       newLine: 2,
     }
     const summaryMarker = gitLabReviewPublicationMarker({ runId: 'run-fallback', kind: 'summary' })
-    const fallbackMarker = gitLabReviewPublicationMarker({ runId: 'run-fallback', kind: 'fallback' })
+    const fallbackMarker = gitLabReviewPublicationMarker({
+      runId: 'run-fallback',
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    })
     const checkpoints: string[] = []
     const fallbackBodies: string[] = []
 
@@ -2880,6 +2958,77 @@ describe('GitLab review foundation', () => {
         },
       },
     })
+  })
+
+  test('checkpoints an independent fallback marker for every rejected inline finding', async () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const findings: ReviewFinding[] = [{
+      title: 'First rejected finding',
+      body: 'First fallback body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }, {
+      title: 'Second rejected finding',
+      body: 'Second fallback body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 2,
+    }]
+    const completedMarkers = new Set<string>()
+    const notes: string[] = []
+    let discussionPosts = 0
+
+    const result = await publishGitLabReviewResult({
+      client: {
+        async createNote(input) {
+          notes.push(input.body)
+          return {}
+        },
+        async createDiscussion() {
+          discussionPosts += 1
+          throw new GitLabApiError(400, 'Bad Request')
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings,
+      publication: {
+        runId: 'run-two-fallbacks',
+        completedMarkers,
+        onMarkerCompleted(marker) {
+          completedMarkers.add(marker)
+        },
+      },
+    })
+
+    const fallbackMarkers = findings.map((finding) => gitLabReviewPublicationMarker({
+      runId: 'run-two-fallbacks',
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 2 })
+    expect(discussionPosts).toBe(2)
+    expect(notes).toHaveLength(3)
+    expect(notes[1]).toContain(fallbackMarkers[0]!)
+    expect(notes[1]).not.toContain(fallbackMarkers[1]!)
+    expect(notes[2]).toContain(fallbackMarkers[1]!)
+    expect(notes[2]).not.toContain(fallbackMarkers[0]!)
+    expect(completedMarkers).toEqual(new Set([
+      gitLabReviewPublicationMarker({ runId: 'run-two-fallbacks', kind: 'summary' }),
+      ...fallbackMarkers,
+    ]))
   })
 
   test('skips completed markers and checkpoints each successful post before the next', async () => {
