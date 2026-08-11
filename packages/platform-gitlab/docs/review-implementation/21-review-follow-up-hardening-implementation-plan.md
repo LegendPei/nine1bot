@@ -367,7 +367,7 @@ git add packages/nine1bot/src/review/run-store.ts packages/nine1bot/src/review/g
 git commit -m "fix(gitlab): make review publication resumable and atomic"
 ```
 
-#### 完成记录与五轮熔断历史
+#### 实现记录与五轮熔断历史
 
 Task 6 的 publication 状态机由 `d265a47` 建立，随后按独立复审结论逐轮修复。以下五轮熔断记录保留为审计历史；每轮存在未关闭的 Important finding 时均未把 Task 6 标记完成：
 
@@ -377,9 +377,9 @@ Task 6 的 publication 状态机由 `d265a47` 建立，随后按独立复审结�
 4. `8bc265c..6a8ced1`：redirect cancellation 与历史 summary/fallback 主路径已修复；嵌入 inline marker、同前缀 warning 顺序仍有缺口，并发现 500 条重复正文约 5.664 秒的同步 CPU 路径，继续熔断。
 5. `6a8ced1..364f3ae`：marker 角色/位置和历史 warning 歧义已关闭，重复正文降至约 31 ms；独立复审仍发现预算前 marker 正则约 12.827 秒、finding 聚合约 1.856 秒的 CPU Important，Task 6 保持阻塞。
 
-CPU 阻塞由补充计划 [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md) 关闭：`3a5f60e` + `9c905ce` 在高成本处理前加入原始输入预算，`873ce7d` + `33b3393` 以单向线性 scanner 替换 marker 正则。Task 1/2 的 scoped re-review 均为 `0 open findings`；以 prerequisite `c99195a` 为基线的最终 fresh 验证为 Task 6 聚焦矩阵 `235 pass / 0 fail`、维护范围 `330 pass / 0 fail`，platform、nine1bot、opencode 三处 typecheck 全部通过。至此 CPU blocker 已解除，Task 6 标记完成。
+CPU 生产修复已按补充计划 [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md) 实现：`3a5f60e` + `9c905ce` 在高成本处理前加入原始输入预算，`873ce7d` + `33b3393` 以单向线性 scanner 替换 marker 正则。以 prerequisite `c99195a` 为基线的 fresh 验证为 Task 6 聚焦矩阵 `235 pass / 0 fail`、维护范围 `330 pass / 0 fail`，platform、nine1bot、opencode 三处 typecheck 全部通过。初始 Task 3 验证/文档提交的独立 reviewer 结论为 `Changes requested`，提出 2 个仅涉及 tracked 文档状态时序和 SHA 记录的 Important finding；生产 CPU 修复和既有验证证据不受影响。
 
-`c99195a` 仅隔离 permission reply 测试的 autonomous 配置并证明 pending/reply 生命周期，不是 CPU 生产修复；其独立复审为 `0 findings`。外部 GitLab 人工联调仍待后续执行，Task 7、Task 8、Task 9 的范围和顺序不变，下一步从 Task 7 开始。
+因此 Task 6 当前状态为“生产 CPU 修复已实现且测试通过，CPU blocker 待本轮文档状态修复的 scoped re-review 通过后解除”，不得标记完成。`c99195a` 仅隔离 permission reply 测试的 autonomous 配置并证明 pending/reply 生命周期，不是 CPU 生产修复；该前置提交自身已通过独立复审。外部 GitLab 人工联调仍待后续执行，Task 7、Task 8、Task 9 的范围和顺序不变，并在 CPU blocker 解除后继续。
 
 ---
 
