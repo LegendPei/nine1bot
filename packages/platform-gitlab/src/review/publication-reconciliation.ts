@@ -16,7 +16,6 @@ const RECONCILIATION_REVIEW_CODE_UNIT_BUDGET = 256_000
 // Legacy reconciliation is synchronous, so unique bodies and canonical finding patterns share one fixed budget.
 const LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET = 256_000
 const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
-const PUBLICATION_MARKER_PATTERN = /<!-- nine1bot:gitlab-review-publication:[^>\r\n]*-->/g
 
 export class GitLabReviewPublicationCompatibilityError extends Error {
   constructor() {
@@ -269,18 +268,7 @@ function scanUniqueComments(
 }
 
 function extractMarkerBody(body: string, catalog: MarkerCatalog): ExtractedMarkerBody {
-  const occurrences: ExtractedMarkerBody['occurrences'] = []
-  const pattern = new RegExp(PUBLICATION_MARKER_PATTERN.source, 'g')
-  for (const match of body.matchAll(pattern)) {
-    const marker = match[0]
-    if (catalog.expectedMarkers.has(marker)) {
-      occurrences.push({ marker, index: match.index })
-      continue
-    }
-    if (publicationMarkerRunId(marker) === catalog.encodedRunId) {
-      throw new GitLabReviewPublicationCompatibilityError()
-    }
-  }
+  const occurrences = scanPublicationMarkerCandidates(body, catalog)
   if (occurrences.length === 0) return { body, occurrences, trailingMarkers: [] }
 
   const trailingMarkers = extractTrailingMarkerBlock(body, catalog.expectedMarkers)
@@ -305,6 +293,32 @@ function extractMarkerBody(body: string, catalog: MarkerCatalog): ExtractedMarke
     trailingMarkers,
     strippedBody: body.slice(0, strippedEnd),
   }
+}
+
+function scanPublicationMarkerCandidates(
+  body: string,
+  catalog: MarkerCatalog,
+): ExtractedMarkerBody['occurrences'] {
+  const occurrences: ExtractedMarkerBody['occurrences'] = []
+  let cursor = 0
+  while (cursor < body.length) {
+    const start = body.indexOf(PUBLICATION_MARKER_PREFIX, cursor)
+    if (start < 0) break
+    let end = start + PUBLICATION_MARKER_PREFIX.length
+    while (end < body.length && body[end] !== '>' && body[end] !== '\r' && body[end] !== '\n') {
+      end += 1
+    }
+    if (body[end] === '>' && body[end - 1] === '-' && body[end - 2] === '-') {
+      const marker = body.slice(start, end + 1)
+      if (catalog.expectedMarkers.has(marker)) {
+        occurrences.push({ marker, index: start })
+      } else if (publicationMarkerRunId(marker) === catalog.encodedRunId) {
+        throw new GitLabReviewPublicationCompatibilityError()
+      }
+    }
+    cursor = end < body.length ? end + 1 : body.length
+  }
+  return occurrences
 }
 
 function extractTrailingMarkerBlock(body: string, expectedMarkers: ReadonlySet<string>) {

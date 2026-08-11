@@ -2677,6 +2677,135 @@ describe('GitLab review foundation', () => {
     })).toBe(true)
   })
 
+  test('bounds scanning for repeated unterminated publication marker prefixes', () => {
+    const markerPrefix = '<!-- nine1bot:gitlab-review-publication:'
+    const body = `${markerPrefix.repeat(760)}>`
+    const repetitions = 40
+    expect(body.length).toBeLessThanOrEqual(31_250)
+
+    const input = {
+      runId: 'run-marker-prefix-amplification',
+      objectType: 'mr' as const,
+      inlineComments: false,
+      summary: 'Marker prefix amplification.',
+      findings: [] as ReviewFinding[],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [{ id: 1, body }],
+      discussions: [],
+    }
+    const results: string[][] = []
+    const startedAt = performance.now()
+    for (let iteration = 0; iteration < repetitions; iteration += 1) {
+      results.push(reconcileGitLabReviewPublicationMarkers(input))
+    }
+    const elapsedMs = performance.now() - startedAt
+
+    expect(results).toEqual(Array.from({ length: repetitions }, () => []))
+    expect(elapsedMs).toBeLessThan(500)
+  }, 30_000)
+
+  test('enforces publication marker role and position for every marker class', () => {
+    const runId = 'run-marker-role-position-matrix'
+    const finding: ReviewFinding = {
+      title: 'Inline finding',
+      body: 'Inline finding body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const fallbackMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    })
+    const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId, kind: 'fallback' })
+    const inlineMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(finding),
+    })
+    const reconcile = (source: 'note' | 'discussion', body: string) => {
+      const comment = { id: 1, body }
+      return reconcileGitLabReviewPublicationMarkers({
+        runId,
+        objectType: 'mr',
+        inlineComments: true,
+        summary: 'Marker role and position matrix.',
+        findings: [finding],
+        manifest,
+        notes: source === 'note' ? [comment] : [],
+        discussions: source === 'discussion' ? [comment] : [],
+      })
+    }
+    const expectSanitizedError = (source: 'note' | 'discussion', body: string) => {
+      let thrown: unknown
+      try {
+        reconcile(source, body)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect((thrown as Error).message).toBe('gitlab_review_publication_legacy_ambiguous')
+    }
+    const markerCases = [{
+      marker: summaryMarker,
+      source: 'note' as const,
+      unknownMarker: gitLabReviewPublicationMarker({
+        runId,
+        kind: 'summary',
+        findingKey: 'unknown-summary',
+      }),
+    }, {
+      marker: fallbackMarker,
+      source: 'note' as const,
+      unknownMarker: gitLabReviewPublicationMarker({
+        runId,
+        kind: 'fallback',
+        findingKey: 'unknown-finding',
+      }),
+    }, {
+      marker: legacyFallbackMarker,
+      source: 'note' as const,
+      unknownMarker: gitLabReviewPublicationMarker({
+        runId,
+        kind: 'fallback',
+        findingKey: 'unknown-legacy-fallback',
+      }),
+    }, {
+      marker: inlineMarker,
+      source: 'discussion' as const,
+      unknownMarker: gitLabReviewPublicationMarker({
+        runId,
+        kind: 'inline',
+        findingKey: 'unknown-finding',
+      }),
+    }]
+
+    for (const markerCase of markerCases) {
+      expectSanitizedError(markerCase.source, `embedded ${markerCase.marker} marker`)
+      expectSanitizedError(markerCase.source, `body\n\nx${markerCase.marker}`)
+      expectSanitizedError(markerCase.source, `body\n\n${markerCase.marker}${markerCase.marker}`)
+      expectSanitizedError(
+        markerCase.source === 'note' ? 'discussion' : 'note',
+        `body\n\n${markerCase.marker}`,
+      )
+      expectSanitizedError(markerCase.source, `body\n\n${markerCase.unknownMarker}`)
+    }
+
+    expect(reconcile('note', `summary\n\n${summaryMarker}`)).toEqual([summaryMarker])
+    expect(reconcile('note', `fallback\n\n${fallbackMarker}`)).toEqual([fallbackMarker])
+    expect(reconcile('discussion', `inline\n\n${inlineMarker}`)).toEqual([inlineMarker])
+  })
+
   test('unions exact legacy summary subsets independently of note order', () => {
     const runId = 'run-legacy-summary-union'
     const findings: ReviewFinding[] = [{
