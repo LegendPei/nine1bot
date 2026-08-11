@@ -31,9 +31,13 @@ export type PublishGitLabReviewResult = {
   warnings: string[]
 }
 
+export function aggregateGitLabReviewPublicationFindings(findings: ReviewFinding[]) {
+  return aggregateReviewFindings(findings)
+}
+
 export async function publishGitLabReviewResult(input: PublishGitLabReviewInput): Promise<PublishGitLabReviewResult> {
   const resource = resourceForObject(input.objectType)
-  const aggregated = aggregateReviewFindings(input.findings)
+  const aggregated = aggregateGitLabReviewPublicationFindings(input.findings)
   const warnings = [...(input.warnings ?? [])]
   let inlinePosted = 0
   let fallbackPosted = 0

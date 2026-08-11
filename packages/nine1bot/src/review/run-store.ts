@@ -98,6 +98,7 @@ type ReviewRunStoreFile = {
 }
 
 const runs = new Map<string, ReviewRunRecord>()
+const activePublicationClaims = new Map<string, PublicationClaimIdentity>()
 let sequence = 0
 let loaded = false
 let storePathOverride: string | undefined
@@ -198,32 +199,36 @@ export namespace ReviewRunStore {
     if (publication && publication.payloadHash !== input.payloadHash) {
       return { ok: false, error: 'review_run_publish_payload_mismatch' }
     }
-    if (publication?.state === 'publishing' && publication.ownerId === input.ownerId) {
+    const activeClaim = activePublicationClaims.get(existing.id)
+    if (activeClaim && publicationClaimMatches(existing, activeClaim)) {
       return { ok: false, error: 'review_run_publish_in_progress' }
     }
 
     const now = Date.now()
     const claimId = randomUUID()
     const completedMarkers = publication ? [...publication.completedMarkers] : []
-    runs.set(existing.id, {
-      ...existing,
-      updatedAt: now,
-      publication: {
-        state: 'publishing',
-        claimId,
-        ownerId: input.ownerId,
-        payloadHash: input.payloadHash,
-        startedAt: publication?.startedAt ?? now,
+    const identity = { runId: existing.id, claimId, ownerId: input.ownerId, payloadHash: input.payloadHash }
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
         updatedAt: now,
-        summaryMarker: publication?.summaryMarker ?? gitLabReviewPublicationMarker({
-          runId: existing.id,
-          kind: 'summary',
-        }),
-        completedMarkers,
-        error: undefined,
-      },
+        publication: {
+          state: 'publishing',
+          claimId,
+          ownerId: input.ownerId,
+          payloadHash: input.payloadHash,
+          startedAt: publication?.startedAt ?? now,
+          updatedAt: now,
+          summaryMarker: publication?.summaryMarker ?? gitLabReviewPublicationMarker({
+            runId: existing.id,
+            kind: 'summary',
+          }),
+          completedMarkers,
+          error: undefined,
+        },
+      })
+      activePublicationClaims.set(existing.id, identity)
     })
-    save()
     return {
       ok: true,
       claimId,
@@ -235,48 +240,75 @@ export namespace ReviewRunStore {
   export function isPublicationClaimCurrent(input: PublicationClaimIdentity): boolean {
     load()
     const existing = runs.get(input.runId)
-    return Boolean(existing && publicationClaimMatches(existing, input))
+    return Boolean(
+      existing
+      && publicationClaimMatches(existing, input)
+      && activePublicationClaimMatches(input),
+    )
   }
 
   export function recordPublicationMarker(input: PublicationClaimIdentity & { marker: string }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input)) return false
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     if (existing.publication!.completedMarkers.includes(input.marker)) return true
     const now = Date.now()
-    runs.set(existing.id, {
-      ...existing,
-      updatedAt: now,
-      publication: {
-        ...existing.publication!,
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
         updatedAt: now,
-        completedMarkers: [...existing.publication!.completedMarkers, input.marker],
-      },
+        publication: {
+          ...existing.publication!,
+          updatedAt: now,
+          completedMarkers: [...existing.publication!.completedMarkers, input.marker],
+        },
+      })
     })
-    save()
+    return true
+  }
+
+  export function replacePublicationMarkers(input: PublicationClaimIdentity & { markers: string[] }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    const now = Date.now()
+    const completedMarkers = [...new Set(input.markers)]
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
+        updatedAt: now,
+        publication: {
+          ...existing.publication!,
+          updatedAt: now,
+          completedMarkers,
+        },
+      })
+    })
     return true
   }
 
   export function failPublication(input: PublicationClaimIdentity & { error: string }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input)) return false
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    runs.set(existing.id, {
-      ...existing,
-      status: 'failed',
-      error: input.error,
-      updatedAt: now,
-      publication: {
-        ...existing.publication!,
-        state: 'partial',
-        claimId: undefined,
-        ownerId: undefined,
-        updatedAt: now,
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
+        status: 'failed',
         error: input.error,
-      },
+        updatedAt: now,
+        publication: {
+          ...existing.publication!,
+          state: 'partial',
+          claimId: undefined,
+          ownerId: undefined,
+          updatedAt: now,
+          error: input.error,
+        },
+      })
+      activePublicationClaims.delete(existing.id)
     })
-    save()
     return true
   }
 
@@ -286,25 +318,27 @@ export namespace ReviewRunStore {
   }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input)) return false
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    runs.set(existing.id, {
-      ...existing,
-      status: input.status,
-      error: undefined,
-      warnings: [...input.warnings],
-      publishedAt: now,
-      updatedAt: now,
-      publication: {
-        ...existing.publication!,
-        state: 'published',
-        claimId: undefined,
-        ownerId: undefined,
-        updatedAt: now,
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
+        status: input.status,
         error: undefined,
-      },
+        warnings: [...input.warnings],
+        publishedAt: now,
+        updatedAt: now,
+        publication: {
+          ...existing.publication!,
+          state: 'published',
+          claimId: undefined,
+          ownerId: undefined,
+          updatedAt: now,
+          error: undefined,
+        },
+      })
+      activePublicationClaims.delete(existing.id)
     })
-    save()
     return true
   }
 
@@ -339,6 +373,7 @@ export namespace ReviewRunStore {
 
   export function clearForTesting() {
     runs.clear()
+    activePublicationClaims.clear()
     sequence = 0
     loaded = true
     if (storePathOverride && existsSync(storePathOverride)) {
@@ -349,6 +384,7 @@ export namespace ReviewRunStore {
   export function setPathForTesting(filepath: string) {
     storePathOverride = filepath
     runs.clear()
+    activePublicationClaims.clear()
     sequence = 0
     loaded = false
   }
@@ -359,6 +395,7 @@ export namespace ReviewRunStore {
 
   export function reloadForTesting() {
     runs.clear()
+    activePublicationClaims.clear()
     sequence = 0
     loaded = false
   }
@@ -395,6 +432,13 @@ function publicationClaimMatches(run: ReviewRunRecord, identity: PublicationClai
     && publication.claimId === identity.claimId
     && publication.ownerId === identity.ownerId
     && publication.payloadHash === identity.payloadHash
+}
+
+function activePublicationClaimMatches(identity: PublicationClaimIdentity) {
+  const active = activePublicationClaims.get(identity.runId)
+  return active?.claimId === identity.claimId
+    && active.ownerId === identity.ownerId
+    && active.payloadHash === identity.payloadHash
 }
 
 function copyReviewRunRecord(run: ReviewRunRecord): ReviewRunRecord {
@@ -451,6 +495,23 @@ function save() {
   }
 }
 
+function persistPublicationMutation(mutate: () => void) {
+  const previousRuns = new Map(runs)
+  const previousActiveClaims = new Map(activePublicationClaims)
+  const previousSequence = sequence
+  try {
+    mutate()
+    save()
+  } catch (error) {
+    runs.clear()
+    for (const [id, run] of previousRuns) runs.set(id, run)
+    activePublicationClaims.clear()
+    for (const [id, claim] of previousActiveClaims) activePublicationClaims.set(id, claim)
+    sequence = previousSequence
+    throw error
+  }
+}
+
 function prune() {
   const limit = maxRecords()
   if (runs.size <= limit) return
@@ -480,13 +541,14 @@ function compareLatestAttemptFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
 function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunRecord {
   const id = input.id as string
   const idempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined
+  const updatedAt = input.updatedAt as number
   return {
     ...input,
     id,
     platform: 'gitlab',
     status: input.status as ReviewRunStatus,
     createdAt: input.createdAt as number,
-    updatedAt: input.updatedAt as number,
+    updatedAt,
     rootRunId: typeof input.rootRunId === 'string' && input.rootRunId ? input.rootRunId : id,
     attempt: typeof input.attempt === 'number' && Number.isInteger(input.attempt) && input.attempt > 0
       ? input.attempt
@@ -497,7 +559,47 @@ function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunReco
     generation: typeof input.generation === 'string' && input.generation
       ? input.generation
       : `legacy-${id}`,
+    publication: normalizeStoredPublication(input.publication, id, updatedAt),
   } as ReviewRunRecord
+}
+
+function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt: number): ReviewRunPublication | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const publication = input as Record<string, unknown>
+  if (publication.state !== 'publishing' && publication.state !== 'partial' && publication.state !== 'published') {
+    return undefined
+  }
+  if (typeof publication.payloadHash !== 'string' || !publication.payloadHash) return undefined
+  if (
+    !Array.isArray(publication.completedMarkers)
+    || publication.completedMarkers.some((marker) => typeof marker !== 'string')
+  ) {
+    return undefined
+  }
+
+  const claimId = typeof publication.claimId === 'string' && publication.claimId ? publication.claimId : undefined
+  const ownerId = typeof publication.ownerId === 'string' && publication.ownerId ? publication.ownerId : undefined
+  const state = publication.state === 'publishing' && (!claimId || !ownerId)
+    ? 'partial'
+    : publication.state
+  const updatedAt = typeof publication.updatedAt === 'number' && Number.isFinite(publication.updatedAt)
+    ? publication.updatedAt
+    : runUpdatedAt
+  const startedAt = typeof publication.startedAt === 'number' && Number.isFinite(publication.startedAt)
+    ? publication.startedAt
+    : undefined
+
+  return {
+    state,
+    claimId: state === 'publishing' ? claimId : undefined,
+    ownerId: state === 'publishing' ? ownerId : undefined,
+    payloadHash: publication.payloadHash,
+    startedAt,
+    updatedAt,
+    summaryMarker: gitLabReviewPublicationMarker({ runId, kind: 'summary' }),
+    completedMarkers: [...new Set(publication.completedMarkers)],
+    error: typeof publication.error === 'string' ? publication.error : undefined,
+  }
 }
 
 function isStoredReviewRunRecord(input: unknown): input is Record<string, unknown> {

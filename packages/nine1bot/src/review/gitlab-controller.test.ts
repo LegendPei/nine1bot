@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash } from 'crypto'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  aggregateReviewFindings,
   gitLabReviewFindingKey,
   gitLabReviewPublicationMarker,
   parseReviewStageResult,
@@ -1357,6 +1358,117 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('drops malformed nested publication state and leaves the persisted run publishable', async () => {
+    const malformedPath = join(tempDirs.at(-1)!, 'malformed-publication-runs.json')
+    await writeFile(malformedPath, JSON.stringify({
+      version: 2,
+      sequence: 1,
+      runs: [{
+        id: 'review_malformed_publication_1',
+        platform: 'gitlab',
+        status: 'failed',
+        createdAt: 10,
+        updatedAt: 20,
+        publication: {
+          state: 'publishing',
+          claimId: 'claim-a',
+          ownerId: 'owner-a',
+          payloadHash: 'a'.repeat(64),
+          updatedAt: 20,
+          summaryMarker: 'incompatible-summary-marker',
+          completedMarkers: 42,
+        },
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(malformedPath)
+
+    expect(ReviewRunStore.get('review_malformed_publication_1')).toMatchObject({
+      id: 'review_malformed_publication_1',
+      publication: undefined,
+    })
+    expect(ReviewRunStore.claimPublication({
+      runId: 'review_malformed_publication_1',
+      payloadHash: 'b'.repeat(64),
+      ownerId: 'owner-b',
+    })).toMatchObject({ ok: true, resume: false })
+  })
+
+  test('rolls back a failed publication claim save without wedging owner liveness', async () => {
+    const run = createPublishableReviewRun({ headSha: 'claim-save-failure-head' })
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+    const payloadHash = publicationPayloadHash(publicationStageResult())
+    await rm(storeFile, { force: true })
+    await mkdir(storeFile)
+
+    expect(() => ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-a',
+    })).toThrow()
+    expect(ReviewRunStore.get(run.id)?.publication).toBeUndefined()
+
+    await rm(storeFile, { recursive: true, force: true })
+    expect(ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-b',
+    })).toMatchObject({ ok: true, resume: false })
+  })
+
+  test('rolls back failed marker, failure, and completion saves while preserving the live claim', async () => {
+    const run = createPublishableReviewRun({ headSha: 'mutation-save-failure-head' })
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+    const payloadHash = publicationPayloadHash(publicationStageResult())
+    const claim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!claim.ok) throw new Error(`expected publication claim: ${claim.error}`)
+    const identity = { runId: run.id, claimId: claim.claimId, ownerId: 'publisher-a', payloadHash }
+
+    const blockStoreRename = async () => {
+      await rm(storeFile, { force: true })
+      await mkdir(storeFile)
+    }
+    const unblockStoreRename = async () => {
+      await rm(storeFile, { recursive: true, force: true })
+    }
+
+    await blockStoreRename()
+    expect(() => ReviewRunStore.recordPublicationMarker({ ...identity, marker: 'summary-marker' })).toThrow()
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([])
+    await unblockStoreRename()
+    expect(ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-b',
+    })).toEqual({ ok: false, error: 'review_run_publish_in_progress' })
+
+    await blockStoreRename()
+    expect(() => ReviewRunStore.failPublication({ ...identity, error: 'publish-failed' })).toThrow()
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'running',
+      publication: { state: 'publishing', claimId: claim.claimId, ownerId: 'publisher-a', error: undefined },
+    })
+    await unblockStoreRename()
+
+    await blockStoreRename()
+    expect(() => ReviewRunStore.completePublication({
+      ...identity,
+      status: 'succeeded',
+      warnings: [],
+    })).toThrow()
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'running',
+      publication: { state: 'publishing', claimId: claim.claimId, ownerId: 'publisher-a' },
+    })
+    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
+    await unblockStoreRename()
+
+    expect(ReviewRunStore.completePublication({
+      ...identity,
+      status: 'succeeded',
+      warnings: [],
+    })).toBe(true)
+  })
+
   test('applies conditional review updates only to the current attempt identity', () => {
     const first = ReviewRunStore.create({
       platform: 'gitlab',
@@ -1957,6 +2069,68 @@ describe('GitLab review controller', () => {
     }))
   })
 
+  test('rejects a different live owner without issuing any of its publication POSTs', async () => {
+    const run = createPublishableReviewRun({ headSha: 'live-owner-head' })
+    const stageResult = publicationStageResult('Live owner review.')
+    const firstSummaryStarted = deferred()
+    const releaseFirstSummary = deferred()
+    const ownerAPosts: string[] = []
+    const ownerBCalls: Array<{ url: string; init?: RequestInit }> = []
+
+    const ownerAPublishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'live-owner-head' } })
+        }
+        if (requestMethod(init) === 'POST') {
+          ownerAPosts.push(value)
+          if (value.includes('/notes')) {
+            firstSummaryStarted.resolve()
+            await releaseFirstSummary.promise
+          }
+          return Response.json({ id: ownerAPosts.length })
+        }
+        throw new Error(`unexpected owner A request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    await firstSummaryStarted.promise
+    const ownerBResult = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        ownerBCalls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10') && requestMethod(init) === 'GET') {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'live-owner-head' } })
+        }
+        throw new Error(`owner B must not publish: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(ownerBResult).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_in_progress',
+    })
+    expect(ownerBCalls).toHaveLength(1)
+    expect(ownerBCalls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({ ownerId: 'publisher-a' })
+
+    releaseFirstSummary.resolve()
+    await expect(ownerAPublishing).resolves.toMatchObject({ published: true })
+    expect(ownerAPosts).toHaveLength(2)
+  })
+
   test('resumes the same payload after an inline 5xx without duplicating its summary', async () => {
     const run = createPublishableReviewRun({ headSha: 'partial-publication-head' })
     const stageResult = publicationStageResult('Partial publication review.')
@@ -2171,6 +2345,271 @@ describe('GitLab review controller', () => {
       rejectionKind: 'configuration',
       recoverable: true,
       publication: undefined,
+    })
+  })
+
+  test('preserves configuration rejection that lands during secret resolution with zero GitLab requests', async () => {
+    const run = createPublishableReviewRun({ headSha: 'secret-race-head' })
+    const secretStarted = deferred()
+    const releaseSecret = deferred()
+    const calls: string[] = []
+    const publishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: publicationStageResult(),
+      platforms: publishingPlatforms(),
+      publisherOwnerId: 'publisher-a',
+      secrets: {
+        ...liveSecrets,
+        async get(ref) {
+          if (ref.key !== 'gitlab-token') return await liveSecrets.get(ref)
+          secretStarted.resolve()
+          await releaseSecret.promise
+          return 'token'
+        },
+      },
+      fetch: (async (url) => {
+        calls.push(String(url))
+        return Response.json({})
+      }) as typeof fetch,
+    })
+
+    await secretStarted.promise
+    ReviewRunStore.update(run.id, {
+      status: 'rejected',
+      error: 'project_binding_missing',
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    releaseSecret.resolve()
+
+    await expect(publishing).resolves.toEqual({
+      published: false,
+      runId: run.id,
+      error: 'project_binding_missing',
+    })
+    expect(calls).toEqual([])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'rejected',
+      error: 'project_binding_missing',
+      publication: undefined,
+    })
+  })
+
+  test('preserves policy rejection that lands during the MR HEAD wait with zero publication POSTs', async () => {
+    const run = createPublishableReviewRun({ headSha: 'head-race-head' })
+    const headStarted = deferred()
+    const releaseHead = deferred()
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const publishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: publicationStageResult(),
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          headStarted.resolve()
+          await releaseHead.promise
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head-race-head' } })
+        }
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    await headStarted.promise
+    ReviewRunStore.update(run.id, {
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    releaseHead.resolve()
+
+    await expect(publishing).resolves.toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      publication: undefined,
+    })
+  })
+
+  test('reconciles duplicate finding markers through the publishers canonical aggregate', async () => {
+    const run = createPublishableReviewRun({ headSha: 'aggregate-reconcile-head' })
+    const stageResult = {
+      ...publicationStageResult('Aggregated marker review.'),
+      findings: [{
+        title: 'Changed line',
+        body: 'First source body.',
+        severity: 'minor' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+        source: 'security',
+      }, {
+        title: ' changed   line ',
+        body: 'Second source body.',
+        severity: 'critical' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+        source: 'correctness',
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const abandoned = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!abandoned.ok) throw new Error(`expected abandoned claim: ${abandoned.error}`)
+    ReviewRunStore.reloadForTesting()
+
+    const aggregated = aggregateReviewFindings(parseReviewStageResult(stageResult).findings)
+    expect(aggregated).toHaveLength(1)
+    expect(aggregated[0]).toMatchObject({ severity: 'critical', body: 'First source body.\n\nSecond source body.' })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const aggregateMarker = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(aggregated[0]!),
+    })
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'aggregate-reconcile-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 1, body: `remote summary\n\n${summaryMarker}` }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 'discussion-1', notes: [{ id: 2, body: `remote aggregate\n\n${aggregateMarker}` }] }])
+        }
+        throw new Error(`duplicate aggregate must not post: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 0 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker, aggregateMarker])
+  })
+
+  test('restores a locally checkpointed summary that is absent from remote notes', async () => {
+    const run = createPublishableReviewRun({ headSha: 'stale-local-marker-head' })
+    const stageResult = { ...publicationStageResult('Restore remote summary.'), findings: [] }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    const originalIdentity = {
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+    }
+    expect(ReviewRunStore.recordPublicationMarker({ ...originalIdentity, marker: summaryMarker })).toBe(true)
+    expect(ReviewRunStore.failPublication({ ...originalIdentity, error: 'crashed_after_checkpoint' })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'stale-local-marker-head' } })
+        }
+        if (requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/notes') && requestMethod(init) === 'POST') return Response.json({ id: 1 })
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: true, inlinePosted: 0 })
+    const posts = calls.filter((call) => requestMethod(call.init) === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(requestFormField(posts[0]?.init, 'body')).toContain(summaryMarker)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker])
+  })
+
+  test('stops reconciliation pagination when a reloaded owner replaces the claim during page 2', async () => {
+    const run = createPublishableReviewRun({ headSha: 'pagination-claim-head' })
+    const stageResult = { ...publicationStageResult('Pagination claim review.'), findings: [] }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'seed-owner' })
+    if (!original.ok) throw new Error(`expected seed claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'seed-owner',
+      payloadHash,
+      error: 'seed-partial',
+    })).toBe(true)
+
+    const page2Started = deferred()
+    const releasePage2 = deferred()
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const ownerAPublishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'pagination-claim-head' } })
+        }
+        if (value.includes('/notes') && new URL(value).searchParams.get('page') === '1') {
+          return Response.json([], { headers: { 'x-next-page': '2' } })
+        }
+        if (value.includes('/notes') && new URL(value).searchParams.get('page') === '2') {
+          page2Started.resolve()
+          await releasePage2.promise
+          return Response.json([], { headers: { 'x-next-page': '3' } })
+        }
+        if (value.includes('/notes') && new URL(value).searchParams.get('page') === '3') {
+          return Response.json([])
+        }
+        throw new Error(`unexpected request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    await page2Started.promise
+    ReviewRunStore.reloadForTesting()
+    const ownerBClaim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-b' })
+    if (!ownerBClaim.ok) throw new Error(`expected owner B takeover after reload: ${ownerBClaim.error}`)
+    releasePage2.resolve()
+
+    await expect(ownerAPublishing).resolves.toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_claim_lost',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.filter((call) => call.url.includes('/notes'))).toHaveLength(2)
+    expect(calls.some((call) => new URL(call.url).searchParams.get('page') === '3')).toBe(false)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'publishing',
+      claimId: ownerBClaim.claimId,
+      ownerId: 'publisher-b',
+      completedMarkers: [],
+      error: undefined,
     })
   })
 

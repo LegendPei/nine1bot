@@ -211,6 +211,7 @@ describe("webhook status URL selection", () => {
     expect(gitLabReviewPublishStatus("review_run_already_published")).toBe(409)
     expect(gitLabReviewPublishStatus("review_run_publish_in_progress")).toBe(409)
     expect(gitLabReviewPublishStatus("review_run_publish_payload_mismatch")).toBe(409)
+    expect(gitLabReviewPublishStatus("review_run_publish_claim_lost")).toBe(409)
     expect(gitLabReviewPublishStatus("review_run_already_active")).toBe(409)
     expect(gitLabReviewPublishStatus("gitlab_api_publish_failed:403:Forbidden")).toBe(502)
     expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)

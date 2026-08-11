@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
+  aggregateGitLabReviewPublicationFindings,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
@@ -655,6 +656,8 @@ export async function publishGitLabReviewRunResult(input: {
   }
 
   const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
+  const terminalAfterSecret = reviewRunPublicationTerminalResult(input.runId)
+  if (terminalAfterSecret) return terminalAfterSecret
   if (!token) {
     ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_token_missing' })
     await reportGitLabReviewRunFailure({
@@ -685,6 +688,8 @@ export async function publishGitLabReviewRunResult(input: {
   try {
     if (trigger.objectType === 'mr') {
       const mergeRequest = await client.getMergeRequest(trigger.projectId, objectId)
+      const terminalAfterHead = reviewRunPublicationTerminalResult(input.runId)
+      if (terminalAfterHead) return terminalAfterHead
       const headError = gitLabReviewChangesHeadError(trigger, mergeRequest)
       if (headError) {
         ReviewRunStore.update(input.runId, {
@@ -697,6 +702,8 @@ export async function publishGitLabReviewRunResult(input: {
       }
     }
   } catch (error) {
+    const terminalAfterHeadFailure = reviewRunPublicationTerminalResult(input.runId)
+    if (terminalAfterHeadFailure) return terminalAfterHeadFailure
     const message = gitLabApiFailureMessage('publish_result', error)
     ReviewRunStore.update(input.runId, { status: 'failed', error: message })
     return { published: false, runId: input.runId, error: message }
@@ -704,6 +711,8 @@ export async function publishGitLabReviewRunResult(input: {
 
   const payloadHash = reviewStageResultHash(parsed)
   const ownerId = input.publisherOwnerId ?? gitLabReviewPublisherOwnerId
+  const terminalBeforeClaim = reviewRunPublicationTerminalResult(input.runId)
+  if (terminalBeforeClaim) return terminalBeforeClaim
   const claim = ReviewRunStore.claimPublication({ runId: input.runId, payloadHash, ownerId })
   if (!claim.ok) return { published: false, runId: input.runId, error: claim.error }
   const claimIdentity = {
@@ -712,7 +721,7 @@ export async function publishGitLabReviewRunResult(input: {
     ownerId,
     payloadHash,
   }
-  const completedMarkers = new Set(claim.completedMarkers)
+  const completedMarkers = claim.resume ? new Set<string>() : new Set(claim.completedMarkers)
 
   if (claim.resume) {
     try {
@@ -1098,6 +1107,18 @@ class PublicationClaimLostError extends Error {
   }
 }
 
+function reviewRunPublicationTerminalResult(runId: string): Extract<PublishGitLabReviewRunResult, { published: false }> | undefined {
+  const run = ReviewRunStore.get(runId)
+  if (!run) return { published: false, runId, error: 'review_run_not_found' }
+  if (run.publishedAt || run.publication?.state === 'published') {
+    return { published: false, runId, error: 'review_run_already_published' }
+  }
+  if (run.status === 'rejected') {
+    return { published: false, runId, error: run.error ?? 'review_run_rejected' }
+  }
+  return undefined
+}
+
 function assertPublicationClaimCurrent(identity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0]) {
   if (!ReviewRunStore.isPublicationClaimCurrent(identity)) throw new PublicationClaimLostError()
 }
@@ -1135,13 +1156,16 @@ async function reconcileGitLabReviewPublication(input: {
   completedMarkers: Set<string>
 }) {
   const resource = input.trigger.objectType === 'mr' ? 'merge_requests' : 'repository/commits'
-  assertPublicationClaimCurrent(input.claimIdentity)
+  const requestGuard = () => assertPublicationClaimCurrent(input.claimIdentity)
+  requestGuard()
   const notes = await input.client.listNotes({
     projectId: input.trigger.projectId,
     resource,
     resourceId: input.objectId,
+  }, {
+    requestGuard,
   })
-  assertPublicationClaimCurrent(input.claimIdentity)
+  requestGuard()
 
   const summaryMarker = gitLabReviewPublicationMarker({ runId: input.claimIdentity.runId, kind: 'summary' })
   const noteMarkers = input.trigger.objectType === 'commit'
@@ -1153,13 +1177,15 @@ async function reconcileGitLabReviewPublication(input: {
   const remoteMarkers = markersInPublishedComments(notes, noteMarkers)
 
   if (input.trigger.objectType === 'mr') {
-    assertPublicationClaimCurrent(input.claimIdentity)
+    requestGuard()
     const discussions = await input.client.listDiscussions({
       projectId: input.trigger.projectId,
       resourceId: input.objectId,
+    }, {
+      requestGuard,
     })
-    assertPublicationClaimCurrent(input.claimIdentity)
-    const inlineMarkers = input.parsed.findings.map((finding) => gitLabReviewPublicationMarker({
+    requestGuard()
+    const inlineMarkers = aggregateGitLabReviewPublicationFindings(input.parsed.findings).map((finding) => gitLabReviewPublicationMarker({
       runId: input.claimIdentity.runId,
       kind: 'inline',
       findingKey: gitLabReviewFindingKey(finding),
@@ -1167,11 +1193,12 @@ async function reconcileGitLabReviewPublication(input: {
     remoteMarkers.push(...markersInPublishedComments(discussions, inlineMarkers))
   }
 
-  for (const marker of new Set(remoteMarkers)) {
-    if (input.completedMarkers.has(marker)) continue
-    if (!ReviewRunStore.recordPublicationMarker({ ...input.claimIdentity, marker })) {
-      throw new PublicationClaimLostError()
-    }
+  const completedMarkers = [...new Set(remoteMarkers)]
+  if (!ReviewRunStore.replacePublicationMarkers({ ...input.claimIdentity, markers: completedMarkers })) {
+    throw new PublicationClaimLostError()
+  }
+  input.completedMarkers.clear()
+  for (const marker of completedMarkers) {
     input.completedMarkers.add(marker)
   }
 }

@@ -2688,6 +2688,35 @@ describe('GitLab review foundation', () => {
     expect(new URL(urls[4]!).searchParams.get('page')).toBe('5')
   })
 
+  test('runs a request guard around every pagination await and stops after ownership loss', async () => {
+    const urls: string[] = []
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        urls.push(value)
+        const page = new URL(value).searchParams.get('page')
+        return Response.json([], { headers: { 'x-next-page': page === '1' ? '2' : '3' } })
+      }) as typeof fetch,
+    })
+
+    await expect(client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (guardCalls === 4) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )).rejects.toThrow('review_run_publish_claim_lost')
+
+    expect(guardCalls).toBe(4)
+    expect(urls).toHaveLength(2)
+    expect(urls.map((url) => new URL(url).searchParams.get('page'))).toEqual(['1', '2'])
+  })
+
   test('caps flattened discussion notes globally at 500 projected comments', async () => {
     const client = new GitLabApiClient({
       baseUrl: 'https://gitlab.example.com',

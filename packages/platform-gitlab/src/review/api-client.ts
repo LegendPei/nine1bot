@@ -11,6 +11,7 @@ const MAX_COMMIT_PARENTS = 64
 export type GitLabRequestOptions = {
   signal?: AbortSignal
   maxItems?: number
+  requestGuard?: () => void
 }
 
 export type GitLabApiRedirectErrorCode =
@@ -436,10 +437,16 @@ export class GitLabApiClient {
     for (let index = 0; index < pageLimit && !visitedPages.has(page); index += 1) {
       visitedPages.add(page)
       const separator = path.includes('?') ? '&' : '?'
-      const result = await this.requestPage<T[]>(
-        `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
-        { signal: options.signal },
-      )
+      options.requestGuard?.()
+      let result: { data: T[]; nextPage?: string }
+      try {
+        result = await this.requestPage<T[]>(
+          `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
+          { signal: options.signal },
+        )
+      } finally {
+        options.requestGuard?.()
+      }
       if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
       values.push(...result.data.slice(0, itemLimit - values.length))
       if (values.length >= itemLimit) break
