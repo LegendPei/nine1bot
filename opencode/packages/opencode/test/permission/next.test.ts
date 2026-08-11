@@ -59,6 +59,20 @@ async function waitForPendingPermission(requestID: string) {
   throw new Error(`Permission request was not queued: ${requestID}`)
 }
 
+function pendingPermissionTmpdir() {
+  return tmpdir({
+    git: true,
+    config: {
+      autonomous: {
+        enabled: false,
+        maxRetries: 3,
+        askAfterRetries: true,
+        allowDoomLoop: true,
+      },
+    },
+  })
+}
+
 // fromConfig tests
 
 test("fromConfig - string value becomes wildcard rule", () => {
@@ -568,11 +582,12 @@ test("ask - throws RejectedError when action is deny", async () => {
 })
 
 test("ask - returns pending promise when action is ask", async () => {
-  await using tmp = await tmpdir({ git: true })
+  await using tmp = await pendingPermissionTmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const promise = PermissionNext.ask({
+        id: "permission_test_pending",
         sessionID: "session_test",
         permission: "bash",
         patterns: ["ls"],
@@ -580,9 +595,14 @@ test("ask - returns pending promise when action is ask", async () => {
         always: [],
         ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
       })
-      // Promise should be pending, not resolved
-      expect(promise).toBeInstanceOf(Promise)
-      // Don't await - just verify it returns a promise
+      await waitForPendingPermission("permission_test_pending")
+
+      await PermissionNext.reply({
+        requestID: "permission_test_pending",
+        reply: "once",
+      })
+
+      await expect(promise).resolves.toBeUndefined()
     },
   })
 })
@@ -590,7 +610,7 @@ test("ask - returns pending promise when action is ask", async () => {
 // reply tests
 
 test("reply - once resolves the pending ask", async () => {
-  await using tmp = await tmpdir({ git: true })
+  await using tmp = await pendingPermissionTmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
@@ -604,6 +624,8 @@ test("reply - once resolves the pending ask", async () => {
         ruleset: [],
       })
 
+      await waitForPendingPermission("permission_test1")
+
       await PermissionNext.reply({
         requestID: "permission_test1",
         reply: "once",
@@ -615,7 +637,7 @@ test("reply - once resolves the pending ask", async () => {
 })
 
 test("reply - reject throws RejectedError", async () => {
-  await using tmp = await tmpdir({ git: true })
+  await using tmp = await pendingPermissionTmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
@@ -629,6 +651,8 @@ test("reply - reject throws RejectedError", async () => {
         ruleset: [],
       })
 
+      await waitForPendingPermission("permission_test2")
+
       await PermissionNext.reply({
         requestID: "permission_test2",
         reply: "reject",
@@ -640,7 +664,7 @@ test("reply - reject throws RejectedError", async () => {
 })
 
 test("reply - always stores a session profile grant only", async () => {
-  await using tmp = await tmpdir({ git: true })
+  await using tmp = await pendingPermissionTmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
@@ -695,7 +719,7 @@ test("reply - always stores a session profile grant only", async () => {
 })
 
 test("reply - reject cancels all pending for same session", async () => {
-  await using tmp = await tmpdir({ git: true })
+  await using tmp = await pendingPermissionTmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
@@ -718,6 +742,9 @@ test("reply - reject cancels all pending for same session", async () => {
         always: [],
         ruleset: [],
       })
+
+      await waitForPendingPermission("permission_test4a")
+      await waitForPendingPermission("permission_test4b")
 
       // Catch rejections before they become unhandled
       const result1 = askPromise1.catch((e) => e)
