@@ -3690,6 +3690,86 @@ describe('GitLab review controller', () => {
     })
   }, 30_000)
 
+  test('keeps a resumed 501-finding publication partial without changing its checkpoint or posting', async () => {
+    const headSha = 'reconciliation-finding-count-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = {
+      ...publicationStageResult('Reconciliation finding count budget.'),
+      findings: Array.from({ length: 501 }, (_, id) => ({
+        title: 'Shared finding',
+        body: `Tiny body ${id.toString().padStart(3, '0')}`,
+        severity: 'info' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      })),
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const existingMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.recordPublicationMarker({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      marker: existingMarker,
+    })).toBe(true)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'reconciliation_finding_count_crash',
+    })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10') && requestMethod(init) === 'GET') {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (requestMethod(init) === 'POST') return Response.json({ id: 10 })
+        throw new Error(`unexpected finding count request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    const publication = ReviewRunStore.get(run.id)?.publication
+    expect({
+      result,
+      postCount: calls.filter((call) => requestMethod(call.init) === 'POST').length,
+      publication: {
+        state: publication?.state,
+        ownerId: publication?.ownerId,
+        claimId: publication?.claimId,
+        completedMarkers: publication?.completedMarkers,
+        error: publication?.error,
+      },
+    }).toEqual({
+      result: {
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      },
+      postCount: 0,
+      publication: {
+        state: 'partial',
+        ownerId: undefined,
+        claimId: undefined,
+        completedMarkers: [existingMarker],
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      },
+    })
+  }, 30_000)
+
   test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
     const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
     const stageResult = {

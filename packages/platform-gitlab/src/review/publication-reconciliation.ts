@@ -13,6 +13,7 @@ export const GITLAB_REVIEW_LEGACY_PUBLICATION_AMBIGUOUS = 'gitlab_review_publica
 
 const RECONCILIATION_COMMENT_CODE_UNIT_BUDGET = 256_000
 const RECONCILIATION_REVIEW_CODE_UNIT_BUDGET = 256_000
+const RECONCILIATION_FINDING_COUNT_BUDGET = 500
 // Legacy reconciliation is synchronous, so unique bodies and canonical finding patterns share one fixed budget.
 const LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET = 256_000
 const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
@@ -34,19 +35,19 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
   notes: GitLabPublishedComment[]
   discussions: GitLabPublishedComment[]
 }) {
-  assertReconciliationInputBudget(input)
-  const plan = buildGitLabReviewPublicationPlan({ runId: input.runId, findings: input.findings })
+  const snapshot = snapshotReconciliationInput(input)
+  const plan = buildGitLabReviewPublicationPlan({ runId: snapshot.runId, findings: snapshot.findings })
   const summaryMarker = requiredMarker(plan.summaryMarker)
-  const layout = buildLegacyPublicationLayout(input, plan.findings)
+  const layout = buildLegacyPublicationLayout(snapshot, plan.findings)
   const markerCatalog = buildMarkerCatalog({
-    runId: input.runId,
+    runId: snapshot.runId,
     summaryMarker,
     findings: plan.findings,
     summaryFindings: layout.summaryFindings,
   })
   const scanCache = new Map<string, ExtractedMarkerBody>()
-  const notes = scanUniqueComments(input.notes, 'note', markerCatalog, scanCache)
-  const discussions = scanUniqueComments(input.discussions, 'discussion', markerCatalog, scanCache)
+  const notes = scanUniqueComments(snapshot.notes, 'note', markerCatalog, scanCache)
+  const discussions = scanUniqueComments(snapshot.discussions, 'discussion', markerCatalog, scanCache)
   const completed = new Set<string>()
 
   for (const note of notes) {
@@ -74,7 +75,7 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
     })
     reconcileLegacyRunFallbacks({
       notes: legacyFallbackNotes,
-      manifest: input.manifest,
+      manifest: snapshot.manifest,
       candidates: layout.inlineFindings,
       warnings: [
         ...layout.warnings,
@@ -88,8 +89,8 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
     })
     reconcileLegacySummaryFindings({
       notes: legacySummaryNotes,
-      summary: input.summary,
-      manifest: input.manifest,
+      summary: snapshot.summary,
+      manifest: snapshot.manifest,
       warnings: layout.warnings,
       summaryWarnings: layout.summaryWarnings,
       summaryFindings: layout.summaryFindings,
@@ -110,28 +111,12 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
   ]
 }
 
-function assertReconciliationInputBudget(
+function snapshotReconciliationInput(
   input: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0],
-): void {
-  const commentBodies = new Set<string>()
-  let commentCodeUnits = 0
-  for (const comment of input.notes) {
-    if (commentBodies.has(comment.body)) continue
-    commentBodies.add(comment.body)
-    commentCodeUnits = addReconciliationInputCodeUnits(
-      commentCodeUnits,
-      comment.body.length,
-      RECONCILIATION_COMMENT_CODE_UNIT_BUDGET,
-    )
-  }
-  for (const comment of input.discussions) {
-    if (commentBodies.has(comment.body)) continue
-    commentBodies.add(comment.body)
-    commentCodeUnits = addReconciliationInputCodeUnits(
-      commentCodeUnits,
-      comment.body.length,
-      RECONCILIATION_COMMENT_CODE_UNIT_BUDGET,
-    )
+): Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0] {
+  const inputFindings = input.findings
+  if (inputFindings.length > RECONCILIATION_FINDING_COUNT_BUDGET) {
+    throw new GitLabReviewPublicationCompatibilityError()
   }
 
   let reviewCodeUnits = 0
@@ -144,18 +129,96 @@ function assertReconciliationInputBudget(
     )
   }
 
-  addReviewString(input.runId)
-  addReviewString(input.summary)
-  for (const warning of input.warnings ?? []) addReviewString(warning)
-  for (const finding of input.findings) {
-    addReviewString(finding.id)
-    addReviewString(finding.title)
-    addReviewString(finding.body)
-    addReviewString(finding.category)
-    addReviewString(finding.file)
-    addReviewString(finding.source)
-    addReviewString(finding.suggestion?.replacement)
+  const runId = snapshotRequiredReconciliationString(input.runId)
+  addReviewString(runId)
+  const summary = snapshotRequiredReconciliationString(input.summary)
+  addReviewString(summary)
+  const inputWarnings = input.warnings
+  const warnings = inputWarnings?.map((warning) => {
+    const snapshot = snapshotRequiredReconciliationString(warning)
+    addReviewString(snapshot)
+    return snapshot
+  })
+  const findings = inputFindings.map((finding): ReviewFinding => {
+    const id = snapshotOptionalReconciliationString(finding.id)
+    addReviewString(id)
+    const title = snapshotRequiredReconciliationString(finding.title)
+    addReviewString(title)
+    const body = snapshotRequiredReconciliationString(finding.body)
+    addReviewString(body)
+    const category = snapshotOptionalReconciliationString(finding.category)
+    addReviewString(category)
+    const file = snapshotOptionalReconciliationString(finding.file)
+    addReviewString(file)
+    const source = snapshotOptionalReconciliationString(finding.source)
+    addReviewString(source)
+    const inputSuggestion = finding.suggestion
+    let suggestion: ReviewFinding['suggestion']
+    if (inputSuggestion !== undefined) {
+      const replacement = snapshotRequiredReconciliationString(inputSuggestion.replacement)
+      addReviewString(replacement)
+      suggestion = {
+        replacement,
+        confidence: inputSuggestion.confidence,
+      }
+    }
+    return {
+      id,
+      title,
+      body,
+      severity: finding.severity,
+      category,
+      file,
+      oldLine: finding.oldLine,
+      newLine: finding.newLine,
+      suggestion,
+      source,
+    }
+  })
+
+  const commentBodies = new Set<string>()
+  let commentCodeUnits = 0
+  const snapshotComments = (comments: GitLabPublishedComment[]) => comments.map((comment) => {
+    const body = snapshotRequiredReconciliationString(comment.body)
+    if (body.length > RECONCILIATION_COMMENT_CODE_UNIT_BUDGET) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
+    if (!commentBodies.has(body)) {
+      commentCodeUnits = addReconciliationInputCodeUnits(
+        commentCodeUnits,
+        body.length,
+        RECONCILIATION_COMMENT_CODE_UNIT_BUDGET,
+      )
+      commentBodies.add(body)
+    }
+    return { id: comment.id, body }
+  })
+  const notes = snapshotComments(input.notes)
+  const discussions = snapshotComments(input.discussions)
+
+  return {
+    runId,
+    objectType: input.objectType,
+    inlineComments: input.inlineComments,
+    summary,
+    findings,
+    manifest: input.manifest,
+    warnings,
+    notes,
+    discussions,
   }
+}
+
+function snapshotRequiredReconciliationString(value: string) {
+  if (typeof value !== 'string') throw new GitLabReviewPublicationCompatibilityError()
+  return value
+}
+
+function snapshotOptionalReconciliationString(value: string | undefined) {
+  if (value !== undefined && typeof value !== 'string') {
+    throw new GitLabReviewPublicationCompatibilityError()
+  }
+  return value
 }
 
 function addReconciliationInputCodeUnits(current: number, amount: number, budget: number) {

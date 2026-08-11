@@ -3279,6 +3279,326 @@ describe('GitLab review foundation', () => {
     })))
   })
 
+  test('reads an accessor-backed comment body once and scans only its snapshot', () => {
+    const runId = 'run-comment-body-snapshot'
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const capturedBody = `current summary\n\n${summaryMarker}`
+    const changedBody = 'x'.repeat(256_001)
+    let bodyReads = 0
+    const note = Object.defineProperty({ id: 1 }, 'body', {
+      enumerable: true,
+      get() {
+        bodyReads += 1
+        return bodyReads <= 3 ? capturedBody : changedBody
+      },
+    }) as { id: number; body: string }
+
+    const completed = reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 'Comment body snapshot.',
+      findings: [],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [note],
+      discussions: [],
+    })
+
+    expect({ completed, bodyReads }).toEqual({ completed: [summaryMarker], bodyReads: 1 })
+  })
+
+  test('rejects one oversized plain comment before hashing and accepts the exact boundary', () => {
+    const input = {
+      runId: 'run-single-comment-budget',
+      objectType: 'mr' as const,
+      inlineComments: false,
+      summary: 'Single comment budget.',
+      findings: [] as ReviewFinding[],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      discussions: [],
+    }
+    const exactBody = 'x'.repeat(256_000)
+    expect(reconcileGitLabReviewPublicationMarkers({
+      ...input,
+      notes: [{ id: 1, body: exactBody }],
+    })).toEqual([])
+
+    const oversizedBody = 'x'.repeat(256_001)
+    const hasDescriptor = Object.getOwnPropertyDescriptor(Set.prototype, 'has')!
+    const addDescriptor = Object.getOwnPropertyDescriptor(Set.prototype, 'add')!
+    const originalHas = Set.prototype.has
+    const originalAdd = Set.prototype.add
+    let oversizedHasCalls = 0
+    let oversizedAddCalls = 0
+    Object.defineProperty(Set.prototype, 'has', {
+      ...hasDescriptor,
+      value(this: Set<unknown>, value: unknown) {
+        if (value === oversizedBody) oversizedHasCalls += 1
+        return Reflect.apply(originalHas, this, [value]) as boolean
+      },
+    })
+    Object.defineProperty(Set.prototype, 'add', {
+      ...addDescriptor,
+      value(this: Set<unknown>, value: unknown) {
+        if (value === oversizedBody) oversizedAddCalls += 1
+        return Reflect.apply(originalAdd, this, [value]) as Set<unknown>
+      },
+    })
+
+    let thrown: unknown
+    try {
+      reconcileGitLabReviewPublicationMarkers({
+        ...input,
+        notes: [{ id: 2, body: oversizedBody }],
+      })
+    } catch (error) {
+      thrown = error
+    } finally {
+      Object.defineProperty(Set.prototype, 'has', hasDescriptor)
+      Object.defineProperty(Set.prototype, 'add', addDescriptor)
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe('gitlab_review_publication_legacy_ambiguous')
+    expect({ oversizedHasCalls, oversizedAddCalls }).toEqual({
+      oversizedHasCalls: 0,
+      oversizedAddCalls: 0,
+    })
+  })
+
+  test('counts one exact-boundary body shared by notes and discussions once', () => {
+    const body = 'x'.repeat(256_000)
+    const bodyReads = [0, 0]
+    const comment = (id: number, readIndex: number) => Object.defineProperty({ id }, 'body', {
+      enumerable: true,
+      get() {
+        bodyReads[readIndex] = bodyReads[readIndex]! + 1
+        return body
+      },
+    }) as { id: number; body: string }
+
+    const completed = reconcileGitLabReviewPublicationMarkers({
+      runId: 'run-cross-source-comment-budget',
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 'Cross-source comment budget.',
+      findings: [],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [comment(1, 0)],
+      discussions: [comment(2, 1)],
+    })
+
+    expect({ completed, bodyReads }).toEqual({ completed: [], bodyReads: [1, 1] })
+  })
+
+  test('snapshots accessor-backed review and finding values before plan construction', () => {
+    const runId = 'run-review-value-snapshot'
+    const summary = 'Captured review summary.'
+    const warning = 'Captured review warning.'
+    const manifest = buildGitLabDiffManifest({ changes: [] })
+    const plainFinding: ReviewFinding = {
+      id: 'captured-id',
+      title: 'Captured finding',
+      body: 'Captured finding body.',
+      severity: 'major',
+      category: 'correctness',
+      file: 'src/app.ts',
+      oldLine: 1,
+      newLine: 2,
+      source: 'reviewer-a',
+      suggestion: { replacement: 'return captured', confidence: 'high' },
+    }
+    const reads: Record<string, number> = {}
+    const tracked = <T>(label: string, first: T, later: T = first): PropertyDescriptor => ({
+      enumerable: true,
+      get() {
+        reads[label] = (reads[label] ?? 0) + 1
+        return reads[label] === 1 ? first : later
+      },
+    })
+    const suggestion = Object.defineProperties({}, {
+      replacement: tracked('suggestion.replacement', plainFinding.suggestion!.replacement, 'return changed'),
+      confidence: tracked('suggestion.confidence', plainFinding.suggestion!.confidence, 'low'),
+    }) as NonNullable<ReviewFinding['suggestion']>
+    const finding = Object.defineProperties({}, {
+      id: tracked('finding.id', plainFinding.id, 'changed-id'),
+      title: tracked('finding.title', plainFinding.title, 'Changed finding'),
+      body: tracked('finding.body', plainFinding.body, 'Changed finding body.'),
+      severity: tracked('finding.severity', plainFinding.severity, 'critical'),
+      category: tracked('finding.category', plainFinding.category, 'security'),
+      file: tracked('finding.file', plainFinding.file, 'src/changed.ts'),
+      oldLine: tracked('finding.oldLine', plainFinding.oldLine, 3),
+      newLine: tracked('finding.newLine', plainFinding.newLine, 4),
+      source: tracked('finding.source', plainFinding.source, 'reviewer-b'),
+      suggestion: tracked('finding.suggestion', suggestion),
+    }) as ReviewFinding
+    const warnings: string[] = []
+    Object.defineProperty(warnings, 0, tracked('warning', warning, 'Changed review warning.'))
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const fallbackMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(plainFinding),
+    })
+    const legacySummaryBody = [
+      renderReviewSummaryComment({
+        summary,
+        findings: aggregateReviewFindings([plainFinding]),
+        manifest,
+        warnings: [warning],
+      }),
+      summaryMarker,
+    ].join('\n\n')
+    const input = Object.defineProperties({
+      runId,
+      objectType: 'mr' as const,
+      inlineComments: false,
+      summary,
+      findings: [finding],
+      manifest,
+      warnings,
+      notes: [{ id: 1, body: legacySummaryBody }],
+      discussions: [],
+    }, {
+      runId: tracked('runId', runId, 'run-review-value-changed'),
+      summary: tracked('summary', summary, 'Changed review summary.'),
+      findings: tracked('findings', [finding]),
+      warnings: tracked('warnings', warnings),
+    }) as Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0]
+
+    let outcome: string[] | string
+    try {
+      outcome = reconcileGitLabReviewPublicationMarkers(input)
+    } catch (error) {
+      outcome = (error as Error).message
+    }
+
+    const expectedReads = Object.fromEntries([
+      'runId',
+      'summary',
+      'findings',
+      'warnings',
+      'warning',
+      'finding.id',
+      'finding.title',
+      'finding.body',
+      'finding.severity',
+      'finding.category',
+      'finding.file',
+      'finding.oldLine',
+      'finding.newLine',
+      'finding.source',
+      'finding.suggestion',
+      'suggestion.replacement',
+      'suggestion.confidence',
+    ].map((label) => [label, 1]))
+    expect({ outcome, reads }).toEqual({
+      outcome: [summaryMarker, fallbackMarker],
+      reads: expectedReads,
+    })
+  })
+
+  test('accepts exactly 500 findings and rejects 501 before reading a finding field', () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const input = {
+      runId: 'run-finding-count-budget',
+      objectType: 'mr' as const,
+      inlineComments: true,
+      summary: 'Finding count budget.',
+      manifest,
+      notes: [],
+      discussions: [],
+    }
+    const acceptedFindings: ReviewFinding[] = Array.from({ length: 500 }, (_, id) => ({
+      title: `Finding ${id}`,
+      body: `Body ${id}`,
+      severity: 'info' as const,
+      file: 'src/app.ts',
+      newLine: 2,
+    }))
+    expect(reconcileGitLabReviewPublicationMarkers({
+      ...input,
+      findings: acceptedFindings,
+    })).toEqual([])
+
+    let sentinelReads = 0
+    const sentinel = Object.defineProperty({
+      body: 'Sentinel body.',
+      severity: 'info' as const,
+      file: 'src/app.ts',
+      newLine: 2,
+    }, 'title', {
+      enumerable: true,
+      get() {
+        sentinelReads += 1
+        return 'Sentinel finding'
+      },
+    }) as ReviewFinding
+    let thrown: unknown
+    try {
+      reconcileGitLabReviewPublicationMarkers({
+        ...input,
+        findings: [sentinel, ...acceptedFindings],
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe('gitlab_review_publication_legacy_ambiguous')
+    expect(sentinelReads).toBe(0)
+  })
+
+  test('bounds 500 same-key unique tiny findings in forward and reverse order', () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const runs = [false, true].map((reverse) => {
+      const bodyReads = Array.from({ length: 500 }, () => 0)
+      const findings: ReviewFinding[] = Array.from({ length: 500 }, (_, id) => Object.defineProperty({
+        title: 'Shared finding',
+        severity: 'info' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }, 'body', {
+        enumerable: true,
+        get() {
+          bodyReads[id] = bodyReads[id]! + 1
+          return `Tiny body ${id.toString().padStart(3, '0')}`
+        },
+      }) as ReviewFinding)
+      if (reverse) findings.reverse()
+      const startedAt = performance.now()
+      const completed = reconcileGitLabReviewPublicationMarkers({
+        runId: `run-same-key-${reverse ? 'reverse' : 'forward'}`,
+        objectType: 'mr',
+        inlineComments: true,
+        summary: 'Same-key finding budget.',
+        findings,
+        manifest,
+        notes: [],
+        discussions: [],
+      })
+      return { bodyReads, completed, elapsedMs: performance.now() - startedAt }
+    })
+
+    expect(runs.map(({ completed }) => completed)).toEqual([[], []])
+    expect(runs.every(({ elapsedMs }) => elapsedMs < 1_000)).toBe(true)
+    expect(runs.every(({ bodyReads }) => bodyReads.every((count) => count === 1))).toBe(true)
+  }, 30_000)
+
   test('deduplicates 500 duplicate max-sized legacy notes before compatibility work', () => {
     const runId = 'run-duplicate-legacy-stress'
     const findings: ReviewFinding[] = Array.from({ length: 500 }, (_, index) => ({
