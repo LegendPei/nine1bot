@@ -146,33 +146,17 @@ function assertReconciliationInputBudget(
   }
 
   addReviewString(input.runId)
-  addReviewString(input.objectType)
   addReviewString(input.summary)
+  for (const warning of input.warnings ?? []) addReviewString(warning)
   for (const finding of input.findings) {
     addReviewString(finding.id)
     addReviewString(finding.title)
     addReviewString(finding.body)
-    addReviewString(finding.severity)
     addReviewString(finding.category)
     addReviewString(finding.file)
-    addReviewString(finding.suggestion?.replacement)
-    addReviewString(finding.suggestion?.confidence)
     addReviewString(finding.source)
+    addReviewString(finding.suggestion?.replacement)
   }
-  for (const file of input.manifest.files) {
-    addReviewString(file.oldPath)
-    addReviewString(file.newPath)
-    addReviewString(file.diff)
-  }
-  for (const skipped of input.manifest.skipped) {
-    addReviewString(skipped.path)
-    addReviewString(skipped.reason)
-  }
-  addReviewString(input.manifest.blockReason)
-  addReviewString(input.manifest.diffRefs?.baseSha)
-  addReviewString(input.manifest.diffRefs?.startSha)
-  addReviewString(input.manifest.diffRefs?.headSha)
-  for (const warning of input.warnings ?? []) addReviewString(warning)
 }
 
 function addReconciliationInputCodeUnits(current: number, amount: number, budget: number) {

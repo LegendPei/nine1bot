@@ -3245,6 +3245,76 @@ describe('GitLab review foundation', () => {
     expect(performance.now() - startedAt).toBeLessThan(1_000)
   }, 30_000)
 
+  test('ignores manifest content outside the reconciliation review budget', () => {
+    const manifest = {
+      ...buildGitLabDiffManifest({ changes: [] }),
+      files: [{
+        oldPath: 'src/app.ts',
+        newPath: 'src/app.ts',
+        diff: 'x'.repeat(256_001),
+        added: false,
+        renamed: false,
+        deleted: false,
+        generated: false,
+      }],
+    }
+
+    expect(reconcileGitLabReviewPublicationMarkers({
+      runId: 'r',
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 's',
+      findings: [],
+      manifest,
+      notes: [],
+      discussions: [],
+    })).toEqual([])
+  })
+
+  test('accepts 256000 bound review code units and rejects 256001', () => {
+    const reconciliationAt = (bodyCodeUnits: number) => {
+      const runId = 'r'
+      const summary = 's'
+      const warnings = ['w']
+      const finding: ReviewFinding = {
+        id: 'i',
+        title: 't',
+        body: 'x'.repeat(bodyCodeUnits),
+        severity: 'blocker',
+        category: 'c',
+        file: 'f',
+        source: 'o',
+        suggestion: { replacement: 'p', confidence: 'high' },
+      }
+      const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+      const fallbackMarker = gitLabReviewPublicationMarker({
+        runId,
+        kind: 'fallback',
+        findingKey: gitLabReviewFindingKey(finding),
+      })
+      return {
+        expected: [summaryMarker, fallbackMarker],
+        run: () => reconcileGitLabReviewPublicationMarkers({
+          runId,
+          objectType: 'mr',
+          inlineComments: false,
+          summary,
+          findings: [finding],
+          manifest: buildGitLabDiffManifest({ changes: [] }),
+          warnings,
+          notes: [{ id: 1, body: `current\n\n${summaryMarker}\n${fallbackMarker}` }],
+          discussions: [],
+        }),
+      }
+    }
+
+    const exactBudget = reconciliationAt(255_991)
+    expect(exactBudget.run()).toEqual(exactBudget.expected)
+
+    const overBudget = reconciliationAt(255_992)
+    expect(overBudget.run).toThrow('gitlab_review_publication_legacy_ambiguous')
+  })
+
   test('reconciles 500 ordinary current-format DTOs without invoking legacy compatibility', () => {
     const runId = 'run-current-format-stress'
     const finding: ReviewFinding = {
