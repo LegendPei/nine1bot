@@ -2679,9 +2679,15 @@ describe('GitLab review foundation', () => {
 
   test('bounds scanning for repeated unterminated publication marker prefixes', () => {
     const markerPrefix = '<!-- nine1bot:gitlab-review-publication:'
-    const body = `${markerPrefix.repeat(760)}>`
-    const repetitions = 40
-    expect(body.length).toBeLessThanOrEqual(31_250)
+    const bodies = Array.from({ length: 8 }, (_, id) => `${id}${markerPrefix.repeat(760)}>`)
+    const repetitions = 20
+    const uniqueBodyCodeUnits = bodies.reduce((total, body) => total + body.length, 0)
+    expect(markerPrefix).toHaveLength(40)
+    expect(bodies.every((body) => body.length === 30_402)).toBe(true)
+    expect(bodies.every((body) => body.length <= 31_250)).toBe(true)
+    expect(new Set(bodies).size).toBe(8)
+    expect(uniqueBodyCodeUnits).toBe(243_216)
+    expect(uniqueBodyCodeUnits).toBeLessThanOrEqual(256_000)
 
     const input = {
       runId: 'run-marker-prefix-amplification',
@@ -2690,7 +2696,7 @@ describe('GitLab review foundation', () => {
       summary: 'Marker prefix amplification.',
       findings: [] as ReviewFinding[],
       manifest: buildGitLabDiffManifest({ changes: [] }),
-      notes: [{ id: 1, body }],
+      notes: bodies.map((body, id) => ({ id, body })),
       discussions: [],
     }
     const results: string[][] = []
