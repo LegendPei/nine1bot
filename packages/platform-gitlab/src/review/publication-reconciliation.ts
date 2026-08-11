@@ -11,6 +11,8 @@ import type {
 
 export const GITLAB_REVIEW_LEGACY_PUBLICATION_AMBIGUOUS = 'gitlab_review_publication_legacy_ambiguous'
 
+const RECONCILIATION_COMMENT_CODE_UNIT_BUDGET = 256_000
+const RECONCILIATION_REVIEW_CODE_UNIT_BUDGET = 256_000
 // Legacy reconciliation is synchronous, so unique bodies and canonical finding patterns share one fixed budget.
 const LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET = 256_000
 const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
@@ -33,6 +35,7 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
   notes: GitLabPublishedComment[]
   discussions: GitLabPublishedComment[]
 }) {
+  assertReconciliationInputBudget(input)
   const plan = buildGitLabReviewPublicationPlan({ runId: input.runId, findings: input.findings })
   const summaryMarker = requiredMarker(plan.summaryMarker)
   const layout = buildLegacyPublicationLayout(input, plan.findings)
@@ -106,6 +109,76 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
       return markers && completed.has(markers.inlineMarker) ? [markers.inlineMarker] : []
     }),
   ]
+}
+
+function assertReconciliationInputBudget(
+  input: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0],
+): void {
+  const commentBodies = new Set<string>()
+  let commentCodeUnits = 0
+  for (const comment of input.notes) {
+    if (commentBodies.has(comment.body)) continue
+    commentBodies.add(comment.body)
+    commentCodeUnits = addReconciliationInputCodeUnits(
+      commentCodeUnits,
+      comment.body.length,
+      RECONCILIATION_COMMENT_CODE_UNIT_BUDGET,
+    )
+  }
+  for (const comment of input.discussions) {
+    if (commentBodies.has(comment.body)) continue
+    commentBodies.add(comment.body)
+    commentCodeUnits = addReconciliationInputCodeUnits(
+      commentCodeUnits,
+      comment.body.length,
+      RECONCILIATION_COMMENT_CODE_UNIT_BUDGET,
+    )
+  }
+
+  let reviewCodeUnits = 0
+  const addReviewString = (value: string | undefined) => {
+    if (value === undefined) return
+    reviewCodeUnits = addReconciliationInputCodeUnits(
+      reviewCodeUnits,
+      value.length,
+      RECONCILIATION_REVIEW_CODE_UNIT_BUDGET,
+    )
+  }
+
+  addReviewString(input.runId)
+  addReviewString(input.objectType)
+  addReviewString(input.summary)
+  for (const finding of input.findings) {
+    addReviewString(finding.id)
+    addReviewString(finding.title)
+    addReviewString(finding.body)
+    addReviewString(finding.severity)
+    addReviewString(finding.category)
+    addReviewString(finding.file)
+    addReviewString(finding.suggestion?.replacement)
+    addReviewString(finding.suggestion?.confidence)
+    addReviewString(finding.source)
+  }
+  for (const file of input.manifest.files) {
+    addReviewString(file.oldPath)
+    addReviewString(file.newPath)
+    addReviewString(file.diff)
+  }
+  for (const skipped of input.manifest.skipped) {
+    addReviewString(skipped.path)
+    addReviewString(skipped.reason)
+  }
+  addReviewString(input.manifest.blockReason)
+  addReviewString(input.manifest.diffRefs?.baseSha)
+  addReviewString(input.manifest.diffRefs?.startSha)
+  addReviewString(input.manifest.diffRefs?.headSha)
+  for (const warning of input.warnings ?? []) addReviewString(warning)
+}
+
+function addReconciliationInputCodeUnits(current: number, amount: number, budget: number) {
+  const next = current + amount
+  if (next > budget) throw new GitLabReviewPublicationCompatibilityError()
+  return next
 }
 
 type PublicationFinding = ReturnType<typeof buildGitLabReviewPublicationPlan>['findings'][number]

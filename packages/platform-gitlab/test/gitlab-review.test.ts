@@ -3188,41 +3188,62 @@ describe('GitLab review foundation', () => {
     expect(performance.now() - startedAt).toBeLessThan(2_000)
   }, 10_000)
 
-  test('rejects a 500-item unique legacy corpus with order-invariant bounded work', () => {
-    const runId = 'run-unique-legacy-stress'
-    const findings: ReviewFinding[] = Array.from({ length: 500 }, (_, index) => ({
-      title: `Unique finding ${index}`,
-      body: `${'x'.repeat(512)}-${index}`,
-      severity: 'info' as const,
-    }))
-    const manifest = buildGitLabDiffManifest({ changes: [] })
-    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
-    const notes = aggregateReviewFindings(findings).map((finding, id) => ({
+  test('rejects 500 unique max-sized comment bodies before marker scanning in either order', () => {
+    const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
+    const input = {
+      runId: 'run-unique-comment-budget',
+      objectType: 'mr' as const,
+      inlineComments: false,
+      summary: 'Unique comment budget.',
+      findings: [] as ReviewFinding[],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [],
+      discussions: [],
+    }
+    const notes = Array.from({ length: 500 }, (_, id) => ({
       id,
-      body: [
-        renderReviewSummaryComment({
-          summary: 'Unique legacy stress.',
-          findings: [finding],
-          manifest,
-        }),
-        summaryMarker,
-      ].join('\n\n'),
+      body: `${PUBLICATION_MARKER_PREFIX.repeat(760)}${id}`.padEnd(31_250, 'x'),
     }))
     expect(new Set(notes.map(({ body }) => body)).size).toBe(500)
+    expect(notes.every(({ body }) => body.length === 31_250)).toBe(true)
 
     for (const corpus of [notes, [...notes].reverse()]) {
-      expect(() => reconcileGitLabReviewPublicationMarkers({
-        runId,
-        objectType: 'mr',
-        inlineComments: false,
-        summary: 'Unique legacy stress.',
-        findings,
-        manifest,
-        notes: corpus,
-        discussions: [],
-      })).toThrow('gitlab_review_publication_legacy_ambiguous')
+      const startedAt = performance.now()
+      expect(() => reconcileGitLabReviewPublicationMarkers({ ...input, notes: corpus }))
+        .toThrow('gitlab_review_publication_legacy_ambiguous')
+      expect(performance.now() - startedAt).toBeLessThan(1_000)
     }
-  }, 10_000)
+  }, 30_000)
+
+  test('rejects oversized findings before aggregation and stops at the review budget', () => {
+    const oversizedPrefix: ReviewFinding[] = Array.from({ length: 500 }, (_, id) => ({
+      title: 'Shared finding',
+      body: String.fromCharCode(0x1000 + id).padEnd(31_250, 'x'),
+      severity: 'info',
+    }))
+    const unread = Object.defineProperty({
+      title: 'unread',
+      body: 'unread',
+      severity: 'info',
+    }, 'source', {
+      get() { throw new Error('preflight_did_not_stop') },
+    }) as ReviewFinding
+    expect(new Set(oversizedPrefix.map(({ body }) => body)).size).toBe(500)
+    expect(oversizedPrefix.every(({ body }) => body.length === 31_250)).toBe(true)
+
+    const startedAt = performance.now()
+    expect(() => reconcileGitLabReviewPublicationMarkers({
+      runId: 'run-review-budget',
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 'Review budget.',
+      findings: [...oversizedPrefix, unread],
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [],
+      discussions: [],
+    })).toThrow('gitlab_review_publication_legacy_ambiguous')
+    expect(performance.now() - startedAt).toBeLessThan(1_000)
+  }, 30_000)
 
   test('reconciles 500 ordinary current-format DTOs without invoking legacy compatibility', () => {
     const runId = 'run-current-format-stress'

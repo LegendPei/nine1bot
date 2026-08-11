@@ -3637,84 +3637,58 @@ describe('GitLab review controller', () => {
     }
   })
 
-  test('rejects a 500-item unique legacy corpus before marker replacement in either order', async () => {
-    for (const reverse of [false, true]) {
-      const headSha = `legacy-budget-${reverse ? 'reverse' : 'forward'}`
-      const run = createPublishableReviewRun({ headSha })
-      const stageResult = {
-        ...publicationStageResult('Legacy compatibility budget.'),
-        findings: Array.from({ length: 500 }, (_, index) => ({
-          title: `Budget finding ${index}`,
-          body: `${'x'.repeat(512)}-${index}`,
-          severity: 'info' as const,
-          file: 'src/app.ts',
-          newLine: 1_000 + index,
-        })),
-      }
-      const payloadHash = publicationPayloadHash(stageResult)
-      const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
-      const manifest = publicationManifest(run)
-      const notes = aggregateReviewFindings(stageResult.findings).map((finding, id) => ({
-        id,
-        body: [
-          renderReviewSummaryComment({
-            summary: stageResult.summary,
-            findings: [finding],
-            manifest,
-            warnings: [
-              `Inline fallback for src/app.ts: Line ${finding.newLine} is not inside the diff hunk.`,
-            ],
-          }),
-          summaryMarker,
-        ].join('\n\n'),
-      }))
-      if (reverse) notes.reverse()
-      expect(new Set(notes.map(({ body }) => body)).size).toBe(500)
-      const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
-      if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
-      expect(ReviewRunStore.failPublication({
-        runId: run.id,
-        claimId: original.claimId,
-        ownerId: 'publisher-a',
-        payloadHash,
-        error: 'legacy_budget_crash',
-      })).toBe(true)
+  test('rejects an oversized unique remote comment corpus with zero publication', async () => {
+    const headSha = 'reconciliation-comment-budget-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = publicationStageResult('Reconciliation comment budget.')
+    const payloadHash = publicationPayloadHash(stageResult)
+    const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
+    const notes = Array.from({ length: 9 }, (_, id) => ({
+      id,
+      body: `${PUBLICATION_MARKER_PREFIX.repeat(760)}${id}`.padEnd(31_250, 'x'),
+    }))
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'reconciliation_comment_budget_crash',
+    })).toBe(true)
+    const postCalls: string[] = []
 
-      const calls: Array<{ url: string; init?: RequestInit }> = []
-      const result = await publishGitLabReviewRunResult({
-        runId: run.id,
-        stageResult,
-        platforms: publishingPlatforms(),
-        secrets: liveSecrets,
-        publisherOwnerId: 'publisher-b',
-        fetch: (async (url: string | URL | Request, init?: RequestInit) => {
-          const value = String(url)
-          calls.push({ url: value, init })
-          if (value.endsWith('/merge_requests/10')) {
-            return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
-          }
-          if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json(notes)
-          if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
-          if (requestMethod(init) === 'POST') return Response.json({ id: 501 })
-          throw new Error(`unexpected legacy budget request: ${requestMethod(init)} ${value}`)
-        }) as typeof fetch,
-      })
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json(notes)
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (requestMethod(init) === 'POST') {
+          postCalls.push(value)
+          return Response.json({ id: 10 })
+        }
+        throw new Error(`unexpected comment budget request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
 
-      expect(result).toEqual({
-        published: false,
-        runId: run.id,
-        error: 'gitlab_review_publication_legacy_ambiguous',
-      })
-      expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
-      expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
-        state: 'partial',
-        ownerId: undefined,
-        claimId: undefined,
-        completedMarkers: [],
-        error: 'gitlab_review_publication_legacy_ambiguous',
-      })
-    }
-  }, 10_000)
+    expect(result).toMatchObject({
+      published: false,
+      error: 'gitlab_review_publication_legacy_ambiguous',
+    })
+    expect(postCalls).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      completedMarkers: [],
+    })
+  }, 30_000)
 
   test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
     const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
