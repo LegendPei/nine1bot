@@ -8,7 +8,11 @@ import { networkInterfaces, type NetworkInterfaceInfo } from "os"
 import z from "zod"
 import { lazy } from "../../util/lazy"
 import { errors } from "../error"
-import { runAutomatedControllerSession, type AutomatedControllerResponse } from "./automated-controller"
+import {
+  runAutomatedControllerSession,
+  type AutomatedControllerResponse,
+  type AutomatedControllerRunner,
+} from "./automated-controller"
 import {
   extractGitLabReviewStageResultFromRuntimeText,
   handleGitLabReviewWebhook,
@@ -531,18 +535,29 @@ type GitLabReviewRuntimeRunInput = {
   context: AcceptedGitLabReviewWithContext["context"]
 }
 
+export type GitLabReviewRuntimeRunOptions = {
+  runner?: AutomatedControllerRunner
+  directory?: string
+  platforms?: Awaited<ReturnType<typeof readPlatformManagerConfig>>
+  secrets?: FilePlatformSecretStore
+}
+
 function isAcceptedGitLabReviewWithContext(
   result: GitLabReviewWebhookResult,
 ): result is AcceptedGitLabReviewWithContext {
   return result.accepted && Boolean(result.context)
 }
 
-async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) {
-  const directory = await resolveGitLabReviewRuntimeDirectory(result.context.project)
-  const platforms = await readPlatformManagerConfig()
+export async function startGitLabReviewRuntimeRun(
+  result: GitLabReviewRuntimeRunInput,
+  options: GitLabReviewRuntimeRunOptions = {},
+) {
+  const directory = options.directory ?? await resolveGitLabReviewRuntimeDirectory(result.context.project)
+  const platforms = options.platforms ?? await readPlatformManagerConfig()
+  const secrets = options.secrets ?? new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH)
   registerBuiltinPlatformAdapters({
     config: platforms,
-    secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+    secrets,
   })
   let publishAttempted = false
   const entry = {
@@ -553,7 +568,7 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
     traceId: result.runId,
   } satisfies RuntimeControllerProtocol.Entry
 
-  await runAutomatedControllerSession({
+  await (options.runner ?? runAutomatedControllerSession)({
     directory,
     title: `GitLab review: ${result.trigger.projectPath ?? result.trigger.projectId}`,
     sessionChoice: {

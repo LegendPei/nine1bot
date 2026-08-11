@@ -15,6 +15,7 @@ import {
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
   resolveGitLabReviewRuntimeDirectory,
+  startGitLabReviewRuntimeRun,
   webhookLocalOrigin,
 } from "../../src/server/routes/webhooks"
 
@@ -316,6 +317,67 @@ describe("webhook status URL selection", () => {
       recoverable: false,
     })
     await rm(directory, { recursive: true, force: true })
+  })
+
+  test("does not post when the actual runtime finished callback arrives after policy rejection", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-callback-"))
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const run = ReviewRunStore.create({
+      platform: "gitlab",
+      status: "running",
+      error: "before_rejection",
+      trigger: {
+        host: "gitlab.example.com",
+        projectId: 123,
+        objectType: "mr",
+        objectIid: 10,
+        headSha: "trigger-head",
+        mode: "webhook",
+      },
+    })
+
+    try {
+      await startGitLabReviewRuntimeRun({
+        runId: run.id,
+        idempotencyKey: "gitlab:gitlab.example.com:123:mr:10:head_sha:trigger-head:auto:merge_request",
+        trigger: run.trigger as any,
+        context: {
+          project: { nine1botProjectID: "test-project" },
+          diff: { files: [], skipped: [], blocked: false, stats: { fileCount: 0, includedFileCount: 0, skippedFileCount: 0, includedBytes: 0, truncated: false } },
+          contextBlocks: [],
+        },
+      } as any, {
+        directory: directory,
+        platforms: {},
+        runner: async (input: any) => {
+          ReviewRunStore.update(run.id, {
+            status: "rejected",
+            error: "gitlab_review_head_changed",
+            rejectionKind: "policy",
+            recoverable: false,
+          })
+          await input.onFinished?.({ status: "failed", error: "late runtime failure" })
+          return { accepted: true, sessionID: "session_late", status: 202, response: {} } as any
+        },
+      })
+
+      expect(ReviewRunStore.get(run.id)).toMatchObject({
+        status: "rejected",
+        error: "gitlab_review_head_changed",
+        recoverable: false,
+      })
+      expect(calls.filter((call) => call.init?.method === "POST")).toEqual([])
+    } finally {
+      globalThis.fetch = originalFetch
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   test("omits GitLab review context from the public webhook response", () => {
