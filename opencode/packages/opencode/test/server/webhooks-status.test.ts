@@ -323,6 +323,7 @@ describe("webhook status URL selection", () => {
     const directory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-callback-"))
     const originalFetch = globalThis.fetch
     const calls: Array<{ url: string; init?: RequestInit }> = []
+    let finishedCallbackCalls = 0
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init })
       return Response.json({ id: 1 })
@@ -357,13 +358,16 @@ describe("webhook status URL selection", () => {
         directory: directory,
         platforms: {},
         runner: async (input: any) => {
+          const onFinished = input.onFinished
+          expect(onFinished).toBeDefined()
           ReviewRunStore.update(run.id, {
             status: "rejected",
             error: "gitlab_review_head_changed",
             rejectionKind: "policy",
             recoverable: false,
           })
-          await input.onFinished?.({ status: "failed", error: "late runtime failure" })
+          finishedCallbackCalls++
+          await onFinished({ status: "failed", error: "late runtime failure" })
           return { accepted: true, sessionID: "session_late", status: 202, response: {} } as any
         },
       })
@@ -374,6 +378,7 @@ describe("webhook status URL selection", () => {
         recoverable: false,
       })
       expect(calls.filter((call) => call.init?.method === "POST")).toEqual([])
+      expect(finishedCallbackCalls).toBe(1)
     } finally {
       globalThis.fetch = originalFetch
       await rm(directory, { recursive: true, force: true })
