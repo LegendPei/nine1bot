@@ -38,6 +38,22 @@ export type GitLabCreateDiscussionInput = GitLabCreateNoteInput & {
   position?: Record<string, unknown>
 }
 
+export type GitLabPublishedComment = {
+  id: string | number
+  body: string
+}
+
+export type GitLabListNotesInput = {
+  projectId: string | number
+  resource: 'merge_requests' | 'repository/commits'
+  resourceId: string | number
+}
+
+export type GitLabListDiscussionsInput = {
+  projectId: string | number
+  resourceId: string | number
+}
+
 export type GitLabTokenSelf = {
   id?: number
   name?: string
@@ -449,6 +465,32 @@ export class GitLabApiClient {
     })
   }
 
+  async listNotes(input: GitLabListNotesInput, options: GitLabRequestOptions = {}): Promise<GitLabPublishedComment[]> {
+    const notesPath = input.resource === 'repository/commits'
+      ? `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/repository/commits/${encodeURIComponent(String(input.resourceId))}/comments`
+      : `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/merge_requests/${encodeURIComponent(String(input.resourceId))}/notes`
+    const values = await this.requestPaginated<unknown>(notesPath, { ...options, maxItems: 500 })
+    return values.flatMap((value) => {
+      const projected = projectPublishedComment(value)
+      return projected ? [projected] : []
+    })
+  }
+
+  async listDiscussions(input: GitLabListDiscussionsInput, options: GitLabRequestOptions = {}): Promise<GitLabPublishedComment[]> {
+    const values = await this.requestPaginated<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/merge_requests/${encodeURIComponent(String(input.resourceId))}/discussions`,
+      { ...options, maxItems: 500 },
+    )
+    return values.flatMap((value) => {
+      const discussion = objectRecord(value)
+      const notes = Array.isArray(discussion?.notes) ? discussion.notes : []
+      return notes.flatMap((note) => {
+        const projected = projectPublishedComment(note)
+        return projected ? [projected] : []
+      })
+    }).slice(0, 500)
+  }
+
   private async requestText(path: string, init: RequestInit = {}, maxBytes?: number): Promise<string> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
@@ -612,6 +654,18 @@ function projectPipelineJob(input: unknown): GitLabPipelineJob | undefined {
     finished_at: nullableBoundedString(record?.finished_at, MAX_CI_TEXT_LENGTH),
     duration: nullableFiniteNumber(record?.duration),
   }) as GitLabPipelineJob
+}
+
+function projectPublishedComment(input: unknown): GitLabPublishedComment | undefined {
+  const record = objectRecord(input)
+  const rawId = record?.id
+  const id = typeof rawId === 'string' ? rawId : finiteNumber(rawId)
+  const body = typeof record?.body === 'string'
+    ? record.body
+    : typeof record?.note === 'string'
+      ? record.note
+      : undefined
+  return id !== undefined && body !== undefined ? { id, body } : undefined
 }
 
 function objectRecord(input: unknown): Record<string, unknown> | undefined {

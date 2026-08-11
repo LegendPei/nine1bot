@@ -7,6 +7,8 @@ import {
   buildInitialGitLabReviewSubagentTasks,
   compileSubagentStageResults,
   defaultGitLabReviewSettings,
+  gitLabReviewFindingKey,
+  gitLabReviewPublicationMarker,
   GitLabApiError,
   GitLabApiClient,
   inspectGitLabCi,
@@ -2577,5 +2579,167 @@ describe('GitLab review foundation', () => {
       fallbackPosted: 0,
     })
     expect(result.warnings[0]).toContain('Inline comments are skipped for commit review runs')
+  })
+
+  test('derives stable finding and publication markers without source content', () => {
+    const finding: ReviewFinding = {
+      title: 'Validate changed value',
+      body: 'Never pass token=secret to the remote marker.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 8,
+    }
+    const key = gitLabReviewFindingKey(finding)
+    const marker = gitLabReviewPublicationMarker({
+      runId: 'run-123',
+      kind: 'inline',
+      findingKey: key,
+    })
+
+    expect(gitLabReviewFindingKey({ ...finding })).toBe(key)
+    expect(gitLabReviewFindingKey({ ...finding, file: 'src/other.ts' })).not.toBe(key)
+    expect(gitLabReviewFindingKey({ ...finding, newLine: 9 })).not.toBe(key)
+    expect(gitLabReviewFindingKey({ ...finding, body: 'Changed source text.' })).not.toBe(key)
+    expect(key).toMatch(/^[a-f0-9]{24}$/)
+    expect(marker).toMatch(/^<!-- nine1bot:gitlab-review-publication:v1:run-123:inline:[a-f0-9]{24} -->$/)
+    expect(marker).not.toContain(finding.body)
+    expect(marker).not.toContain(finding.file!)
+
+    const untrustedMarker = gitLabReviewPublicationMarker({
+      runId: 'run-123',
+      kind: 'inline',
+      findingKey: finding.body,
+    })
+    expect(untrustedMarker).toMatch(/^<!-- nine1bot:gitlab-review-publication:v1:run-123:inline:[a-f0-9]{24} -->$/)
+    expect(untrustedMarker).not.toContain(finding.body)
+  })
+
+  test('lists only bounded comment DTOs through the review endpoints', async () => {
+    const urls: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        urls.push(value)
+        const path = new URL(value).pathname
+        if (path.endsWith('/merge_requests/2/discussions')) {
+          return Response.json([{
+            id: 'discussion-1',
+            notes: [{ id: 2, body: 'discussion marker', author: { email: 'secret@example.com' }, position: { new_line: 4 } }],
+          }])
+        }
+        if (path.endsWith('/repository/commits/abc/comments')) {
+          return Response.json([{ id: 3, note: 'commit marker', author: { email: 'secret@example.com' } }])
+        }
+        return Response.json([{ id: 1, body: 'note marker', author: { email: 'secret@example.com' }, position: { new_line: 3 } }])
+      }) as typeof fetch,
+    })
+
+    await expect(client.listNotes({ projectId: 3, resource: 'merge_requests', resourceId: 2 })).resolves.toEqual([
+      { id: 1, body: 'note marker' },
+    ])
+    await expect(client.listDiscussions({ projectId: 3, resourceId: 2 })).resolves.toEqual([
+      { id: 2, body: 'discussion marker' },
+    ])
+    await expect(client.listNotes({ projectId: 3, resource: 'repository/commits', resourceId: 'abc' })).resolves.toEqual([
+      { id: 3, body: 'commit marker' },
+    ])
+    expect(urls).toEqual([
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/notes?per_page=100&page=1',
+      'https://gitlab.example.com/api/v4/projects/3/merge_requests/2/discussions?per_page=100&page=1',
+      'https://gitlab.example.com/api/v4/projects/3/repository/commits/abc/comments?per_page=100&page=1',
+    ])
+  })
+
+  test('caps remote reconciliation comment listings at 500 items', async () => {
+    const urls: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        const value = String(url)
+        urls.push(value)
+        const page = Number(new URL(value).searchParams.get('page'))
+        return Response.json(
+          Array.from({ length: 100 }, (_, index) => ({ id: (page - 1) * 100 + index, body: `marker-${page}-${index}` })),
+          { headers: { 'x-next-page': String(page + 1) } },
+        )
+      }) as typeof fetch,
+    })
+
+    const notes = await client.listNotes({ projectId: 3, resource: 'merge_requests', resourceId: 2 })
+
+    expect(notes).toHaveLength(500)
+    expect(urls).toHaveLength(5)
+    expect(new URL(urls[4]!).searchParams.get('page')).toBe('5')
+  })
+
+  test('skips completed markers and checkpoints each successful post before the next', async () => {
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,3 +1,4 @@\n context\n+first\n+second\n',
+      }],
+    })
+    const firstFinding: ReviewFinding = {
+      title: 'First finding',
+      body: 'First inline finding.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const secondFinding: ReviewFinding = {
+      title: 'Second finding',
+      body: 'Second inline finding.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 3,
+    }
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: 'run-123', kind: 'summary' })
+    const firstMarker = gitLabReviewPublicationMarker({
+      runId: 'run-123',
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(firstFinding),
+    })
+    const events: string[] = []
+
+    await publishGitLabReviewResult({
+      client: {
+        async createDiscussion(input) {
+          events.push(`post:${input.body}`)
+          return {}
+        },
+        async createNote() {
+          throw new Error('completed summary must not be posted')
+        },
+      },
+      projectId: 123,
+      objectType: 'mr',
+      objectId: 10,
+      manifest,
+      summary: 'Review complete.',
+      inlineComments: true,
+      findings: [firstFinding, secondFinding],
+      publication: {
+        runId: 'run-123',
+        completedMarkers: new Set([summaryMarker, firstMarker]),
+        async onMarkerCompleted(marker) {
+          events.push(`checkpoint:${marker}`)
+        },
+      },
+    })
+
+    const secondMarker = gitLabReviewPublicationMarker({
+      runId: 'run-123',
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(secondFinding),
+    })
+    expect(events).toEqual([
+      expect.stringContaining('post:Second inline finding.'),
+      `checkpoint:${secondMarker}`,
+    ])
   })
 })
