@@ -11,6 +11,11 @@ import type {
 
 export const GITLAB_REVIEW_LEGACY_PUBLICATION_AMBIGUOUS = 'gitlab_review_publication_legacy_ambiguous'
 
+// Legacy reconciliation is synchronous, so unique bodies and canonical finding patterns share one fixed budget.
+const LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET = 256_000
+const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
+const PUBLICATION_MARKER_PATTERN = /<!-- nine1bot:gitlab-review-publication:[^>\r\n]*-->/g
+
 export class GitLabReviewPublicationCompatibilityError extends Error {
   constructor() {
     super(GITLAB_REVIEW_LEGACY_PUBLICATION_AMBIGUOUS)
@@ -30,48 +35,67 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
 }) {
   const plan = buildGitLabReviewPublicationPlan({ runId: input.runId, findings: input.findings })
   const summaryMarker = requiredMarker(plan.summaryMarker)
-  const noteMarkers = [
-    summaryMarker,
-    ...plan.findings.flatMap(({ markers }) => markers ? [markers.fallbackMarker] : []),
-  ]
-  const inlineMarkers = plan.findings.flatMap(({ markers }) => markers ? [markers.inlineMarker] : [])
-  const completed = new Set<string>([
-    ...markersInComments(input.notes, noteMarkers),
-    ...markersInComments(input.discussions, inlineMarkers),
-  ])
   const layout = buildLegacyPublicationLayout(input, plan.findings)
-  const knownNoteMarkers = new Set([
-    ...noteMarkers,
-    gitLabReviewPublicationMarker({ runId: input.runId, kind: 'fallback' }),
-  ])
-
-  reconcileLegacyRunFallbacks({
+  const markerCatalog = buildMarkerCatalog({
     runId: input.runId,
-    notes: input.notes,
-    manifest: input.manifest,
-    candidates: layout.inlineFindings,
-    warnings: [
-      ...layout.warnings,
-      ...layout.summaryFindings.flatMap((finding) => {
-        const warning = layout.summaryWarnings.get(finding)
-        return warning ? [warning] : []
-      }),
-    ],
-    knownNoteMarkers,
-    completed,
-  })
-  reconcileLegacySummaryFindings({
     summaryMarker,
-    notes: input.notes,
-    summary: input.summary,
-    manifest: input.manifest,
-    warnings: layout.warnings,
-    summaryWarnings: layout.summaryWarnings,
+    findings: plan.findings,
     summaryFindings: layout.summaryFindings,
-    inlineFindings: layout.inlineFindings,
-    knownNoteMarkers,
-    completed,
   })
+  const scanCache = new Map<string, ExtractedMarkerBody>()
+  const notes = scanUniqueComments(input.notes, 'note', markerCatalog, scanCache)
+  const discussions = scanUniqueComments(input.discussions, 'discussion', markerCatalog, scanCache)
+  const completed = new Set<string>()
+
+  for (const note of notes) {
+    for (const marker of note.markers) {
+      if (marker !== markerCatalog.legacyFallbackMarker) completed.add(marker)
+    }
+  }
+  for (const discussion of discussions) {
+    for (const marker of discussion.markers) completed.add(marker)
+  }
+
+  const legacyFallbackNotes = notes.filter((note) => note.markers.includes(markerCatalog.legacyFallbackMarker))
+  const needsLegacySummary = layout.summaryFindings.some((finding) => !findingCompleted(finding, completed))
+  const legacySummaryNotes = needsLegacySummary
+    ? notes.filter((note) => note.markers.includes(summaryMarker))
+    : []
+
+  if (legacyFallbackNotes.length > 0 || needsLegacySummary) {
+    const compatibility = buildLegacyCompatibilityContext({
+      notes: [...legacyFallbackNotes, ...legacySummaryNotes],
+      findings: uniqueFindings([
+        ...(legacyFallbackNotes.length > 0 ? layout.inlineFindings : []),
+        ...(needsLegacySummary ? layout.summaryFindings : []),
+      ]),
+    })
+    reconcileLegacyRunFallbacks({
+      notes: legacyFallbackNotes,
+      manifest: input.manifest,
+      candidates: layout.inlineFindings,
+      warnings: [
+        ...layout.warnings,
+        ...layout.summaryFindings.flatMap((finding) => {
+          const warning = layout.summaryWarnings.get(finding)
+          return warning ? [warning] : []
+        }),
+      ],
+      compatibility,
+      completed,
+    })
+    reconcileLegacySummaryFindings({
+      notes: legacySummaryNotes,
+      summary: input.summary,
+      manifest: input.manifest,
+      warnings: layout.warnings,
+      summaryWarnings: layout.summaryWarnings,
+      summaryFindings: layout.summaryFindings,
+      inlineFindings: layout.inlineFindings,
+      compatibility,
+      completed,
+    })
+  }
 
   return [
     ...(completed.has(summaryMarker) ? [summaryMarker] : []),
@@ -126,121 +150,364 @@ function buildLegacyPublicationLayout(
   return { warnings, summaryWarnings, summaryFindings, inlineFindings }
 }
 
-function reconcileLegacyRunFallbacks(input: {
+type MarkerCatalog = ReturnType<typeof buildMarkerCatalog>
+
+function buildMarkerCatalog(input: {
   runId: string
-  notes: GitLabPublishedComment[]
+  summaryMarker: string
+  findings: PublicationFinding[]
+  summaryFindings: PublicationFinding[]
+}) {
+  const fallbackMarkers = input.findings.map(({ markers }) => requiredMarker(markers?.fallbackMarker))
+  const inlineMarkers = input.findings.map(({ markers }) => requiredMarker(markers?.inlineMarker))
+  const summaryFallbackMarkers = input.summaryFindings.map(({ markers }) => requiredMarker(markers?.fallbackMarker))
+  const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: input.runId, kind: 'fallback' })
+  return {
+    encodedRunId: encodeURIComponent(input.runId),
+    summaryMarker: input.summaryMarker,
+    legacyFallbackMarker,
+    fallbackMarkers: new Set(fallbackMarkers),
+    inlineMarkers: new Set(inlineMarkers),
+    summaryFallbackMarkers,
+    expectedMarkers: new Set([
+      input.summaryMarker,
+      legacyFallbackMarker,
+      ...fallbackMarkers,
+      ...inlineMarkers,
+    ]),
+  }
+}
+
+type ExtractedMarkerBody = {
+  body: string
+  occurrences: Array<{ marker: string; index: number }>
+  trailingMarkers: Array<{ marker: string; index: number }>
+  strippedBody?: string
+}
+
+type ScannedComment = {
+  body: string
+  markers: string[]
+  strippedBody?: string
+}
+
+function scanUniqueComments(
+  comments: GitLabPublishedComment[],
+  source: 'note' | 'discussion',
+  catalog: MarkerCatalog,
+  cache: Map<string, ExtractedMarkerBody>,
+) {
+  const unique = new Map<string, ScannedComment>()
+  for (const comment of comments) {
+    const body = normalizeCommentBody(comment.body)
+    if (unique.has(body)) continue
+    let extracted = cache.get(body)
+    if (!extracted) {
+      extracted = extractMarkerBody(body, catalog)
+      cache.set(body, extracted)
+    }
+    unique.set(body, validateMarkerBody(extracted, source, catalog))
+  }
+  return [...unique.values()]
+}
+
+function extractMarkerBody(body: string, catalog: MarkerCatalog): ExtractedMarkerBody {
+  const occurrences: ExtractedMarkerBody['occurrences'] = []
+  const pattern = new RegExp(PUBLICATION_MARKER_PATTERN.source, 'g')
+  for (const match of body.matchAll(pattern)) {
+    const marker = match[0]
+    if (catalog.expectedMarkers.has(marker)) {
+      occurrences.push({ marker, index: match.index })
+      continue
+    }
+    if (publicationMarkerRunId(marker) === catalog.encodedRunId) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
+  }
+  if (occurrences.length === 0) return { body, occurrences, trailingMarkers: [] }
+
+  const trailingMarkers = extractTrailingMarkerBlock(body, catalog.expectedMarkers)
+  if (
+    occurrences.length !== trailingMarkers.length
+    || occurrences.some((occurrence, index) => {
+      const trailing = trailingMarkers[index]
+      return occurrence.marker !== trailing?.marker || occurrence.index !== trailing.index
+    })
+  ) {
+    throw new GitLabReviewPublicationCompatibilityError()
+  }
+  const markerBlockStart = trailingMarkers[0]!.index
+  if (markerBlockStart > 0 && !body.slice(0, markerBlockStart).endsWith('\n\n')) {
+    throw new GitLabReviewPublicationCompatibilityError()
+  }
+  let strippedEnd = markerBlockStart
+  while (strippedEnd > 0 && body[strippedEnd - 1] === '\n') strippedEnd -= 1
+  return {
+    body,
+    occurrences,
+    trailingMarkers,
+    strippedBody: body.slice(0, strippedEnd),
+  }
+}
+
+function extractTrailingMarkerBlock(body: string, expectedMarkers: ReadonlySet<string>) {
+  const reversed: Array<{ marker: string; index: number }> = []
+  let lineEnd = body.length
+  while (lineEnd >= 0) {
+    const separator = body.lastIndexOf('\n', lineEnd - 1)
+    const lineStart = separator + 1
+    const marker = body.slice(lineStart, lineEnd)
+    if (!expectedMarkers.has(marker)) break
+    reversed.push({ marker, index: lineStart })
+    if (separator < 0) break
+    lineEnd = separator
+  }
+  return reversed.reverse()
+}
+
+function validateMarkerBody(
+  extracted: ExtractedMarkerBody,
+  source: 'note' | 'discussion',
+  catalog: MarkerCatalog,
+): ScannedComment {
+  const markers = extracted.trailingMarkers.map(({ marker }) => marker)
+  if (markers.length === 0) return { body: extracted.body, markers }
+
+  if (source === 'discussion') {
+    if (markers.length !== 1 || !catalog.inlineMarkers.has(markers[0]!)) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
+  } else {
+    validateNoteMarkerBlock(markers, catalog)
+  }
+  return { body: extracted.body, markers, strippedBody: extracted.strippedBody }
+}
+
+function validateNoteMarkerBlock(markers: string[], catalog: MarkerCatalog) {
+  if (markers.some((marker) => catalog.inlineMarkers.has(marker))) {
+    throw new GitLabReviewPublicationCompatibilityError()
+  }
+  if (markers.includes(catalog.legacyFallbackMarker)) {
+    if (markers.length !== 1) throw new GitLabReviewPublicationCompatibilityError()
+    return
+  }
+  if (markers[0] === catalog.summaryMarker) {
+    const summaryFallbacks = markers.slice(1)
+    if (
+      summaryFallbacks.some((marker) => !catalog.fallbackMarkers.has(marker))
+      || !isOrderedSubset(summaryFallbacks, catalog.summaryFallbackMarkers)
+    ) {
+      throw new GitLabReviewPublicationCompatibilityError()
+    }
+    return
+  }
+  if (markers.length === 1 && catalog.fallbackMarkers.has(markers[0]!)) return
+  throw new GitLabReviewPublicationCompatibilityError()
+}
+
+function isOrderedSubset(values: string[], expected: string[]) {
+  let expectedIndex = 0
+  for (const value of values) {
+    while (expectedIndex < expected.length && expected[expectedIndex] !== value) expectedIndex += 1
+    if (expectedIndex === expected.length) return false
+    expectedIndex += 1
+  }
+  return true
+}
+
+function publicationMarkerRunId(marker: string) {
+  if (!marker.startsWith(PUBLICATION_MARKER_PREFIX) || !marker.endsWith('-->')) {
+    return undefined
+  }
+  return marker.slice(PUBLICATION_MARKER_PREFIX.length, -3).trimEnd().split(':')[1]
+}
+
+function normalizeCommentBody(body: string) {
+  return body.includes('\r') ? body.replace(/\r\n?/g, '\n') : body
+}
+
+type LegacyCompatibilityContext = ReturnType<typeof buildLegacyCompatibilityContext>
+
+function buildLegacyCompatibilityContext(input: {
+  notes: ScannedComment[]
+  findings: PublicationFinding[]
+}) {
+  let work = 0
+  const uniqueBodies = new Set<string>()
+  for (const note of input.notes) {
+    const body = requiredStrippedBody(note)
+    if (uniqueBodies.has(body)) continue
+    uniqueBodies.add(body)
+    work = addLegacyWork(work, body.length)
+  }
+
+  const renderedItems = input.findings.map((finding) => {
+    const rendered = `\n${renderReviewFindingItem(finding.finding)}`
+    work = addLegacyWork(work, rendered.length)
+    return rendered
+  })
+  const matcher = buildMultiPatternMatcher(renderedItems)
+  const matchesByBody = new Map<string, ReadonlySet<PublicationFinding>>()
+
+  return {
+    matches(body: string) {
+      const cached = matchesByBody.get(body)
+      if (cached) return cached
+      const matches = new Set<PublicationFinding>()
+      for (const index of matcher(body)) matches.add(input.findings[index]!)
+      matchesByBody.set(body, matches)
+      return matches
+    },
+  }
+}
+
+function addLegacyWork(current: number, amount: number) {
+  const next = current + amount
+  if (next > LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET) {
+    throw new GitLabReviewPublicationCompatibilityError()
+  }
+  return next
+}
+
+type PatternNode = {
+  next: Map<string, number>
+  failure: number
+  outputs: number[]
+}
+
+function buildMultiPatternMatcher(patterns: string[]) {
+  const nodes: PatternNode[] = [{ next: new Map(), failure: 0, outputs: [] }]
+  for (const [patternIndex, pattern] of patterns.entries()) {
+    let state = 0
+    for (let index = 0; index < pattern.length; index += 1) {
+      const character = pattern[index]!
+      let next = nodes[state]!.next.get(character)
+      if (next === undefined) {
+        next = nodes.length
+        nodes[state]!.next.set(character, next)
+        nodes.push({ next: new Map(), failure: 0, outputs: [] })
+      }
+      state = next
+    }
+    nodes[state]!.outputs.push(patternIndex)
+  }
+
+  const queue = [...nodes[0]!.next.values()]
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    const state = queue[queueIndex]!
+    for (const [character, next] of nodes[state]!.next) {
+      queue.push(next)
+      let failure = nodes[state]!.failure
+      while (failure !== 0 && !nodes[failure]!.next.has(character)) {
+        failure = nodes[failure]!.failure
+      }
+      nodes[next]!.failure = nodes[failure]!.next.get(character) ?? 0
+      nodes[next]!.outputs.push(...nodes[nodes[next]!.failure]!.outputs)
+    }
+  }
+
+  return (body: string) => {
+    const matches = new Set<number>()
+    let state = 0
+    for (let index = 0; index < body.length; index += 1) {
+      const character = body[index]!
+      while (state !== 0 && !nodes[state]!.next.has(character)) {
+        state = nodes[state]!.failure
+      }
+      state = nodes[state]!.next.get(character) ?? 0
+      for (const output of nodes[state]!.outputs) matches.add(output)
+    }
+    return matches
+  }
+}
+
+function reconcileLegacyRunFallbacks(input: {
+  notes: ScannedComment[]
   manifest: GitLabDiffManifest
   candidates: PublicationFinding[]
   warnings: string[]
-  knownNoteMarkers: ReadonlySet<string>
+  compatibility: LegacyCompatibilityContext
   completed: Set<string>
 }) {
-  const legacyMarker = gitLabReviewPublicationMarker({ runId: input.runId, kind: 'fallback' })
-  const legacyNotes = input.notes.filter(({ body }) => body.includes(legacyMarker))
-  for (const note of legacyNotes) {
-    const body = stripKnownTrailingMarkers(note.body, input.knownNoteMarkers)
-    if (body === undefined || containsKnownMarker(body, input.knownNoteMarkers)) {
-      throw new GitLabReviewPublicationCompatibilityError()
+  const reconciled = new Map<string, PublicationFinding[]>()
+  for (const note of input.notes) {
+    const body = requiredStrippedBody(note)
+    let matched = reconciled.get(body)
+    if (!matched) {
+      const bodyMatches = input.compatibility.matches(body)
+      matched = input.candidates.filter((finding) => bodyMatches.has(finding))
+      if (matched.length === 0) throw new GitLabReviewPublicationCompatibilityError()
+      const expected = renderReviewSummaryComment({
+        title: 'Nine1bot Inline Publish Fallback',
+        summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+        findings: matched.map(({ finding }) => finding),
+        manifest: input.manifest,
+      })
+      const dynamicWarnings = legacyFallbackDynamicWarnings({
+        body,
+        expectedWithoutWarnings: expected,
+        fixedWarnings: input.warnings,
+        findings: matched,
+      })
+      if (!dynamicWarnings) throw new GitLabReviewPublicationCompatibilityError()
+      const roundTrip = renderReviewSummaryComment({
+        title: 'Nine1bot Inline Publish Fallback',
+        summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+        findings: matched.map(({ finding }) => finding),
+        manifest: input.manifest,
+        warnings: [...input.warnings, ...dynamicWarnings],
+      })
+      if (body !== roundTrip) throw new GitLabReviewPublicationCompatibilityError()
+      reconciled.set(body, matched)
     }
-    const matched = input.candidates.filter(({ finding }) => {
-      return body.includes(`\n${renderReviewFindingItem(finding)}`)
-    })
-    if (matched.length === 0) throw new GitLabReviewPublicationCompatibilityError()
-    const expected = renderReviewSummaryComment({
-      title: 'Nine1bot Inline Publish Fallback',
-      summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
-      findings: matched.map(({ finding }) => finding),
-      manifest: input.manifest,
-    })
-    const dynamicWarnings = legacyFallbackDynamicWarnings({
-      body,
-      expectedWithoutWarnings: expected,
-      fixedWarnings: input.warnings,
-      findings: matched,
-    })
-    if (!dynamicWarnings) {
-      throw new GitLabReviewPublicationCompatibilityError()
-    }
-    const roundTrip = renderReviewSummaryComment({
-      title: 'Nine1bot Inline Publish Fallback',
-      summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
-      findings: matched.map(({ finding }) => finding),
-      manifest: input.manifest,
-      warnings: [...input.warnings, ...dynamicWarnings],
-    })
-    if (body !== roundTrip) throw new GitLabReviewPublicationCompatibilityError()
     for (const finding of matched) {
-      if (!finding.markers) throw new GitLabReviewPublicationCompatibilityError()
-      input.completed.add(finding.markers.fallbackMarker)
+      input.completed.add(requiredMarker(finding.markers?.fallbackMarker))
     }
   }
 }
 
 function reconcileLegacySummaryFindings(input: {
-  summaryMarker: string
-  notes: GitLabPublishedComment[]
+  notes: ScannedComment[]
   summary: string
   manifest: GitLabDiffManifest
   warnings: string[]
   summaryWarnings: ReadonlyMap<PublicationFinding, string>
   summaryFindings: PublicationFinding[]
   inlineFindings: PublicationFinding[]
-  knownNoteMarkers: ReadonlySet<string>
+  compatibility: LegacyCompatibilityContext
   completed: Set<string>
 }) {
-  const incomplete = input.summaryFindings.filter((finding) => !findingCompleted(finding, input.completed))
-  if (incomplete.length === 0) return
+  if (input.summaryFindings.every((finding) => findingCompleted(finding, input.completed))) return
   let matchedAny = false
-  for (const { body: noteBody } of input.notes) {
-    if (!noteBody.includes(input.summaryMarker)) continue
-    const body = stripKnownTrailingMarkers(noteBody, input.knownNoteMarkers)
-    if (body === undefined || containsKnownMarker(body, input.knownNoteMarkers)) {
-      throw new GitLabReviewPublicationCompatibilityError()
+  const reconciled = new Map<string, PublicationFinding[]>()
+  for (const note of input.notes) {
+    const body = requiredStrippedBody(note)
+    let matched = reconciled.get(body)
+    if (!matched) {
+      const bodyMatches = input.compatibility.matches(body)
+      matched = input.summaryFindings.filter((finding) => bodyMatches.has(finding))
+      const expected = renderReviewSummaryComment({
+        summary: input.summary,
+        findings: matched.map(({ finding }) => finding),
+        inlineFindings: input.inlineFindings.map(({ finding }) => finding),
+        manifest: input.manifest,
+        warnings: [
+          ...input.warnings,
+          ...matched.flatMap((finding) => {
+            const warning = input.summaryWarnings.get(finding)
+            return warning ? [warning] : []
+          }),
+        ],
+      })
+      if (body !== expected) throw new GitLabReviewPublicationCompatibilityError()
+      reconciled.set(body, matched)
     }
-    const matched = input.summaryFindings.filter(({ finding }) => {
-      return body.includes(`\n${renderReviewFindingItem(finding)}`)
-    })
-    const expected = renderReviewSummaryComment({
-      summary: input.summary,
-      findings: matched.map(({ finding }) => finding),
-      inlineFindings: input.inlineFindings.map(({ finding }) => finding),
-      manifest: input.manifest,
-      warnings: [
-        ...input.warnings,
-        ...matched.flatMap((finding) => {
-          const warning = input.summaryWarnings.get(finding)
-          return warning ? [warning] : []
-        }),
-      ],
-    })
-    if (body !== expected) throw new GitLabReviewPublicationCompatibilityError()
     matchedAny = true
     for (const finding of matched) {
-      if (!finding.markers) throw new GitLabReviewPublicationCompatibilityError()
-      input.completed.add(finding.markers.fallbackMarker)
+      input.completed.add(requiredMarker(finding.markers?.fallbackMarker))
     }
   }
   if (!matchedAny) throw new GitLabReviewPublicationCompatibilityError()
-}
-
-function markersInComments(comments: GitLabPublishedComment[], markers: string[]) {
-  return markers.filter((marker) => comments.some((comment) => comment.body.includes(marker)))
-}
-
-function stripKnownTrailingMarkers(body: string, knownMarkers: ReadonlySet<string>) {
-  const lines = body.replace(/\r\n?/g, '\n').split('\n')
-  let removed = false
-  while (lines.length > 0 && knownMarkers.has(lines.at(-1)!)) {
-    lines.pop()
-    removed = true
-  }
-  if (!removed) return undefined
-  while (lines.at(-1) === '') lines.pop()
-  return lines.join('\n')
-}
-
-function containsKnownMarker(body: string, knownMarkers: ReadonlySet<string>) {
-  return Array.from(knownMarkers).some((marker) => body.includes(marker))
 }
 
 function legacyFallbackDynamicWarnings(input: {
@@ -267,8 +534,12 @@ function legacyFallbackDynamicWarnings(input: {
 }
 
 function parseLegacyFallbackDynamicWarnings(section: string, findings: PublicationFinding[]) {
-  const memo = new Map<string, string[] | null>()
+  const warningPrefixes = findings.map(({ finding }) => {
+    return `Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400`
+  })
+  if (new Set(warningPrefixes).size !== warningPrefixes.length) return undefined
 
+  const memo = new Map<string, string[] | null>()
   const parseAt = (findingIndex: number, position: number): string[] | undefined => {
     const key = `${findingIndex}:${position}`
     const cached = memo.get(key)
@@ -287,8 +558,7 @@ function parseLegacyFallbackDynamicWarnings(section: string, findings: Publicati
       }
       warningStart += 1
     }
-    const finding = findings[findingIndex]!.finding
-    const warningPrefix = `Inline fallback for ${finding.file ?? finding.title}: GitLab API returned 400`
+    const warningPrefix = warningPrefixes[findingIndex]!
     const renderedPrefix = `- ${warningPrefix}`
     if (!section.startsWith(renderedPrefix, warningStart)) {
       memo.set(key, null)
@@ -325,6 +595,15 @@ function parseLegacyFallbackDynamicWarnings(section: string, findings: Publicati
   }
 
   return parseAt(0, 0)
+}
+
+function uniqueFindings(findings: PublicationFinding[]) {
+  return [...new Set(findings)]
+}
+
+function requiredStrippedBody(note: ScannedComment) {
+  if (note.strippedBody === undefined) throw new GitLabReviewPublicationCompatibilityError()
+  return note.strippedBody
 }
 
 function findingCompleted(finding: PublicationFinding, completed: ReadonlySet<string>) {

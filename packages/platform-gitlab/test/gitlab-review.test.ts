@@ -27,6 +27,7 @@ import {
   renderGitLabReviewSliceEvidence,
   renderBlockedDiffComment,
   renderGitLabReviewDiffEvidence,
+  renderReviewSummaryComment,
   readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
   sanitizeGitLabCiTrace,
@@ -2930,6 +2931,372 @@ describe('GitLab review foundation', () => {
     for (const body of invalidBodies) {
       expect(() => reconcile(body)).toThrow('gitlab_review_publication_legacy_ambiguous')
     }
+  })
+
+  test('rejects expected inline markers outside their canonical discussion marker position', () => {
+    const runId = 'run-misplaced-inline-markers'
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const plainFinding: ReviewFinding = {
+      title: 'Plain inline finding',
+      body: 'Historical fallback body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const secondFinding: ReviewFinding = {
+      title: 'Second inline finding',
+      body: 'Second historical body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const secondInlineMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(secondFinding),
+    })
+    const markerBearingFinding: ReviewFinding = {
+      title: 'Marker-bearing inline finding',
+      body: `Historical finding text contains ${secondInlineMarker}`,
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const legacyMarker = gitLabReviewPublicationMarker({ runId, kind: 'fallback' })
+    const plainInlineMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(plainFinding),
+    })
+    const renderLegacyFallback = (finding: ReviewFinding, warning: string) => [
+      renderReviewSummaryComment({
+        title: 'Nine1bot Inline Publish Fallback',
+        summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+        findings: aggregateReviewFindings([finding]),
+        manifest,
+        warnings: [warning],
+      }),
+      legacyMarker,
+    ].join('\n\n')
+
+    const legacyCases = [{
+      findings: [plainFinding],
+      body: renderLegacyFallback(
+        plainFinding,
+        `Inline fallback for src/app.ts: GitLab API returned 400: ${plainInlineMarker}.`,
+      ),
+    }, {
+      findings: [markerBearingFinding, secondFinding],
+      body: renderLegacyFallback(
+        markerBearingFinding,
+        'Inline fallback for src/app.ts: GitLab API returned 400: historical detail.',
+      ),
+    }]
+    for (const input of legacyCases) {
+      expect(() => reconcileGitLabReviewPublicationMarkers({
+        runId,
+        objectType: 'mr',
+        inlineComments: true,
+        summary: 'Misplaced inline marker review.',
+        findings: input.findings,
+        manifest,
+        notes: [{ id: 1, body: input.body }],
+        discussions: [],
+      })).toThrow('gitlab_review_publication_legacy_ambiguous')
+    }
+
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const directCases = [{
+      notes: [{ id: 1, body: `current summary\n\n${summaryMarker}` }],
+      discussions: [{ id: 2, body: `embedded ${plainInlineMarker} marker` }],
+    }, {
+      notes: [
+        { id: 1, body: `current summary\n\n${summaryMarker}` },
+        { id: 2, body: `wrong comment kind\n\n${plainInlineMarker}` },
+      ],
+      discussions: [],
+    }]
+    for (const comments of directCases) {
+      expect(() => reconcileGitLabReviewPublicationMarkers({
+        runId,
+        objectType: 'mr',
+        inlineComments: true,
+        summary: 'Misplaced inline marker review.',
+        findings: [plainFinding],
+        manifest,
+        ...comments,
+      })).toThrow('gitlab_review_publication_legacy_ambiguous')
+    }
+  })
+
+  test('rejects colliding legacy warning prefixes in either detail order', () => {
+    const runId = 'run-colliding-legacy-warnings'
+    const findings: ReviewFinding[] = [{
+      title: 'Repeated title',
+      body: 'Finding A body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 1,
+    }, {
+      title: 'Repeated title',
+      body: 'Finding B body.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 2,
+    }]
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const legacyMarker = gitLabReviewPublicationMarker({ runId, kind: 'fallback' })
+    const warningPrefix = 'Inline fallback for src/app.ts: GitLab API returned 400'
+    const warningOrders = [
+      [`${warningPrefix}: detail A.`, `${warningPrefix}: detail B.`],
+      [`${warningPrefix}: detail B.`, `${warningPrefix}: detail A.`],
+    ]
+
+    for (const warnings of warningOrders) {
+      const body = [
+        renderReviewSummaryComment({
+          title: 'Nine1bot Inline Publish Fallback',
+          summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+          findings: aggregateReviewFindings(findings),
+          manifest,
+          warnings,
+        }),
+        legacyMarker,
+      ].join('\n\n')
+      expect(() => reconcileGitLabReviewPublicationMarkers({
+        runId,
+        objectType: 'mr',
+        inlineComments: true,
+        summary: 'Colliding warning review.',
+        findings,
+        manifest,
+        notes: [{ id: 1, body }],
+        discussions: [],
+      })).toThrow('gitlab_review_publication_legacy_ambiguous')
+    }
+  })
+
+  test('preserves exact legacy fallback association when warning prefixes are unique', () => {
+    const runId = 'run-unique-legacy-warnings'
+    const findings: ReviewFinding[] = [{
+      title: 'Finding A',
+      body: 'Finding A body.',
+      severity: 'major',
+      file: 'src/a.ts',
+      newLine: 2,
+    }, {
+      title: 'Finding B',
+      body: 'Finding B body.',
+      severity: 'critical',
+      file: 'src/b.ts',
+      newLine: 2,
+    }]
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: findings.map((finding) => ({
+        old_path: finding.file!,
+        new_path: finding.file!,
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      })),
+    })
+    const legacyMarker = gitLabReviewPublicationMarker({ runId, kind: 'fallback' })
+    const body = [
+      renderReviewSummaryComment({
+        title: 'Nine1bot Inline Publish Fallback',
+        summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+        findings: aggregateReviewFindings(findings),
+        manifest,
+        warnings: [
+          'Inline fallback for src/a.ts: GitLab API returned 400: detail A.',
+          'Inline fallback for src/b.ts: GitLab API returned 400: detail B.',
+        ],
+      }),
+      legacyMarker,
+    ].join('\n\n')
+
+    expect(reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      summary: 'Unique warning review.',
+      findings,
+      manifest,
+      notes: [{ id: 1, body }],
+      discussions: [],
+    })).toEqual(findings.map((finding) => gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    })))
+  })
+
+  test('deduplicates 500 duplicate max-sized legacy notes before compatibility work', () => {
+    const runId = 'run-duplicate-legacy-stress'
+    const findings: ReviewFinding[] = Array.from({ length: 500 }, (_, index) => ({
+      title: `F${index}`,
+      body: 'x',
+      severity: 'info' as const,
+    }))
+    const manifest = buildGitLabDiffManifest({ changes: [] })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const renderBody = (summary: string) => [
+      renderReviewSummaryComment({
+        summary,
+        findings: aggregateReviewFindings(findings),
+        manifest,
+      }),
+      summaryMarker,
+    ].join('\n\n')
+    const baseBody = renderBody('')
+    const body = renderBody('x'.repeat(31_250 - baseBody.length))
+    expect(new TextEncoder().encode(body)).toHaveLength(31_250)
+
+    const startedAt = performance.now()
+    const completed = reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 'x'.repeat(31_250 - baseBody.length),
+      findings,
+      manifest,
+      notes: Array.from({ length: 500 }, (_, id) => ({ id, body })),
+      discussions: [],
+    })
+
+    expect(completed).toEqual([
+      summaryMarker,
+      ...findings.map((finding) => gitLabReviewPublicationMarker({
+        runId,
+        kind: 'fallback',
+        findingKey: gitLabReviewFindingKey(finding),
+      })),
+    ])
+    expect(performance.now() - startedAt).toBeLessThan(2_000)
+  }, 10_000)
+
+  test('rejects a 500-item unique legacy corpus with order-invariant bounded work', () => {
+    const runId = 'run-unique-legacy-stress'
+    const findings: ReviewFinding[] = Array.from({ length: 500 }, (_, index) => ({
+      title: `Unique finding ${index}`,
+      body: `${'x'.repeat(512)}-${index}`,
+      severity: 'info' as const,
+    }))
+    const manifest = buildGitLabDiffManifest({ changes: [] })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const notes = aggregateReviewFindings(findings).map((finding, id) => ({
+      id,
+      body: [
+        renderReviewSummaryComment({
+          summary: 'Unique legacy stress.',
+          findings: [finding],
+          manifest,
+        }),
+        summaryMarker,
+      ].join('\n\n'),
+    }))
+    expect(new Set(notes.map(({ body }) => body)).size).toBe(500)
+
+    for (const corpus of [notes, [...notes].reverse()]) {
+      expect(() => reconcileGitLabReviewPublicationMarkers({
+        runId,
+        objectType: 'mr',
+        inlineComments: false,
+        summary: 'Unique legacy stress.',
+        findings,
+        manifest,
+        notes: corpus,
+        discussions: [],
+      })).toThrow('gitlab_review_publication_legacy_ambiguous')
+    }
+  }, 10_000)
+
+  test('reconciles 500 ordinary current-format DTOs without invoking legacy compatibility', () => {
+    const runId = 'run-current-format-stress'
+    const finding: ReviewFinding = {
+      title: 'Current finding',
+      body: 'Current body.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const inlineMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(finding),
+    })
+    const notes = Array.from({ length: 500 }, (_, id) => ({
+      id,
+      body: id === 250 ? `current summary\n\n${summaryMarker}` : `ordinary note ${id}`,
+    }))
+
+    expect(reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      summary: 'Current summary.',
+      findings: [finding],
+      manifest,
+      notes,
+      discussions: [{ id: 501, body: `current discussion\n\n${inlineMarker}` }],
+    })).toEqual([summaryMarker, inlineMarker])
+  })
+
+  test('accepts repeated current fallback markers produced by metadata-distinct aggregates', () => {
+    const runId = 'run-repeated-current-fallback'
+    const findings: ReviewFinding[] = [{
+      title: 'Shared finding',
+      body: 'Shared body.',
+      severity: 'major',
+      category: 'correctness',
+    }, {
+      title: 'Shared finding',
+      body: 'Shared body.',
+      severity: 'major',
+      category: 'security',
+    }]
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const fallbackMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(findings[0]!),
+    })
+
+    expect(reconcileGitLabReviewPublicationMarkers({
+      runId,
+      objectType: 'mr',
+      inlineComments: false,
+      summary: 'Repeated current marker.',
+      findings,
+      manifest: buildGitLabDiffManifest({ changes: [] }),
+      notes: [{
+        id: 1,
+        body: `current summary\n\n${summaryMarker}\n${fallbackMarker}\n${fallbackMarker}`,
+      }],
+      discussions: [],
+    })).toEqual([summaryMarker, fallbackMarker, fallbackMarker])
   })
 
   test('lists only bounded comment DTOs through the review endpoints', async () => {

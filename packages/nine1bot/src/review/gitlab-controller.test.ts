@@ -8,6 +8,8 @@ import {
   gitLabReviewFindingKey,
   gitLabReviewPublicationMarker,
   parseReviewStageResult,
+  renderReviewSummaryComment,
+  type GitLabDiffManifest,
 } from '@nine1bot/platform-gitlab/review'
 import {
   buildGitLabReviewRuntimePrompt,
@@ -170,6 +172,10 @@ function publicationPayloadHash(stageResult: unknown) {
   return createHash('sha256')
     .update(JSON.stringify(parseReviewStageResult(stageResult)))
     .digest('hex')
+}
+
+function publicationManifest(run: ReturnType<typeof createPublishableReviewRun>) {
+  return (run.context as { diff: GitLabDiffManifest }).diff
 }
 
 function deferred() {
@@ -3449,6 +3455,266 @@ describe('GitLab review controller', () => {
       error: 'gitlab_review_publication_legacy_ambiguous',
     })
   })
+
+  test('fails safely before POST when a legacy warning embeds an expected inline marker', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-embedded-inline-head' })
+    const stageResult = publicationStageResult('Legacy embedded inline marker.')
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'fallback' })
+    const inlineMarker = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    const manifest = publicationManifest(run)
+    const remoteSummary = [
+      renderReviewSummaryComment({
+        summary: stageResult.summary,
+        findings: [],
+        inlineFindings: aggregateReviewFindings(stageResult.findings),
+        manifest,
+      }),
+      summaryMarker,
+    ].join('\n\n')
+    const remoteFallback = [
+      renderReviewSummaryComment({
+        title: 'Nine1bot Inline Publish Fallback',
+        summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+        findings: aggregateReviewFindings(stageResult.findings),
+        manifest,
+        warnings: [
+          `Inline fallback for src/app.ts: GitLab API returned 400: ${inlineMarker}.`,
+        ],
+      }),
+      legacyFallbackMarker,
+    ].join('\n\n')
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_embedded_inline_crash',
+    })).toBe(true)
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-embedded-inline-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 1, body: remoteSummary }, { id: 2, body: remoteFallback }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (requestMethod(init) === 'POST') return Response.json({ id: 3 })
+        throw new Error(`unexpected embedded inline recovery request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_review_publication_legacy_ambiguous',
+    })
+    expect(JSON.stringify(result)).not.toContain(inlineMarker)
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      ownerId: undefined,
+      claimId: undefined,
+      completedMarkers: [],
+      error: 'gitlab_review_publication_legacy_ambiguous',
+    })
+  })
+
+  test('fails safely for colliding legacy warning prefixes in both detail orders', async () => {
+    const warningPrefix = 'Inline fallback for src/app.ts: GitLab API returned 400'
+    const warningOrders = [
+      [`${warningPrefix}: detail A.`, `${warningPrefix}: detail B.`],
+      [`${warningPrefix}: detail B.`, `${warningPrefix}: detail A.`],
+    ]
+
+    for (const [index, warnings] of warningOrders.entries()) {
+      const headSha = `legacy-warning-collision-${index}`
+      const run = createPublishableReviewRun({ headSha })
+      const stageResult = {
+        ...publicationStageResult('Legacy warning collision.'),
+        findings: [{
+          title: 'Repeated title',
+          body: 'Finding A body.',
+          severity: 'major' as const,
+          file: 'src/app.ts',
+          newLine: 1,
+        }, {
+          title: 'Repeated title',
+          body: 'Finding B body.',
+          severity: 'critical' as const,
+          file: 'src/app.ts',
+          newLine: 2,
+        }],
+      }
+      const payloadHash = publicationPayloadHash(stageResult)
+      const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+      const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'fallback' })
+      const manifest = publicationManifest(run)
+      const aggregated = aggregateReviewFindings(stageResult.findings)
+      const remoteSummary = [
+        renderReviewSummaryComment({
+          summary: stageResult.summary,
+          findings: [],
+          inlineFindings: aggregated,
+          manifest,
+        }),
+        summaryMarker,
+      ].join('\n\n')
+      const remoteFallback = [
+        renderReviewSummaryComment({
+          title: 'Nine1bot Inline Publish Fallback',
+          summary: 'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+          findings: aggregated,
+          manifest,
+          warnings,
+        }),
+        legacyFallbackMarker,
+      ].join('\n\n')
+      const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+      if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+      expect(ReviewRunStore.failPublication({
+        runId: run.id,
+        claimId: original.claimId,
+        ownerId: 'publisher-a',
+        payloadHash,
+        error: 'legacy_warning_collision_crash',
+      })).toBe(true)
+
+      const calls: Array<{ url: string; init?: RequestInit }> = []
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: publishingPlatforms(),
+        secrets: liveSecrets,
+        publisherOwnerId: 'publisher-b',
+        fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+          const value = String(url)
+          calls.push({ url: value, init })
+          if (value.endsWith('/merge_requests/10')) {
+            return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+          }
+          if (value.includes('/notes') && requestMethod(init) === 'GET') {
+            return Response.json([{ id: 1, body: remoteSummary }, { id: 2, body: remoteFallback }])
+          }
+          if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+          if (requestMethod(init) === 'POST') return Response.json({ id: 3 })
+          throw new Error(`unexpected warning collision request: ${requestMethod(init)} ${value}`)
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      })
+      expect(JSON.stringify(result)).not.toContain('detail A')
+      expect(JSON.stringify(result)).not.toContain('detail B')
+      expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+      expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+        state: 'partial',
+        ownerId: undefined,
+        claimId: undefined,
+        completedMarkers: [],
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      })
+    }
+  })
+
+  test('rejects a 500-item unique legacy corpus before marker replacement in either order', async () => {
+    for (const reverse of [false, true]) {
+      const headSha = `legacy-budget-${reverse ? 'reverse' : 'forward'}`
+      const run = createPublishableReviewRun({ headSha })
+      const stageResult = {
+        ...publicationStageResult('Legacy compatibility budget.'),
+        findings: Array.from({ length: 500 }, (_, index) => ({
+          title: `Budget finding ${index}`,
+          body: `${'x'.repeat(512)}-${index}`,
+          severity: 'info' as const,
+          file: 'src/app.ts',
+          newLine: 1_000 + index,
+        })),
+      }
+      const payloadHash = publicationPayloadHash(stageResult)
+      const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+      const manifest = publicationManifest(run)
+      const notes = aggregateReviewFindings(stageResult.findings).map((finding, id) => ({
+        id,
+        body: [
+          renderReviewSummaryComment({
+            summary: stageResult.summary,
+            findings: [finding],
+            manifest,
+            warnings: [
+              `Inline fallback for src/app.ts: Line ${finding.newLine} is not inside the diff hunk.`,
+            ],
+          }),
+          summaryMarker,
+        ].join('\n\n'),
+      }))
+      if (reverse) notes.reverse()
+      expect(new Set(notes.map(({ body }) => body)).size).toBe(500)
+      const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+      if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+      expect(ReviewRunStore.failPublication({
+        runId: run.id,
+        claimId: original.claimId,
+        ownerId: 'publisher-a',
+        payloadHash,
+        error: 'legacy_budget_crash',
+      })).toBe(true)
+
+      const calls: Array<{ url: string; init?: RequestInit }> = []
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: publishingPlatforms(),
+        secrets: liveSecrets,
+        publisherOwnerId: 'publisher-b',
+        fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+          const value = String(url)
+          calls.push({ url: value, init })
+          if (value.endsWith('/merge_requests/10')) {
+            return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+          }
+          if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json(notes)
+          if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+          if (requestMethod(init) === 'POST') return Response.json({ id: 501 })
+          throw new Error(`unexpected legacy budget request: ${requestMethod(init)} ${value}`)
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      })
+      expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+      expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+        state: 'partial',
+        ownerId: undefined,
+        claimId: undefined,
+        completedMarkers: [],
+        error: 'gitlab_review_publication_legacy_ambiguous',
+      })
+    }
+  }, 10_000)
 
   test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
     const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
