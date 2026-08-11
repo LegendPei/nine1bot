@@ -22,6 +22,14 @@
 - 所有生产代码修改严格执行 RED、GREEN、REFACTOR；每个任务独立提交。
 - 不修改或提交 `.idea/` 与 `nine1bot.iml`。
 
+## 完成状态（2026-08-11）
+
+- Task 1 已完成：实现提交 `3a5f60e`，scoped 修复提交 `9c905ce`；联合验证 `192 pass / 0 fail`，platform typecheck 通过，独立 scoped re-review 为 `0 open findings`。
+- Task 2 已完成：实现提交 `873ce7d`，回归工作量校准提交 `33b3393`；platform 测试 `134 pass / 0 fail`，platform typecheck 通过，独立 scoped re-review 为 `0 open findings`。
+- Task 3 prerequisite 为 `c99195a`（`test(opencode): isolate permission reply tests`）：它只隔离 permission reply 测试的 autonomous 配置并补强 pending/reply 断言，不是 CPU 生产修复。prerequisite 验证为 permission `63 pass / 0 fail`、platform-agent-source `10 pass / 0 fail`、OpenCode typecheck 通过，独立复审为 `0 findings`。
+- Task 3 已完成：以 `c99195af2504041853844e295ab2082726a5b28f` 为 fresh 基线，Task 6 聚焦矩阵 `235 pass / 0 fail`，维护范围 `330 pass / 0 fail`，platform、nine1bot、opencode 三处 typecheck 均通过；diff/status/敏感信息扫描完成，CPU 加固独立复核为 `0 open findings`。
+- Task 3 文档提交使用 `docs(gitlab): close publication reconciliation cpu hardening`；实际提交 SHA 记录在本地 `task-3-report.md`。外部 GitLab 人工联调仍未执行，原计划 Task 7、Task 8、Task 9 的范围与顺序不变。
+
 ---
 
 ## 文件结构
@@ -53,7 +61,7 @@
 - Produces: `RECONCILIATION_REVIEW_CODE_UNIT_BUDGET = 256_000`。
 - Keeps: `reconcileGitLabReviewPublicationMarkers(...)` 的参数、返回值和公开错误类型不变。
 
-- [ ] **Step 1: 写 500 条唯一超长远端正文的失败测试**
+- [x] **Step 1: 写 500 条唯一超长远端正文的失败测试**
 
 在 `packages/platform-gitlab/test/gitlab-review.test.ts` 构造 500 条不同正文，每条恰好 31,250 code units，正文包含大量未闭合的 `<!-- nine1bot:gitlab-review-publication:` 前缀。正序和逆序都必须抛出 `gitlab_review_publication_legacy_ambiguous`，并在各自 1,000 ms 内结束。保留现有 500 条重复最大正文和 500 条普通 current-format DTO 测试作为兼容门槛。
 
@@ -70,7 +78,7 @@ for (const corpus of [notes, [...notes].reverse()]) {
 }
 ```
 
-- [ ] **Step 2: 写 finding 聚合前拒绝的失败测试**
+- [x] **Step 2: 写 finding 聚合前拒绝的失败测试**
 
 构造 500 个聚合 key 相同、`body` 各不相同且每个为 31,250 code units 的 findings。调用必须在 1,000 ms 内抛出同一个脱敏错误。另加一个带抛错 getter 的尾部 finding：前面的正文已经超过预算后，不得读取该 getter，用于确定性证明计量会立即停止，且 `buildGitLabReviewPublicationPlan()` 没有先运行。
 
@@ -86,7 +94,7 @@ expect(() => reconcileGitLabReviewPublicationMarkers({
 })).toThrow('gitlab_review_publication_legacy_ambiguous')
 ```
 
-- [ ] **Step 3: 写 controller 零发布失败测试**
+- [x] **Step 3: 写 controller 零发布失败测试**
 
 在 `packages/nine1bot/src/review/gitlab-controller.test.ts` 让 GET Notes 返回超出唯一正文预算的有界 corpus。断言：
 
@@ -102,7 +110,7 @@ expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
 })
 ```
 
-- [ ] **Step 4: 运行 RED**
+- [x] **Step 4: 运行 RED**
 
 Run:
 
@@ -112,7 +120,7 @@ bun test packages/platform-gitlab/test/gitlab-review.test.ts packages/nine1bot/s
 
 Expected: 新增对抗性测试因 marker 正则先运行或 finding 聚合先运行而超过 1,000 ms，getter 证明也会暴露错误的调用顺序。
 
-- [ ] **Step 5: 实施最小前置预算**
+- [x] **Step 5: 实施最小前置预算**
 
 把预算调用放在 `reconcileGitLabReviewPublicationMarkers()` 第一条高成本语句之前：
 
@@ -123,7 +131,7 @@ const plan = buildGitLabReviewPublicationPlan({ runId: input.runId, findings: in
 
 评论预算使用 notes 与 discussions 共用的 `Set<string>`，只累计首次出现的原始 `body.length`。review 预算按固定字段顺序累计字符串长度；每次加法后立即比较上限并抛出 `GitLabReviewPublicationCompatibilityError`。不得序列化整个输入，也不得为了计量复制正文。
 
-- [ ] **Step 6: 运行 GREEN、完整平台回归并提交**
+- [x] **Step 6: 运行 GREEN、完整平台回归并提交**
 
 Run:
 
@@ -152,15 +160,15 @@ git commit -m "fix(gitlab): preflight publication reconciliation input"
 - Removes: `PUBLICATION_MARKER_PATTERN` 和基于 `String.matchAll()` 的扫描。
 - Keeps: `extractMarkerBody()`、`validateMarkerBody()` 和 trailing marker block 的外部行为。
 
-- [ ] **Step 1: 写单正文未闭合前缀放大回归**
+- [x] **Step 1: 写单正文未闭合前缀放大回归**
 
 构造一个不超过 31,250 code units 的正文，同一行放入 760 个未闭合 marker 前缀，并在末尾放置一个终止符。测试重复执行该输入 20 次，总耗时必须小于 500 ms；结果必须与旧 parser 语义一致，不能把被前面未闭合候选吞入的尾部文本误认成规范 marker。
 
-- [ ] **Step 2: 写 marker 角色与位置矩阵回归**
+- [x] **Step 2: 写 marker 角色与位置矩阵回归**
 
 对 summary、per-finding fallback、base-era fallback、inline 四类 marker 分别覆盖：正文中嵌入、末尾前有非空字符、同一行重复、note/discussion 错误角色、同 run 未知完整 marker。全部抛出脱敏错误。规范 summary note、fallback note、inline discussion 继续返回对应 marker。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run:
 
@@ -170,7 +178,7 @@ bun test packages/platform-gitlab/test/gitlab-review.test.ts --timeout 30000
 
 Expected: 性能回归在旧的 greedy marker 正则路径上失败；现有语义测试保持为 scanner 的不可回退基线。
 
-- [ ] **Step 4: 实施单向扫描**
+- [x] **Step 4: 实施单向扫描**
 
 从 `cursor` 开始用 `indexOf(PUBLICATION_MARKER_PREFIX, cursor)` 定位下一个候选起点，然后只向前扫描到本行第一个 `>`、`\r`、`\n` 或正文末尾：
 
@@ -191,7 +199,7 @@ while (cursor < body.length) {
 
 同一段中更晚出现的嵌套前缀不能触发从该位置到行尾的再次扫描。完整候选仍使用 `expectedMarkers` 和 `publicationMarkerRunId()` 判定；目标 run 的未知完整候选继续拒绝，其他 run 的候选继续忽略。最后继续由 `extractTrailingMarkerBlock()` 校验完整 marker block、空行分隔、顺序和精确位置。
 
-- [ ] **Step 5: 运行 GREEN、平台测试与 typecheck**
+- [x] **Step 5: 运行 GREEN、平台测试与 typecheck**
 
 Run:
 
@@ -200,7 +208,7 @@ bun test packages/platform-gitlab/test --timeout 30000
 bun run --cwd packages/platform-gitlab typecheck
 ```
 
-- [ ] **Step 6: 检查复杂度和提交**
+- [x] **Step 6: 检查复杂度和提交**
 
 确认 scanner 没有在候选循环内对剩余全文调用 `matchAll()`、无界 `indexOf('-->')`、`slice(cursor)` 或新的 marker 正则。随后提交：
 
@@ -222,7 +230,7 @@ git commit -m "fix(gitlab): scan publication markers linearly"
 - Guarantees: 原计划 Task 6 只有在本批次全量验证和独立复审均通过后才标记完成。
 - Guarantees: 原计划 Task 7、Task 8、Task 9 的范围和顺序不变。
 
-- [ ] **Step 1: 运行 Task 6 聚焦矩阵**
+- [x] **Step 1: 运行 Task 6 聚焦矩阵**
 
 ```powershell
 bun test packages/platform-gitlab/test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts --timeout 30000
@@ -230,7 +238,7 @@ bun test packages/platform-gitlab/test packages/nine1bot/src/review/gitlab-contr
 
 必须覆盖 marker 角色/位置、历史 fallback/summary 精确恢复、claim ownership、partial resume、分页/重定向/响应上限、超限 corpus 零 POST 和 current-format 兼容。
 
-- [ ] **Step 2: 运行维护范围测试与三处 typecheck**
+- [x] **Step 2: 运行维护范围测试与三处 typecheck**
 
 ```powershell
 bun test packages/platform-gitlab/test packages/nine1bot/src/review web/test/gitlab-project-profile.test.ts opencode/packages/opencode/test/permission/next.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts --timeout 30000
@@ -239,7 +247,7 @@ bun run --cwd packages/nine1bot typecheck
 bun run --cwd opencode/packages/opencode typecheck
 ```
 
-- [ ] **Step 3: 运行静态与敏感信息检查**
+- [x] **Step 3: 运行静态与敏感信息检查**
 
 ```powershell
 git diff --check
@@ -249,11 +257,11 @@ rg -n "glpat-|PRIVATE-TOKEN|topview624" packages opencode web -g "!*.test.ts" -g
 
 扫描结果只允许稳定字段名或脱敏示例，不允许真实凭证、远端正文或测试密码进入提交。
 
-- [ ] **Step 4: 由独立 reviewer 审查本批次**
+- [x] **Step 4: 由独立 reviewer 审查本批次**
 
 reviewer 必须复查：前置预算调用顺序、重复正文只计费一次、所有 finding 文本字段计费、达到预算立即停止、scanner 单向复杂度、marker 角色与位置语义、错误脱敏、claim partial 和零 POST。Critical 或 Important finding 必须修复并进行 scoped re-review。
 
-- [ ] **Step 5: 更新文档状态并提交**
+- [x] **Step 5: 更新文档状态并提交**
 
 在本文件记录 Task 1 到 Task 3 的提交 SHA、测试数量和复审结论；在原计划 Task 6 下记录本批次链接并把 CPU blocker 标记为已解除；README 加入本计划索引。
 
@@ -262,6 +270,6 @@ git add packages/platform-gitlab/docs/review-implementation/21-review-follow-up-
 git commit -m "docs(gitlab): close publication reconciliation cpu hardening"
 ```
 
-- [ ] **Step 6: 恢复原计划**
+- [x] **Step 6: 恢复原计划**
 
 回到 `21-review-follow-up-hardening-implementation-plan.md`，从 Task 7“收紧 CI 请求配额和最终输出上限”继续，不在本批次提前实现 Task 7、Task 8 或 Task 9。

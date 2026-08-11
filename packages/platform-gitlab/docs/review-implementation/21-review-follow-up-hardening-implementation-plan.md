@@ -330,27 +330,27 @@ type PublicationClaimResult =
   | { ok: false; error: 'review_run_already_published' | 'review_run_publish_in_progress' | 'review_run_publish_payload_mismatch' | 'review_run_not_found' }
 ```
 
-- [ ] **Step 1: 写两个并发 publisher 的失败测试**
+- [x] **Step 1: 写两个并发 publisher 的失败测试**
 
 第一个在 GitLab fetch 上暂停，第二个同时调用；第二个必须返回 `review_run_publish_in_progress`，最终仅一份 summary/inline。
 
-- [ ] **Step 2: 写 summary 成功、inline 5xx、同 payload 恢复测试**
+- [x] **Step 2: 写 summary 成功、inline 5xx、同 payload 恢复测试**
 
 第一次使 run 进入 partial。第二次 notes/discussions 返回已有 marker，只补缺失 inline，不重复已完成项。
 
-- [ ] **Step 3: 写重启遗留 claim、远端对账失败和 payload mismatch 测试**
+- [x] **Step 3: 写重启遗留 claim、远端对账失败和 payload mismatch 测试**
 
 使用显式 owner A/B 模拟进程重启；相同 hash 可恢复，不同 hash 拒绝。对账 GET 失败时保持 partial 且 POST 数为 0。
 
-- [ ] **Step 4: 运行 RED**
+- [x] **Step 4: 运行 RED**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts`
 
-- [ ] **Step 5: 实施同步 claim 和条件 checkpoint**
+- [x] **Step 5: 实施同步 claim 和条件 checkpoint**
 
 所有 store mutation 匹配 `runId + claimId + ownerId + payloadHash`。旧 publisher 不能覆盖新 claim；每次网络 await 前后保持 run 条件校验。
 
-- [ ] **Step 6: controller 按 HEAD 复核、claim、对账、publish、complete 编排**
+- [x] **Step 6: controller 按 HEAD 复核、claim、对账、publish、complete 编排**
 
 ```ts
 const payloadHash = reviewStageResultHash(parsed)
@@ -360,12 +360,26 @@ if (!claim.ok) return { published: false, runId, error: claim.error }
 
 resume 时加载远端 marker；每个 marker 成功后 checkpoint；catch 标记 partial；全部确认后写 `publishedAt` 和 stage 对应终态。
 
-- [ ] **Step 7: 更新 HTTP 409 映射、运行 GREEN 并提交**
+- [x] **Step 7: 更新 HTTP 409 映射、运行 GREEN 并提交**
 
 ```powershell
 git add packages/nine1bot/src/review/run-store.ts packages/nine1bot/src/review/gitlab-controller.ts packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/src/server/routes/webhooks.ts opencode/packages/opencode/test/server/webhooks-status.test.ts
 git commit -m "fix(gitlab): make review publication resumable and atomic"
 ```
+
+#### 完成记录与五轮熔断历史
+
+Task 6 的 publication 状态机由 `d265a47` 建立，随后按独立复审结论逐轮修复。以下五轮熔断记录保留为审计历史；每轮存在未关闭的 Important finding 时均未把 Task 6 标记完成：
+
+1. `d265a47..9456160`：终态竞态、live claim、聚合 marker、远端真值与持久化回滚已加固；redirect 内部 await 保护和 per-finding fallback 完整性仍未关闭，继续熔断。
+2. `9456160..48f350d`：redirect hop、持久化规范化、实际 runtime callback 与 per-finding completion 已补齐；旧 `v1` partial 兼容和 response-body claim-loss 优先级仍为 Important，继续熔断。
+3. `48f350d..8bc265c`：response consumption 与历史恢复继续收紧；redirect cancellation、历史 summary 子集顺序和 fallback warning 精确匹配仍未关闭，继续熔断。
+4. `8bc265c..6a8ced1`：redirect cancellation 与历史 summary/fallback 主路径已修复；嵌入 inline marker、同前缀 warning 顺序仍有缺口，并发现 500 条重复正文约 5.664 秒的同步 CPU 路径，继续熔断。
+5. `6a8ced1..364f3ae`：marker 角色/位置和历史 warning 歧义已关闭，重复正文降至约 31 ms；独立复审仍发现预算前 marker 正则约 12.827 秒、finding 聚合约 1.856 秒的 CPU Important，Task 6 保持阻塞。
+
+CPU 阻塞由补充计划 [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md) 关闭：`3a5f60e` + `9c905ce` 在高成本处理前加入原始输入预算，`873ce7d` + `33b3393` 以单向线性 scanner 替换 marker 正则。Task 1/2 的 scoped re-review 均为 `0 open findings`；以 prerequisite `c99195a` 为基线的最终 fresh 验证为 Task 6 聚焦矩阵 `235 pass / 0 fail`、维护范围 `330 pass / 0 fail`，platform、nine1bot、opencode 三处 typecheck 全部通过。至此 CPU blocker 已解除，Task 6 标记完成。
+
+`c99195a` 仅隔离 permission reply 测试的 autonomous 配置并证明 pending/reply 生命周期，不是 CPU 生产修复；其独立复审为 `0 findings`。外部 GitLab 人工联调仍待后续执行，Task 7、Task 8、Task 9 的范围和顺序不变，下一步从 Task 7 开始。
 
 ---
 
@@ -522,4 +536,3 @@ git push origin HEAD:feat/gitlab-review-workflow-v2
 - Task 7 同时限制输入、请求次数和最终序列化输出。
 - Task 8 把记录上限定义为跨 trigger 链软限制，优先保证审计引用完整；严格归档不在本轮范围内。
 - 每个生产修改都有先失败测试、目标命令和独立提交点。
-
