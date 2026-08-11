@@ -500,11 +500,7 @@ async function triggerGitLabReviewWebhook(c: any) {
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
     startGitLabReviewRuntimeRun(result).catch((error) => {
       const message = gitLabReviewRuntimeFailure("runtime_start", error)
-      ReviewRunStore.update(result.runId, {
-        status: "failed",
-        error: message,
-      })
-      reportStoredGitLabReviewFailure(result.runId, "runtime_start", message).catch(() => undefined)
+      failGitLabReviewRuntimeRun(result.runId, "runtime_start", message).catch(() => undefined)
     })
   }
 
@@ -586,16 +582,19 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
       questionDenyMessage: "Question request denied automatically in GitLab review run.",
     },
     async onSessionCreated({ sessionID }) {
-      const updated = ReviewRunStore.update(result.runId, gitLabReviewSessionCreatedPatch(sessionID))
-      if (!updated) throw new Error("review_run_not_found")
+      const run = ReviewRunStore.get(result.runId)
+      if (!run) throw new Error("review_run_not_found")
+      const patch = gitLabReviewSessionCreatedPatch(sessionID, run)
+      if (patch) ReviewRunStore.update(result.runId, patch)
     },
     async onControllerResponse(response) {
       const patch = gitLabReviewControllerResponsePatch(ReviewRunStore.get(result.runId), response)
       if (!patch) return
-      ReviewRunStore.update(result.runId, patch)
       if (!response.accepted) {
-        await reportStoredGitLabReviewFailure(result.runId, "controller_message", "controller_message_not_accepted")
+        await failGitLabReviewRuntimeRun(result.runId, "controller_message", "controller_message_not_accepted", patch)
+        return
       }
+      updateGitLabReviewRuntimeRun(result.runId, patch)
     },
     async onRuntimeOutput(output) {
       if (publishAttempted || output.kind !== "part" || !output.text) return
@@ -610,56 +609,75 @@ async function startGitLabReviewRuntimeRun(result: GitLabReviewRuntimeRunInput) 
           secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
         })
         if (published.published) return
-        const patch = gitLabReviewRuntimePublishFailurePatch(ReviewRunStore.get(result.runId), published)
-        if (!patch) return
-        ReviewRunStore.update(result.runId, patch)
-        await reportStoredGitLabReviewFailure(result.runId, "publish_result", published.error)
+        await failGitLabReviewRuntimeRun(result.runId, "publish_result", published.error, {
+          warnings: published.warnings,
+        })
       } catch (error) {
         const diagnostic = gitLabReviewRuntimeFailure("runtime_publish", error)
-        ReviewRunStore.update(result.runId, {
-          status: "failed",
-          error: diagnostic,
-        })
-        await reportStoredGitLabReviewFailure(result.runId, "publish_result", diagnostic)
+        await failGitLabReviewRuntimeRun(result.runId, "publish_result", diagnostic)
       }
     },
     async onFinished(finished) {
       const beforeCiDiagnostic = ReviewRunStore.get(result.runId)
       const ciDiagnosticPatch = beforeCiDiagnostic && gitLabReviewCiNotQueriedPatch(beforeCiDiagnostic)
-      if (ciDiagnosticPatch) ReviewRunStore.update(result.runId, ciDiagnosticPatch)
+      if (ciDiagnosticPatch) updateGitLabReviewRuntimeRun(result.runId, ciDiagnosticPatch)
       if (publishAttempted) return
       const current = ReviewRunStore.get(result.runId)
       if (current?.publishedAt) return
       if (finished.status === "succeeded") {
         const error = "gitlab_review_result_missing"
-        ReviewRunStore.update(result.runId, {
-          status: "failed",
-          error,
+        await failGitLabReviewRuntimeRun(result.runId, "runtime_output", error, {
           warnings: [
             ...((current?.warnings as string[] | undefined) ?? []),
             "Runtime session finished without a valid GITLAB_REVIEW_RESULT payload.",
           ],
         })
-        await reportStoredGitLabReviewFailure(result.runId, "runtime_output", error)
         return
       }
       const error = gitLabReviewRuntimeFailure("runtime_finished", finished.error)
-      ReviewRunStore.update(result.runId, {
-        status: "failed",
-        error,
-      })
-      await reportStoredGitLabReviewFailure(result.runId, "runtime_finished", error)
+      await failGitLabReviewRuntimeRun(result.runId, "runtime_finished", error)
     },
   })
 }
 
-export function gitLabReviewSessionCreatedPatch(sessionID: string) {
-  return {
+export function gitLabReviewRuntimePatch(
+  run: ReviewRunRecord | undefined,
+  patch: Parameters<typeof ReviewRunStore.update>[1],
+) {
+  if (!run || run.status === "rejected") return undefined
+  return patch
+}
+
+function updateGitLabReviewRuntimeRun(runId: string, patch: Parameters<typeof ReviewRunStore.update>[1]) {
+  const guardedPatch = gitLabReviewRuntimePatch(ReviewRunStore.get(runId), patch)
+  if (!guardedPatch) return false
+  return Boolean(ReviewRunStore.update(runId, guardedPatch))
+}
+
+async function failGitLabReviewRuntimeRun(
+  runId: string,
+  phase: string,
+  error: string,
+  patch: Parameters<typeof ReviewRunStore.update>[1] = {},
+) {
+  const updated = updateGitLabReviewRuntimeRun(runId, {
+    ...patch,
+    status: "failed",
+    error,
+  })
+  if (!updated) return false
+  await reportStoredGitLabReviewFailure(runId, phase, error)
+  return true
+}
+
+export function gitLabReviewSessionCreatedPatch(sessionID: string, run?: ReviewRunRecord) {
+  const patch = {
     status: "running" as const,
     sessionId: sessionID,
     turnSnapshotId: undefined,
     error: undefined,
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
+  return run ? gitLabReviewRuntimePatch(run, patch) : patch
 }
 
 export function gitLabReviewControllerResponsePatch(
@@ -667,23 +685,11 @@ export function gitLabReviewControllerResponsePatch(
   response: Pick<AutomatedControllerResponse, "accepted" | "turnSnapshotId">,
 ) {
   if (!run || run.publishedAt || (run.status !== "accepted" && run.status !== "running")) return undefined
-  return {
+  return gitLabReviewRuntimePatch(run, {
     status: response.accepted ? "running" as const : "failed" as const,
     turnSnapshotId: response.turnSnapshotId,
     ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
-  } satisfies Parameters<typeof ReviewRunStore.update>[1]
-}
-
-export function gitLabReviewRuntimePublishFailurePatch(
-  run: ReviewRunRecord | undefined,
-  result: Extract<Awaited<ReturnType<typeof publishGitLabReviewRunResult>>, { published: false }>,
-) {
-  if (!run || run.status === "rejected") return undefined
-  return {
-    status: "failed" as const,
-    error: result.error,
-    warnings: result.warnings,
-  } satisfies Parameters<typeof ReviewRunStore.update>[1]
+  } satisfies Parameters<typeof ReviewRunStore.update>[1])
 }
 
 export function gitLabReviewRuntimeTools(objectType: "mr" | "commit") {
@@ -753,11 +759,7 @@ async function retryGitLabReviewRun(c: any) {
   if (isAcceptedGitLabReviewWithContext(result) && result.status === "accepted") {
     startGitLabReviewRuntimeRun(result).catch((error) => {
       const message = gitLabReviewRuntimeFailure("runtime_retry", error)
-      ReviewRunStore.update(result.runId, {
-        status: "failed",
-        error: message,
-      })
-      reportStoredGitLabReviewFailure(result.runId, "runtime_retry", message).catch(() => undefined)
+      failGitLabReviewRuntimeRun(result.runId, "runtime_retry", message).catch(() => undefined)
     })
   }
 

@@ -367,7 +367,7 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
     platforms: input.platforms,
     secrets: input.secrets,
     fetch: input.fetch,
-    fixtureChanges: extractDryRunChanges(input.payload),
+    fixtureChanges: settings.dryRun ? extractDryRunChanges(input.payload) : undefined,
     warnings: projectWarnings,
   })
 }
@@ -743,6 +743,9 @@ export async function reportGitLabReviewRunFailure(input: {
 }): Promise<ReportGitLabReviewFailureResult> {
   const run = ReviewRunStore.get(input.runId)
   if (!run) return { notified: false, runId: input.runId, error: 'review_run_not_found' }
+  if (run.status === 'rejected' && run.rejectionKind === 'policy') {
+    return { notified: false, runId: input.runId, error: 'review_run_policy_rejected' }
+  }
   if (run.failureNotifiedAt) return { notified: false, runId: input.runId, error: 'review_run_failure_already_notified' }
   const trigger = run.trigger as GitLabReviewTrigger | undefined
   if (!trigger) return { notified: false, runId: input.runId, error: 'review_run_trigger_missing' }
@@ -1161,7 +1164,12 @@ function extractDryRunChanges(payload: unknown): GitLabRawChangesResponse | unde
 }
 
 function isRawChangesResponse(input: unknown): input is GitLabRawChangesResponse {
-  return Boolean(input && typeof input === 'object' && !Array.isArray(input))
+  return Boolean(
+    input &&
+    typeof input === 'object' &&
+    !Array.isArray(input) &&
+    Array.isArray((input as GitLabRawChangesResponse).changes),
+  )
 }
 
 function recordValue(input: unknown): Record<string, unknown> | undefined {

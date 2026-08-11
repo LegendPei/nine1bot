@@ -860,6 +860,39 @@ describe('GitLab review controller', () => {
     expect(stored?.ci).toBeUndefined()
   })
 
+  test('loads authoritative live MR changes when webhook attribute changes are present', async () => {
+    const requests: string[] = []
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: { id: 123, path_with_namespace: 'nine1/nine1bot', web_url: 'https://gitlab.example.com/nine1/nine1bot' },
+        object_attributes: { iid: 12, last_commit: { id: 'attribute-changes-head' } },
+        changes: {
+          title: { previous: 'Draft review', current: 'Review ready' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab.settings,
+        'review.baseUrl': 'https://gitlab.example.com',
+        'review.dryRun': false,
+      } } },
+      secrets: liveSecrets,
+      fetch: (async (url) => {
+        requests.push(String(url))
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'attribute-changes-head' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+        })
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ accepted: true, status: 'accepted' })
+    expect(requests).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/12/changes',
+    ])
+  })
+
   test('does not resolve the API token solely to prefetch CI', async () => {
     const failingTokenSecrets: PlatformSecretAccess = {
       async get(ref) {
@@ -1823,6 +1856,65 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('rejects an MR publish when bounded metadata omits the head SHA', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      calls.push({ url: value, init })
+      if (value.includes('/changes')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'publish-unverified-head' },
+          changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-old\n+new\n' }],
+        })
+      }
+      if (value.endsWith('/merge_requests/10')) return Response.json({ iid: 10, diff_refs: {} })
+      throw new Error(`unexpected request: ${value}`)
+    }) as typeof fetch
+
+    const accepted = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: { id: 123, web_url: 'https://gitlab.example.com/nine1/nine1bot' },
+        object_attributes: { iid: 10, last_commit: { id: 'publish-unverified-head' } },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+    if (!accepted.accepted) throw new Error('expected accepted review run')
+
+    await expect(publishGitLabReviewRunResult({
+      runId: accepted.runId,
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: { stage: 'verification', status: 'ok', summary: 'Review complete.', findings: [] },
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'gitlab_review_diff_head_unverified',
+    })
+
+    expect(ReviewRunStore.get(accepted.runId)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_diff_head_unverified',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(calls.map((call) => `${call.init?.method ?? 'GET'} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+    ])
+  })
+
   test('rejects a webhook before loading changes when configured GitLab host differs from the trigger', async () => {
     const calls: string[] = []
     const result = await handleGitLabReviewWebhook({
@@ -2238,6 +2330,45 @@ describe('GitLab review controller', () => {
       error: 'review_run_failure_already_notified',
     })
     expect(calls).toHaveLength(1)
+  })
+
+  test('does not write a failure note for a policy-rejected review run', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const run = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'rejected-head',
+        mode: 'webhook',
+      },
+    })
+
+    await expect(reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms: { gitlab: { enabled: true, settings: {
+        ...platforms.gitlab?.settings,
+        'review.dryRun': false,
+        'review.baseUrl': 'https://gitlab.example.com',
+      } } },
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init })
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+      phase: 'runtime_finished',
+      error: 'gitlab_review_runtime_finished_failed',
+    })).resolves.toMatchObject({
+      notified: false,
+      error: 'review_run_policy_rejected',
+    })
+    expect(calls).toEqual([])
   })
 
   test('loads live commit diff and publishes a commit summary comment', async () => {

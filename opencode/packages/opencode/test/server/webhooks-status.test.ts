@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "fs/promises"
+import { tmpdir } from "os"
+import { join } from "path"
+import { reportGitLabReviewRunFailure } from "../../../../../packages/nine1bot/src/review/gitlab-controller"
+import { ReviewRunStore } from "../../../../../packages/nine1bot/src/review/run-store"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
   gitLabReviewControllerResponsePatch,
-  gitLabReviewRuntimePublishFailurePatch,
+  gitLabReviewRuntimePatch,
   gitLabReviewRuntimeTools,
   gitLabReviewRuntimeFailure,
   gitLabReviewSessionCreatedPatch,
@@ -39,9 +44,8 @@ describe("webhook status URL selection", () => {
       error: "gitlab_review_head_changed",
     } as any
 
-    expect(gitLabReviewRuntimePublishFailurePatch(rejected, {
-      published: false,
-      runId: "run_rejected",
+    expect(gitLabReviewRuntimePatch(rejected, {
+      status: "failed",
       error: "gitlab_review_head_changed",
     })).toBeUndefined()
   })
@@ -251,6 +255,67 @@ describe("webhook status URL selection", () => {
       turnSnapshotId: undefined,
       error: undefined,
     })
+  })
+
+  test("keeps a rejected review terminal across runtime callback races without posting a failure note", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-rejection-"))
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const rejected = ReviewRunStore.create({
+      platform: "gitlab",
+      status: "rejected",
+      error: "gitlab_review_head_changed",
+      rejectionKind: "policy",
+      recoverable: false,
+      trigger: {
+        host: "gitlab.example.com",
+        projectId: 123,
+        objectType: "mr",
+        objectIid: 10,
+        headSha: "stale-head",
+        mode: "webhook",
+      },
+    })
+
+    expect(gitLabReviewSessionCreatedPatch("session_late", rejected)).toBeUndefined()
+    expect(gitLabReviewControllerResponsePatch(rejected, {
+      accepted: false,
+      turnSnapshotId: "turn_late",
+    })).toBeUndefined()
+    expect(gitLabReviewRuntimePatch(rejected, {
+      status: "failed",
+      error: "gitlab_review_head_changed",
+    })).toBeUndefined()
+
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    await expect(reportGitLabReviewRunFailure({
+      runId: rejected.id,
+      platforms: { gitlab: { enabled: true, settings: {
+        "review.enabled": true,
+        "review.dryRun": false,
+        "review.baseUrl": "https://gitlab.example.com",
+        "review.tokenSecretRef": { provider: "nine1bot-local", key: "gitlab-token" },
+      } } },
+      secrets: {
+        async get() { return "token" },
+        async set() {},
+        async delete() {},
+        async has() { return true },
+      },
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init })
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+      phase: "runtime_finished",
+      error: "gitlab_review_runtime_finished_failed",
+    })).resolves.toMatchObject({ notified: false, error: "review_run_policy_rejected" })
+    expect(calls.filter((call) => call.init?.method === "POST")).toEqual([])
+    expect(ReviewRunStore.get(rejected.id)).toMatchObject({
+      status: "rejected",
+      error: "gitlab_review_head_changed",
+      recoverable: false,
+    })
+    await rm(directory, { recursive: true, force: true })
   })
 
   test("omits GitLab review context from the public webhook response", () => {
