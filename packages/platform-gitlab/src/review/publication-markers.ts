@@ -13,17 +13,11 @@ export type GitLabReviewPublicationMarkerInput = {
 
 export function gitLabReviewFindingKey(finding: ReviewFinding): string {
   return markerHash([
-    finding.id ?? '',
-    finding.title,
-    finding.body,
-    finding.severity,
-    finding.category ?? '',
-    finding.file ?? '',
-    finding.oldLine ?? '',
-    finding.newLine ?? '',
-    finding.suggestion?.replacement ?? '',
-    finding.suggestion?.confidence ?? '',
-    finding.source ?? '',
+    normalizeSeverity(finding.severity),
+    normalizeFile(finding.file),
+    String(finding.newLine ?? finding.oldLine ?? ''),
+    normalizeTitle(finding.title),
+    normalizeBody(finding.body),
   ])
 }
 
@@ -37,4 +31,24 @@ export function gitLabReviewPublicationMarker(input: GitLabReviewPublicationMark
 
 function markerHash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, MARKER_HASH_LENGTH)
+}
+
+function normalizeSeverity(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function normalizeFile(value: string | undefined): string {
+  return normalizeText(value ?? '').replace(/\\/g, '/')
+}
+
+function normalizeTitle(value: string): string {
+  return normalizeText(value).toLowerCase().replace(/\s+/g, ' ')
+}
+
+function normalizeBody(value: string): string {
+  return normalizeText(value)
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\r\n?/g, '\n').trim()
 }
