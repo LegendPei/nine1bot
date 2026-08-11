@@ -333,6 +333,7 @@ describe("webhook status URL selection", () => {
 
   test("maps a lost publication claim directly to HTTP 409", () => {
     expect(gitLabReviewPublishStatus("review_run_publish_claim_lost")).toBe(409)
+    expect(gitLabReviewPublishStatus("gitlab_review_publication_legacy_ambiguous")).toBe(409)
   })
 
   test("enables only the bounded GitLab CI tool in the automated review message", () => {

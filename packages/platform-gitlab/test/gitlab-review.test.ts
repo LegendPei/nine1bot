@@ -36,6 +36,14 @@ import {
   type ReviewFinding,
 } from '../src'
 
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 describe('GitLab review foundation', () => {
   test('resolves GitLab API base URLs only for the trigger authority', () => {
     expect(resolveGitLabApiBaseUrl({
@@ -2747,12 +2755,12 @@ describe('GitLab review foundation', () => {
       {
         requestGuard() {
           guardCalls += 1
-          if (guardCalls === 4) throw new Error('review_run_publish_claim_lost')
+          if (guardCalls === 8) throw new Error('review_run_publish_claim_lost')
         },
       },
     )).rejects.toThrow('review_run_publish_claim_lost')
 
-    expect(guardCalls).toBe(4)
+    expect(guardCalls).toBe(8)
     expect(urls).toHaveLength(2)
     expect(urls.map((url) => new URL(url).searchParams.get('page'))).toEqual(['1', '2'])
   })
@@ -2789,6 +2797,95 @@ describe('GitLab review foundation', () => {
     expect(guardCalls).toBe(2)
     expect(urls).toHaveLength(1)
     expect(new URL(urls[0]!).pathname).toBe('/api/v4/projects/3/merge_requests/2/notes')
+  })
+
+  test('guards successful response consumption before requesting a later page', async () => {
+    const bodyStarted = deferred()
+    const consumptionStarted = deferred()
+    const releaseBody = deferred()
+    const urls: string[] = []
+    let ownerIsCurrent = true
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        urls.push(String(url))
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            bodyStarted.resolve()
+            await releaseBody.promise
+            controller.enqueue(new TextEncoder().encode('[]'))
+            controller.close()
+          },
+        }), {
+          headers: { 'content-type': 'application/json', 'x-next-page': '2' },
+        })
+      }) as typeof fetch,
+    })
+
+    const listing = client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (guardCalls === 3) consumptionStarted.resolve()
+          if (!ownerIsCurrent) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )
+
+    await Promise.all([bodyStarted.promise, consumptionStarted.promise])
+    ownerIsCurrent = false
+    releaseBody.resolve()
+
+    await expect(listing).rejects.toThrow('review_run_publish_claim_lost')
+    expect(guardCalls).toBe(4)
+    expect(urls).toHaveLength(1)
+  })
+
+  test('lets a response-consumption guard override a deferred body failure', async () => {
+    const bodyStarted = deferred()
+    const consumptionStarted = deferred()
+    const releaseBody = deferred()
+    const urls: string[] = []
+    let ownerIsCurrent = true
+    let guardCalls = 0
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        urls.push(String(url))
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            bodyStarted.resolve()
+            await releaseBody.promise
+            controller.error(new Error('body_read_failed'))
+          },
+        }), {
+          headers: { 'content-type': 'application/json', 'x-next-page': '2' },
+        })
+      }) as typeof fetch,
+    })
+
+    const listing = client.listNotes(
+      { projectId: 3, resource: 'merge_requests', resourceId: 2 },
+      {
+        requestGuard() {
+          guardCalls += 1
+          if (guardCalls === 3) consumptionStarted.resolve()
+          if (!ownerIsCurrent) throw new Error('review_run_publish_claim_lost')
+        },
+      },
+    )
+
+    await Promise.all([bodyStarted.promise, consumptionStarted.promise])
+    ownerIsCurrent = false
+    releaseBody.resolve()
+
+    await expect(listing).rejects.toThrow('review_run_publish_claim_lost')
+    expect(guardCalls).toBe(4)
+    expect(urls).toHaveLength(1)
   })
 
   test('caps flattened discussion notes globally at 500 projected comments', async () => {

@@ -534,7 +534,13 @@ export class GitLabApiClient {
           controller.signal,
           requestGuard,
         )
-        return await consume(response)
+        if (!requestGuard) return await consume(response)
+        assertRequestGuard(requestGuard, response)
+        try {
+          return await consume(response)
+        } finally {
+          assertRequestGuard(requestGuard, response)
+        }
       })()
       return await Promise.race([operation, deadline])
     } finally {
@@ -598,6 +604,15 @@ export class GitLabApiClient {
       currentInit = redirectedRequestInit(currentInit, response.status)
       currentUrl = target
     }
+  }
+}
+
+function assertRequestGuard(requestGuard: () => void, response: Response) {
+  try {
+    requestGuard()
+  } catch (error) {
+    response.body?.cancel().catch(() => undefined)
+    throw error
   }
 }
 

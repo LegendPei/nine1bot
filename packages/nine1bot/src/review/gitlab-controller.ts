@@ -2,11 +2,12 @@ import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
-  buildGitLabReviewPublicationPlan,
+  GitLabReviewPublicationCompatibilityError,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
   publishGitLabReviewResult,
+  reconcileGitLabReviewPublicationMarkers,
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
   gitLabAuthorityFromUrl,
@@ -729,6 +730,8 @@ export async function publishGitLabReviewRunResult(input: {
         trigger,
         objectId,
         parsed,
+        manifest: context.diff,
+        inlineComments: settings.inlineComments,
         claimIdentity,
         completedMarkers,
       })
@@ -1156,6 +1159,8 @@ async function reconcileGitLabReviewPublication(input: {
   trigger: GitLabReviewTrigger
   objectId: string | number
   parsed: ReturnType<typeof parseReviewStageResult>
+  manifest: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0]['manifest']
+  inlineComments: boolean
   claimIdentity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0]
   completedMarkers: Set<string>
 }) {
@@ -1171,32 +1176,29 @@ async function reconcileGitLabReviewPublication(input: {
   })
   requestGuard()
 
-  const publicationPlan = buildGitLabReviewPublicationPlan({
-    runId: input.claimIdentity.runId,
-    findings: input.parsed.findings,
-  })
-  const noteMarkers = [
-    publicationPlan.summaryMarker,
-    ...publicationPlan.findings.map(({ markers }) => markers?.fallbackMarker),
-  ].filter((marker): marker is string => Boolean(marker))
-  const remoteMarkers = markersInPublishedComments(notes, noteMarkers)
-
+  let discussions: GitLabPublishedComment[] = []
   if (input.trigger.objectType === 'mr') {
     requestGuard()
-    const discussions = await input.client.listDiscussions({
+    discussions = await input.client.listDiscussions({
       projectId: input.trigger.projectId,
       resourceId: input.objectId,
     }, {
       requestGuard,
     })
     requestGuard()
-    const inlineMarkers = publicationPlan.findings
-      .map(({ markers }) => markers?.inlineMarker)
-      .filter((marker): marker is string => Boolean(marker))
-    remoteMarkers.push(...markersInPublishedComments(discussions, inlineMarkers))
   }
 
-  const completedMarkers = [...new Set(remoteMarkers)]
+  const completedMarkers = reconcileGitLabReviewPublicationMarkers({
+    runId: input.claimIdentity.runId,
+    objectType: input.trigger.objectType,
+    inlineComments: input.inlineComments,
+    summary: input.parsed.summary,
+    findings: input.parsed.findings,
+    manifest: input.manifest,
+    warnings: input.parsed.nextActions,
+    notes,
+    discussions,
+  })
   if (!ReviewRunStore.replacePublicationMarkers({ ...input.claimIdentity, markers: completedMarkers })) {
     throw new PublicationClaimLostError()
   }
@@ -1206,12 +1208,8 @@ async function reconcileGitLabReviewPublication(input: {
   }
 }
 
-function markersInPublishedComments(comments: GitLabPublishedComment[], markers: string[]) {
-  return markers.filter((marker) => comments.some((comment) => comment.body.includes(marker)))
-}
-
 function publicationFailureMessage(operation: string, error: unknown) {
-  return error instanceof PublicationClaimLostError
+  return error instanceof PublicationClaimLostError || error instanceof GitLabReviewPublicationCompatibilityError
     ? error.message
     : gitLabApiFailureMessage(operation, error)
 }

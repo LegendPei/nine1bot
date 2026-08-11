@@ -188,6 +188,83 @@ function requestFormField(init: RequestInit | undefined, field: string) {
   return new URLSearchParams(String(init?.body ?? '')).get(field)
 }
 
+async function reconciliationBodyOwnershipLossFixture(input: { bodyFails: boolean }) {
+  const run = createPublishableReviewRun({
+    headSha: input.bodyFails ? 'body-failure-claim-head' : 'body-success-claim-head',
+  })
+  const stageResult = {
+    ...publicationStageResult('Response body ownership review.'),
+    findings: [],
+  }
+  const payloadHash = publicationPayloadHash(stageResult)
+  const seedClaim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'seed-owner' })
+  if (!seedClaim.ok) throw new Error(`expected seed claim: ${seedClaim.error}`)
+  expect(ReviewRunStore.failPublication({
+    runId: run.id,
+    claimId: seedClaim.claimId,
+    ownerId: 'seed-owner',
+    payloadHash,
+    error: 'seed_partial',
+  })).toBe(true)
+
+  const bodyStarted = deferred()
+  const releaseBody = deferred()
+  const calls: Array<{ url: string; init?: RequestInit }> = []
+  const publishing = publishGitLabReviewRunResult({
+    runId: run.id,
+    stageResult,
+    platforms: publishingPlatforms(),
+    secrets: liveSecrets,
+    publisherOwnerId: 'publisher-a',
+    fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      calls.push({ url: value, init })
+      if (value.endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: {
+            base_sha: 'base',
+            start_sha: 'start',
+            head_sha: input.bodyFails ? 'body-failure-claim-head' : 'body-success-claim-head',
+          },
+        })
+      }
+      if (value.includes('/notes') && new URL(value).searchParams.get('page') === '1') {
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            bodyStarted.resolve()
+            await releaseBody.promise
+            if (input.bodyFails) {
+              controller.error(new Error('body_read_failed'))
+              return
+            }
+            controller.enqueue(new TextEncoder().encode('[]'))
+            controller.close()
+          },
+        }), {
+          headers: { 'content-type': 'application/json', 'x-next-page': '2' },
+        })
+      }
+      if (value.includes('/notes') && new URL(value).searchParams.get('page') === '2') {
+        return Response.json([])
+      }
+      throw new Error(`unexpected body ownership request: ${requestMethod(init)} ${value}`)
+    }) as typeof fetch,
+  })
+
+  await bodyStarted.promise
+  ReviewRunStore.reloadForTesting()
+  const ownerBClaim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-b' })
+  if (!ownerBClaim.ok) throw new Error(`expected owner B claim: ${ownerBClaim.error}`)
+  releaseBody.resolve()
+
+  return {
+    run,
+    calls,
+    ownerBClaim,
+    result: await publishing,
+  }
+}
+
 describe('GitLab review controller', () => {
   beforeEach(async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nine1bot-review-runs-'))
@@ -2610,6 +2687,550 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker])
   })
 
+  test('recovers one exact base-era run-level fallback without duplicating its finding', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-single-fallback-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy single fallback.'),
+      findings: [{
+        title: 'Finding A',
+        body: 'Fallback A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'fallback' })
+    const findingFallbackMarker = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_fallback_crash',
+    })).toBe(true)
+
+    const remoteSummary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy single fallback.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Inline Comments',
+      '',
+      '1 finding were posted as GitLab diff threads.',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const remoteFallback = [
+      '## Nine1bot Inline Publish Fallback',
+      '',
+      'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: GitLab API returned 400: invalid position.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '',
+      'Fallback A body.',
+      '',
+      legacyFallbackMarker,
+    ].join('\n')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-single-fallback-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 1, body: remoteSummary }, { id: 2, body: remoteFallback }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        throw new Error(`legacy finding must not be duplicated: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 0, fallbackPosted: 0 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([
+      summaryMarker,
+      findingFallbackMarker,
+    ])
+  })
+
+  test('maps one base-era fallback to finding A while still publishing finding B', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-multi-fallback-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy multi recovery.'),
+      findings: [{
+        title: 'Finding A',
+        body: 'Fallback A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }, {
+        title: 'Finding B',
+        body: 'Fallback B body.',
+        severity: 'critical' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'fallback' })
+    const fallbackA = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    const inlineB = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[1]!),
+    })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_multi_crash',
+    })).toBe(true)
+
+    const remoteSummary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy multi recovery.',
+      '',
+      'Findings: 2',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Inline Comments',
+      '',
+      '2 findings were posted as GitLab diff threads.',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '- **CRITICAL** Finding B (src/app.ts:2)',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const remoteFallback = [
+      '## Nine1bot Inline Publish Fallback',
+      '',
+      'Some validated inline comments could not be posted as GitLab diff threads after the summary was created.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: GitLab API returned 400: invalid position.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '',
+      'Fallback A body.',
+      '',
+      legacyFallbackMarker,
+    ].join('\n')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-multi-fallback-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{ id: 1, body: remoteSummary }, { id: 2, body: remoteFallback }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/discussions') && requestMethod(init) === 'POST') {
+          const body = requestFormField(init, 'body') ?? ''
+          expect(body).toContain(inlineB)
+          expect(body).not.toContain(gitLabReviewPublicationMarker({
+            runId: run.id,
+            kind: 'inline',
+            findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+          }))
+          return Response.json({ id: 3 })
+        }
+        throw new Error(`unexpected legacy recovery request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 1, fallbackPosted: 0 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker, fallbackA, inlineB])
+  })
+
+  test('recovers an exact base-era summary-only finding from the summary body', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-summary-only-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy summary recovery.'),
+      findings: [{
+        title: 'Invalid position',
+        body: 'Summary-only body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 99,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const fallbackMarker = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_summary_crash',
+    })).toBe(true)
+    const remoteSummary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy summary recovery.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Invalid position (src/app.ts:99)',
+      '',
+      'Summary-only body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-summary-only-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json([{ id: 1, body: remoteSummary }])
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        throw new Error(`summary-only finding must not be duplicated: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 0, fallbackPosted: 1 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([summaryMarker, fallbackMarker])
+  })
+
+  test('maps only summary finding A from an old body and still publishes summary finding B', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-partial-summary-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy partial summary recovery.'),
+      findings: [{
+        title: 'Summary finding A',
+        body: 'Summary A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 99,
+      }, {
+        title: 'Summary finding B',
+        body: 'Summary B body.',
+        severity: 'critical' as const,
+        file: 'src/app.ts',
+        newLine: 100,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const fallbackMarkers = stageResult.findings.map((finding) => gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    }))
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_partial_summary_crash',
+    })).toBe(true)
+    const remoteSummary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy partial summary recovery.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Summary finding A (src/app.ts:99)',
+      '',
+      'Summary A body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-partial-summary-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json([{ id: 1, body: remoteSummary }])
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/notes') && requestMethod(init) === 'POST') {
+          const body = requestFormField(init, 'body') ?? ''
+          expect(body).toContain('Summary B body.')
+          expect(body).toContain(fallbackMarkers[1]!)
+          expect(body).not.toContain(fallbackMarkers[0]!)
+          return Response.json({ id: 2 })
+        }
+        throw new Error(`unexpected partial summary recovery request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 0, fallbackPosted: 2 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([
+      summaryMarker,
+      fallbackMarkers[0],
+      fallbackMarkers[1],
+    ])
+  })
+
+  test('keeps a valid inline finding incomplete when an old summary contains only invalid finding A', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-mixed-summary-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy mixed summary recovery.'),
+      findings: [{
+        title: 'Invalid finding A',
+        body: 'Invalid A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 99,
+      }, {
+        title: 'Inline finding B',
+        body: 'Inline B body.',
+        severity: 'critical' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const fallbackA = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+    })
+    const inlineB = gitLabReviewPublicationMarker({
+      runId: run.id,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(stageResult.findings[1]!),
+    })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_mixed_summary_crash',
+    })).toBe(true)
+    const remoteSummary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Legacy mixed summary recovery.',
+      '',
+      'Findings: 2',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+      '',
+      '### Inline Comments',
+      '',
+      '1 finding were posted as GitLab diff threads.',
+      '- **CRITICAL** Inline finding B (src/app.ts:2)',
+      '',
+      '### Summary Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Invalid finding A (src/app.ts:99)',
+      '',
+      'Invalid A body.',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-mixed-summary-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json([{ id: 1, body: remoteSummary }])
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (value.includes('/discussions') && requestMethod(init) === 'POST') {
+          const body = requestFormField(init, 'body') ?? ''
+          expect(body).toContain(inlineB)
+          expect(body).not.toContain(fallbackA)
+          return Response.json({ id: 2 })
+        }
+        throw new Error(`unexpected mixed summary recovery request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({ published: true, summaryPosted: false, inlinePosted: 1, fallbackPosted: 1 })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(1)
+    expect(ReviewRunStore.get(run.id)?.publication?.completedMarkers).toEqual([
+      summaryMarker,
+      fallbackA,
+      inlineB,
+    ])
+  })
+
+  test('fails safely when a base-era run-level fallback body is ambiguous', async () => {
+    const run = createPublishableReviewRun({ headSha: 'legacy-ambiguous-head' })
+    const stageResult = {
+      ...publicationStageResult('Legacy ambiguous recovery.'),
+      findings: [{
+        title: 'Finding A',
+        body: 'Fallback A body.',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+    }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const summaryMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const legacyFallbackMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'fallback' })
+    const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: original.claimId,
+      ownerId: 'publisher-a',
+      payloadHash,
+      error: 'legacy_ambiguous_crash',
+    })).toBe(true)
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'legacy-ambiguous-head' } })
+        }
+        if (value.includes('/notes') && requestMethod(init) === 'GET') {
+          return Response.json([{
+            id: 1,
+            body: `unmappable legacy summary\n\n${summaryMarker}`,
+          }, {
+            id: 2,
+            body: `unmappable legacy fallback\n\n${legacyFallbackMarker}`,
+          }])
+        }
+        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
+        if (requestMethod(init) === 'POST') return Response.json({ id: 3 })
+        throw new Error(`unexpected ambiguous recovery request: ${requestMethod(init)} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_review_publication_legacy_ambiguous',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      ownerId: undefined,
+      claimId: undefined,
+      error: 'gitlab_review_publication_legacy_ambiguous',
+    })
+  })
+
   test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
     const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
     const stageResult = {
@@ -2640,6 +3261,45 @@ describe('GitLab review controller', () => {
       kind: 'inline',
       findingKey: gitLabReviewFindingKey(finding),
     }))
+    const round2Summary = [
+      '## Nine1bot GitLab Review',
+      '',
+      'Per-finding fallback recovery.',
+      '',
+      'Findings: 2',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Inline Comments',
+      '',
+      '2 findings were posted as GitLab diff threads.',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '- **CRITICAL** Finding B (src/app.ts:2)',
+      '',
+      summaryMarker,
+    ].join('\n')
+    const round2FallbackA = [
+      '## Nine1bot Inline Publish Fallback',
+      '',
+      'A validated inline comment could not be posted as a GitLab diff thread after the summary was created.',
+      '',
+      'Findings: 1',
+      'Diff files: 1/1',
+      'Skipped files: 0',
+      '',
+      '### Warnings',
+      '- Inline fallback for src/app.ts: GitLab API returned 400: invalid position.',
+      '',
+      '### Findings',
+      '',
+      '#### `src/app.ts`',
+      '',
+      '- **MAJOR** Finding A (src/app.ts:2)',
+      '',
+      'Fallback A body.',
+      '',
+      fallbackMarkers[0]!,
+    ].join('\n')
     const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
     if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
     const originalIdentity = {
@@ -2666,7 +3326,7 @@ describe('GitLab review controller', () => {
           return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'per-finding-fallback-head' } })
         }
         if (value.includes('/notes') && requestMethod(init) === 'GET') {
-          return Response.json([{ id: 1, body: `remote summary and fallback A\n\n${summaryMarker}\n${fallbackMarkers[0]}` }])
+          return Response.json([{ id: 1, body: round2Summary }, { id: 2, body: round2FallbackA }])
         }
         if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
         if (value.includes('/discussions') && requestMethod(init) === 'POST') {
@@ -2696,6 +3356,44 @@ describe('GitLab review controller', () => {
       fallbackMarkers[0],
       fallbackMarkers[1],
     ])
+  })
+
+  test('stops after ownership loss during a pending successful reconciliation body', async () => {
+    const { run, calls, ownerBClaim, result } = await reconciliationBodyOwnershipLossFixture({ bodyFails: false })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_claim_lost',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.filter((call) => call.url.includes('/notes'))).toHaveLength(1)
+    expect(calls.some((call) => new URL(call.url).searchParams.get('page') === '2')).toBe(false)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'publishing',
+      claimId: ownerBClaim.claimId,
+      ownerId: 'publisher-b',
+      error: undefined,
+    })
+  })
+
+  test('lets claim loss override a reconciliation body failure with zero later requests', async () => {
+    const { run, calls, ownerBClaim, result } = await reconciliationBodyOwnershipLossFixture({ bodyFails: true })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publish_claim_lost',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.filter((call) => call.url.includes('/notes'))).toHaveLength(1)
+    expect(calls.some((call) => new URL(call.url).searchParams.get('page') === '2')).toBe(false)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'publishing',
+      claimId: ownerBClaim.claimId,
+      ownerId: 'publisher-b',
+      error: undefined,
+    })
   })
 
   test('stops reconciliation pagination when a reloaded owner replaces the claim during page 2', async () => {

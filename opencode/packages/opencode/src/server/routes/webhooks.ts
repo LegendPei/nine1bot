@@ -787,6 +787,7 @@ export function gitLabReviewPublishStatus(error: string | undefined) {
     || error === "review_run_publish_in_progress"
     || error === "review_run_publish_payload_mismatch"
     || error === "review_run_publish_claim_lost"
+    || error === "gitlab_review_publication_legacy_ambiguous"
   ) return 409
   if (error.startsWith("gitlab_api_")) return 502
   return 400
