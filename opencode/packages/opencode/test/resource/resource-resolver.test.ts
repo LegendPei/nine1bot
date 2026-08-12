@@ -1,7 +1,10 @@
 import { test, expect } from "bun:test"
+import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { RuntimeResourceResolver } from "../../src/runtime/resource/resolver"
 import type { SessionProfileSnapshot } from "../../src/runtime/protocol/agent-run-spec"
+import { RuntimeToolRegistry } from "../../src/runtime/tool/registry"
+import { Session } from "../../src/session"
 import { tmpdir } from "../fixture/fixture"
 
 function testProfile(resources: SessionProfileSnapshot["resources"]): SessionProfileSnapshot {
@@ -35,6 +38,14 @@ function testProfile(resources: SessionProfileSnapshot["resources"]): SessionPro
     },
   }
 }
+
+test("normalizes a missing registered tool resource to an empty session resource", () => {
+  expect(RuntimeResourceResolver.emptyResources().registeredTools).toEqual({
+    tools: [],
+    lifecycle: "session",
+    mergeMode: "additive-only",
+  })
+})
 
 test("compileProfileResources freezes only enabled MCP server names", async () => {
   await using tmp = await tmpdir({
@@ -111,3 +122,437 @@ test("resolve applies current config as a live gate for declared MCP servers and
     },
   })
 })
+
+test("deduplicates identical tool failures and resets after a successful state change", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      RuntimeToolRegistry.registerOwner({
+        owner: { id: "demo", kind: "platform", enabled: true },
+        tools: [toolDefinition("demo_lookup")],
+      })
+      RuntimeToolRegistry.unregisterOwner("demo")
+
+      const profile = testProfile({
+        builtinTools: {},
+        registeredTools: {
+          tools: ["demo_lookup", "demo_lookup"],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+        mcp: {
+          servers: [],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+        skills: {
+          skills: [],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+      })
+      const events: Array<Record<string, unknown>> = []
+      const unsubscribe = Bus.subscribe(RuntimeResourceResolver.Failed, (event) => {
+        if (event.properties.resourceType === "tool") events.push(event.properties)
+      })
+
+      try {
+        const first = await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_failure",
+          profile,
+          emitResolved: false,
+        })
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_failure",
+          profile,
+          emitResolved: false,
+        })
+
+        expect(first.registeredTools.declaredTools).toEqual(["demo_lookup"])
+        expect(first.registeredTools.availableTools).toEqual([])
+        expect(events).toEqual([
+          expect.objectContaining({
+            resourceID: "demo_lookup",
+            ownerID: "demo",
+            generation: 2,
+            code: "tool-missing",
+          }),
+        ])
+
+        RuntimeToolRegistry.registerOwner({
+          owner: { id: "demo", kind: "platform", enabled: true },
+          tools: [toolDefinition("demo_lookup")],
+        })
+        const available = await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_failure",
+          profile,
+          emitResolved: false,
+        })
+        expect(available.registeredTools.availableTools.map((tool) => tool.id)).toEqual(["demo_lookup"])
+        expect(events).toHaveLength(1)
+
+        RuntimeToolRegistry.unregisterOwner("demo")
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_failure",
+          profile,
+          emitResolved: false,
+        })
+        expect(events).toHaveLength(2)
+        expect(events[1]).toEqual(expect.objectContaining({
+          resourceID: "demo_lookup",
+          ownerID: "demo",
+          generation: 4,
+          code: "tool-missing",
+        }))
+      } finally {
+        unsubscribe()
+        RuntimeToolRegistry.clearForTesting()
+      }
+    },
+  })
+})
+
+test("clears resolution dedupe state when a session is deleted", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    config: { model: "test-provider/test-model" },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const session = await Session.create({})
+      const otherSession = await Session.create({})
+      const resolved = await RuntimeResourceResolver.resolve({
+        sessionID: session.id,
+        profile: testProfile(RuntimeResourceResolver.emptyResources()),
+        emitFailures: false,
+        emitResolved: false,
+      })
+      let deleted = false
+      let otherDeleted = false
+
+      try {
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: session.id,
+          turnSnapshotId: "turn_session_cleanup",
+          resolved,
+        })).toBe(true)
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: session.id,
+          turnSnapshotId: "turn_session_cleanup",
+          resolved,
+        })).toBe(false)
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: otherSession.id,
+          turnSnapshotId: "turn_other_session",
+          resolved,
+        })).toBe(true)
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: otherSession.id,
+          turnSnapshotId: "turn_other_session",
+          resolved,
+        })).toBe(false)
+
+        await Session.remove(session.id)
+        deleted = true
+
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: otherSession.id,
+          turnSnapshotId: "turn_other_session",
+          resolved,
+        })).toBe(false)
+        expect(await RuntimeResourceResolver.publishResolution({
+          sessionID: session.id,
+          turnSnapshotId: "turn_session_cleanup",
+          resolved,
+        })).toBe(true)
+
+        await Session.remove(otherSession.id)
+        otherDeleted = true
+      } finally {
+        if (!deleted) await Session.remove(session.id)
+        if (!otherDeleted) await Session.remove(otherSession.id)
+      }
+    },
+  })
+})
+
+test("clears tool failure dedupe state when a session is deleted", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    config: { model: "test-provider/test-model" },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const session = await Session.create({})
+      const otherSession = await Session.create({})
+      const failure = {
+        resourceType: "tool" as const,
+        resourceID: "demo_cleanup",
+        ownerID: "demo",
+        generation: 1,
+        code: "tool-missing",
+        status: "unavailable" as const,
+        stage: "resolve" as const,
+        reason: "disabled-by-current-config",
+        message: "The registered tool is unavailable.",
+        recoverable: true,
+      }
+      let deleted = false
+      let otherDeleted = false
+
+      try {
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: session.id,
+          failure,
+        })).toBe(true)
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: session.id,
+          failure,
+        })).toBe(false)
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: otherSession.id,
+          failure,
+        })).toBe(true)
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: otherSession.id,
+          failure,
+        })).toBe(false)
+
+        await Session.remove(session.id)
+        deleted = true
+
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: otherSession.id,
+          failure,
+        })).toBe(false)
+        expect(await RuntimeResourceResolver.publishToolFailure({
+          sessionID: session.id,
+          failure,
+        })).toBe(true)
+
+        await Session.remove(otherSession.id)
+        otherDeleted = true
+      } finally {
+        if (!deleted) await Session.remove(session.id)
+        if (!otherDeleted) await Session.remove(otherSession.id)
+      }
+    },
+  })
+})
+
+test("resets tool failure dedupe after a hard-deny visibility state change", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      RuntimeToolRegistry.registerOwner({
+        owner: { id: "demo", kind: "platform", enabled: true },
+        tools: [{
+          ...toolDefinition("demo_lookup"),
+          availability: () => ({
+            status: "auth-required",
+            reason: "authentication-required",
+          }),
+        }],
+      })
+      const profile = testProfile({
+        builtinTools: {},
+        registeredTools: {
+          tools: ["demo_lookup"],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+        mcp: { servers: [], lifecycle: "session", mergeMode: "additive-only" },
+        skills: { skills: [], lifecycle: "session", mergeMode: "additive-only" },
+      })
+      const events: Array<Record<string, unknown>> = []
+      const unsubscribe = Bus.subscribe(RuntimeResourceResolver.Failed, (event) => {
+        if (event.properties.resourceType === "tool") events.push(event.properties)
+      })
+
+      try {
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_hard_deny",
+          profile,
+          emitResolved: false,
+        })
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_hard_deny",
+          profile,
+          emitResolved: false,
+          isToolExposureDenied: async () => true,
+        })
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_hard_deny",
+          profile,
+          emitResolved: false,
+        })
+
+        expect(events).toHaveLength(2)
+        expect(events.map((event) => event.code)).toEqual(["auth-required", "auth-required"])
+      } finally {
+        unsubscribe()
+        RuntimeToolRegistry.clearForTesting()
+      }
+    },
+  })
+})
+
+test("redacts platform diagnostics before publishing registered tool failures", async () => {
+  const secret = "resource-event-secret"
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      RuntimeToolRegistry.registerOwner({
+        owner: { id: "eventdemo", kind: "platform", enabled: true },
+        tools: [{
+          ...toolDefinition("eventdemo_auth"),
+          availability: () => ({
+            status: "auth-required",
+            reason: `token=${secret}`,
+            action: {
+              type: "start-auth",
+              label: `Authenticate with Authorization: Bearer ${secret}`,
+            },
+          }),
+        }],
+      })
+      const profile = testProfile({
+        builtinTools: {},
+        registeredTools: {
+          tools: ["eventdemo_auth"],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+        mcp: { servers: [], lifecycle: "session", mergeMode: "additive-only" },
+        skills: { skills: [], lifecycle: "session", mergeMode: "additive-only" },
+      })
+      const events: Array<Record<string, unknown>> = []
+      const unsubscribe = Bus.subscribe(RuntimeResourceResolver.Failed, (event) => {
+        if (event.properties.resourceType === "tool") events.push(event.properties)
+      })
+
+      try {
+        await RuntimeResourceResolver.resolve({
+          sessionID: "session_tool_redaction",
+          profile,
+          emitResolved: false,
+        })
+
+        expect(events).toHaveLength(1)
+        expect(JSON.stringify(events)).not.toContain(secret)
+        expect(JSON.stringify(events)).toContain("[REDACTED]")
+      } finally {
+        unsubscribe()
+        RuntimeToolRegistry.clearForTesting()
+      }
+    },
+  })
+})
+
+test("defers conflict finalization and publishes one finalized resolution per turn", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      RuntimeToolRegistry.registerOwner({
+        owner: { id: "demo", kind: "platform", enabled: true },
+        tools: [toolDefinition("demo_unique"), toolDefinition("demo_conflict")],
+      })
+      const profile = testProfile({
+        builtinTools: {},
+        registeredTools: {
+          tools: ["demo_unique", "demo_conflict"],
+          lifecycle: "session",
+          mergeMode: "additive-only",
+        },
+        mcp: { servers: [], lifecycle: "session", mergeMode: "additive-only" },
+        skills: { skills: [], lifecycle: "session", mergeMode: "additive-only" },
+      })
+      const failures: Array<Record<string, unknown>> = []
+      const resolutions: Array<Record<string, unknown>> = []
+      const unsubscribeFailure = Bus.subscribe(RuntimeResourceResolver.Failed, (event) => {
+        failures.push(event.properties)
+      })
+      const unsubscribeResolved = Bus.subscribe(RuntimeResourceResolver.ResolvedEvent, (event) => {
+        resolutions.push(event.properties)
+      })
+
+      try {
+        const preliminary = await RuntimeResourceResolver.resolve({
+          sessionID: "session_conflict",
+          turnSnapshotId: "turn_conflict",
+          profile,
+          emitFailures: false,
+          emitResolved: false,
+        })
+        expect(failures).toEqual([])
+        expect(resolutions).toEqual([])
+
+        const finalized = RuntimeResourceResolver.applyToolConflicts(
+          preliminary,
+          new Set(["demo_conflict"]),
+        )
+        expect(finalized.registeredTools.availableTools.map((tool) => tool.id)).toEqual(["demo_unique"])
+        expect(finalized.audit.resolved.registeredTools).toEqual(["demo_unique"])
+        expect(finalized.failures).toContainEqual(expect.objectContaining({
+          resourceID: "demo_conflict",
+          ownerID: "demo",
+          generation: 1,
+          code: "tool-conflict",
+        }))
+
+        await RuntimeResourceResolver.publishResolution({
+          sessionID: "session_conflict",
+          turnSnapshotId: "turn_conflict",
+          resolved: finalized,
+        })
+        await RuntimeResourceResolver.publishResolution({
+          sessionID: "session_conflict",
+          turnSnapshotId: "turn_conflict",
+          resolved: finalized,
+        })
+
+        expect(failures).toEqual([
+          expect.objectContaining({ resourceID: "demo_conflict", code: "tool-conflict" }),
+        ])
+        expect(resolutions).toEqual([
+          expect.objectContaining({
+            turnSnapshotId: "turn_conflict",
+            resolved: expect.objectContaining({ registeredTools: ["demo_unique"] }),
+            failures: 1,
+          }),
+        ])
+      } finally {
+        unsubscribeFailure()
+        unsubscribeResolved()
+        RuntimeToolRegistry.clearForTesting()
+      }
+    },
+  })
+})
+
+function toolDefinition(id: string): RuntimeToolRegistry.Definition {
+  return {
+    id,
+    description: `Fixture tool ${id}.`,
+    catalogVisibility: "declared-only",
+    inputSchema: { type: "object" },
+    parse: (input) => input,
+    execute: async () => ({
+      status: "ok",
+      title: id,
+      output: "ok",
+    }),
+  }
+}

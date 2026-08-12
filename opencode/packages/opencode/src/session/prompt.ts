@@ -55,6 +55,7 @@ import { RuntimeContextEvents } from "@/runtime/context/events"
 import { RuntimeContextLegacy } from "@/runtime/context/legacy"
 import { RuntimeContextPipeline } from "@/runtime/context/pipeline"
 import { RuntimeResourceResolver } from "@/runtime/resource/resolver"
+import { PlatformToolAssembly } from "@/runtime/tool/assembly"
 import { RuntimeControllerEvents } from "@/runtime/controller/events"
 import { RunLease } from "./run-lease"
 import { RuntimeMetricsEvents } from "@/runtime/metrics/events"
@@ -389,6 +390,7 @@ export namespace SessionPrompt {
   export const _testing = {
     reserve: RunLease.reserve,
     release: RunLease.release,
+    resolveTools,
   }
 
   async function acceptPrompt(input: PromptInput, timing?: RuntimeTiming.Trace) {
@@ -677,6 +679,7 @@ export namespace SessionPrompt {
     runtimeTurnSnapshotId?: string,
     runtimeTimeoutMs?: number,
   ) {
+    const turnDeadlineAt = runtimeTimeoutMs === undefined ? undefined : Date.now() + runtimeTimeoutMs
     const deadline = runtimeTimeoutMs === undefined ? undefined : AbortSignal.timeout(runtimeTimeoutMs)
     const abort = deadline ? AbortSignal.any([lease.controller.signal, deadline]) : lease.controller.signal
     const terminal: TurnTerminal = {}
@@ -1069,25 +1072,33 @@ export namespace SessionPrompt {
         timing,
         "resources.resolve",
         async () => {
-          const resolvedResources = (await RuntimeFeatureFlags.resourceResolverEnabled())
-            ? resourceCache?.userMessageID === lastUser.id
-              ? resourceCache.resolved
-              : await withAbortSignal(
-                  RuntimeResourceResolver.resolve({
-                    sessionID,
-                    turnSnapshotId: runtimeTurnSnapshotId,
-                    profile: await SessionRuntimeProfile.read(session),
-                  }),
-                  abort,
-                )
+          const resolverEnabled = await RuntimeFeatureFlags.resourceResolverEnabled()
+          const cachedResources = resourceCache?.userMessageID === lastUser.id
+            ? resourceCache.resolved
             : undefined
-          if (resolvedResources) {
-            resourceCache = {
-              userMessageID: lastUser.id,
-              resolved: resolvedResources,
-            }
-          }
-          return withAbortSignal(
+          const profile = resolverEnabled ? await SessionRuntimeProfile.read(session) : undefined
+          const resolvedResources = resolverEnabled
+            ? cachedResources
+              ?? await withAbortSignal(
+                RuntimeResourceResolver.resolve({
+                  sessionID,
+                  turnSnapshotId: runtimeTurnSnapshotId,
+                  profile,
+                  projectID: session.projectID,
+                  directory: session.directory,
+                  agent: agent.name,
+                  templateIds: profile?.sourceTemplateIds ?? [],
+                  isToolExposureDenied: (toolID) => isToolExposureDenied(
+                    toolID,
+                    PermissionNext.merge(agent.permission, session.permission ?? []),
+                  ),
+                  emitFailures: false,
+                  emitResolved: false,
+                }),
+                abort,
+              )
+            : undefined
+          const resolvedToolSet = await withAbortSignal(
             resolveTools({
               agent,
               session,
@@ -1097,9 +1108,27 @@ export namespace SessionPrompt {
               bypassAgentCheck,
               messages: msgs,
               resources: resolvedResources,
+              templateIds: profile?.sourceTemplateIds ?? [],
+              turnDeadlineAt,
+              turnSnapshotId: runtimeTurnSnapshotId,
+              abort,
             }),
             abort,
           )
+          if (resolverEnabled && resolvedToolSet.resources) {
+            if (!cachedResources) {
+              await RuntimeResourceResolver.publishResolution({
+                sessionID,
+                turnSnapshotId: runtimeTurnSnapshotId,
+                resolved: resolvedToolSet.resources,
+              })
+            }
+            resourceCache = {
+              userMessageID: lastUser.id,
+              resolved: resolvedToolSet.resources,
+            }
+          }
+          return resolvedToolSet.tools
         },
         { step },
       )
@@ -1287,13 +1316,17 @@ export namespace SessionPrompt {
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
     resources?: RuntimeResourceResolver.Resolved
+    templateIds: string[]
+    turnDeadlineAt?: number
+    turnSnapshotId?: string
+    abort: AbortSignal
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
 
     const context = (args: any, options: ToolCallOptions): Tool.Context => ({
       sessionID: input.session.id,
-      abort: options.abortSignal!,
+      abort: options.abortSignal ?? input.abort,
       messageID: input.processor.message.id,
       callID: options.toolCallId,
       cwd: input.session.directory,
@@ -1482,7 +1515,107 @@ export namespace SessionPrompt {
       tools[key] = item
     }
 
-    return tools
+    const occupiedToolIDs = new Set(Object.keys(tools))
+    const finalizedResources = input.resources
+      ? RuntimeResourceResolver.applyToolConflicts(input.resources, occupiedToolIDs)
+      : undefined
+    if (finalizedResources?.registeredTools.availableTools.length) {
+      const platformTools = await PlatformToolAssembly.create({
+        references: finalizedResources.registeredTools.availableTools,
+        occupiedToolIDs,
+        model: input.model,
+        isExposureDenied: (toolID) => isToolExposureDenied(
+          toolID,
+          PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+        ),
+        executionInput(reference, rawInput, options) {
+          const ctx = context(rawInput, options)
+          const hookContext = {
+            tool: reference.id,
+            sessionID: input.session.id,
+            callID: options.toolCallId,
+          }
+          const currentRuleset = async () => {
+            const [currentAgent, currentSession] = await Promise.all([
+              Agent.mustGet(input.agent.name, {
+                includeDeclaredOnly: true,
+                includeRecommendable: true,
+              }),
+              Session.get(input.session.id),
+            ])
+            return PermissionNext.merge(currentAgent.permission, currentSession.permission ?? [])
+          }
+          return {
+            reference,
+            rawInput,
+            call: {
+              sessionId: input.session.id,
+              projectId: input.session.projectID,
+              directory: input.session.directory,
+              agent: input.agent.name,
+              templateIds: [...input.templateIds],
+              messageId: input.processor.message.id,
+              callId: options.toolCallId,
+              signal: options.abortSignal ?? input.abort,
+              async reportProgress(progress) {
+                await ctx.metadata(progress)
+              },
+            },
+            turnDeadlineAt: input.turnDeadlineAt,
+            async beforeHook(payload) {
+              await Plugin.trigger("tool.execute.before", hookContext, payload)
+            },
+            async afterHook(result) {
+              await Plugin.trigger("tool.execute.after", hookContext, result)
+            },
+            askPermission: async (request, signal) => PermissionNext.ask({
+              ...request,
+              sessionID: input.session.id,
+              metadata: {},
+              always: request.always ?? request.patterns,
+              tool: {
+                messageID: input.processor.message.id,
+                callID: options.toolCallId,
+              },
+              ruleset: await currentRuleset(),
+              signal,
+            }),
+            isExposureDenied: async (toolID) => {
+              return isToolExposureDenied(
+                toolID,
+                await currentRuleset(),
+              )
+            },
+            isPermissionDenied: async (request) => {
+              const ruleset = await currentRuleset()
+              return request.patterns.some(
+                (pattern) => PermissionNext.evaluate(request.permission, pattern, ruleset).action === "deny",
+              )
+            },
+            publishFailure: async (failure) => {
+              await RuntimeResourceResolver.publishToolFailure({
+                sessionID: input.session.id,
+                turnSnapshotId: input.turnSnapshotId,
+                failure,
+              })
+            },
+            clearFailure: () => {
+              RuntimeResourceResolver.clearToolFailure(input.session.id, reference.id)
+            },
+          }
+        },
+      })
+      Object.assign(tools, platformTools.tools)
+    }
+
+    return {
+      tools,
+      resources: finalizedResources,
+    }
+  }
+
+  function isToolExposureDenied(toolID: string, ruleset: PermissionNext.Ruleset) {
+    return PermissionNext.disabled([toolID], ruleset).has(toolID)
   }
 
   async function resolveUserMessageAgent(input: PromptInput, session: Session.Info) {

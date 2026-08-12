@@ -36,6 +36,11 @@ export namespace RuntimeControllerProtocol {
           enabledTools: z.array(z.string()).optional(),
         })
         .optional(),
+      registeredTools: z
+        .object({
+          tools: z.array(z.string()).optional(),
+        })
+        .optional(),
       mcp: z
         .object({
           servers: z.array(z.string()).optional(),
@@ -88,6 +93,7 @@ export namespace RuntimeControllerProtocol {
       sessionProfileSnapshots: z.boolean(),
       contextPipeline: z.boolean(),
       resourceResolver: z.boolean(),
+      registeredTools: z.boolean(),
       sessionEvents: z.literal(true),
       interactionEvents: z.literal(true),
       artifactEvents: z.literal(true),
@@ -208,6 +214,7 @@ export namespace RuntimeControllerProtocol {
     "runtime.message.part.removed",
     "runtime.interaction.requested",
     "runtime.interaction.answered",
+    "runtime.interaction.cancelled",
     "runtime.artifact.available",
     "runtime.artifact.closed",
     "runtime.agent.unavailable",

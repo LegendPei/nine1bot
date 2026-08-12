@@ -1,4 +1,5 @@
 import type {
+  AnyPlatformToolDefinition,
   PlatformActionDescriptor,
   PlatformActionResult,
   PlatformAdapterContext,
@@ -12,16 +13,20 @@ import type {
   PlatformDescriptor,
   PlatformRuntimeSourcesDescriptor,
   PlatformRuntimeSourcesProvider,
+  PlatformRuntimeToolsProvider,
   PlatformRuntimeStatus,
   PlatformSecretAccess,
   PlatformSecretRef,
   PlatformValidationResult,
 } from '@nine1bot/platform-protocol'
+import { randomUUID } from 'node:crypto'
+import { accessSync, constants, statSync } from 'node:fs'
 import { normalize as normalizePath, posix as posixPath, win32 as win32Path } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { accessSync, constants, statSync } from 'node:fs'
 import { RuntimePlatformAdapterRegistry } from '../../../../opencode/packages/opencode/src/runtime/platform/adapter'
 import { RuntimeSourceRegistry } from '../../../../opencode/packages/opencode/src/runtime/source/registry'
+import { RuntimeToolRegistry } from '../../../../opencode/packages/opencode/src/runtime/tool/registry'
+import { sanitizePlatformToolDiagnostic } from '../../../../opencode/packages/opencode/src/runtime/tool/sanitize'
 import { createPlatformPackageResources } from './package-resources'
 
 export type PlatformLifecycleStatus =
@@ -53,6 +58,8 @@ export type PlatformManagerRecord = {
   runtimeStatus: PlatformRuntimeStatus
   features: Record<string, boolean>
   settings: Record<string, unknown>
+  desiredConfigRevision: number
+  appliedConfigRevision?: number
   error?: string
   errorAt?: string
 }
@@ -85,6 +92,19 @@ export type PlatformManagerDetail = PlatformManagerSummary & {
   settings: Record<string, unknown>
   runtimeStatus: PlatformRuntimeStatus
   runtimeSources?: PlatformRuntimeSourcesSummary
+  runtimeTools?: PlatformRuntimeToolSummary[]
+  desiredConfigRevision: number
+  appliedConfigRevision?: number
+}
+
+export type PlatformRuntimeToolSummary = {
+  id: string
+  ownerId: string
+  description: string
+  catalogVisibility: 'declared-only' | 'user-selectable'
+  status: 'registered' | 'disabled' | 'error'
+  generation: number
+  error?: string
 }
 
 export type PlatformRuntimeSourceSummary = {
@@ -143,6 +163,23 @@ type ActivePlatformBackgroundService = {
   handle: PlatformBackgroundServiceHandle
 }
 
+type PreparedPlatformRuntime = {
+  ownerID: string
+  configRevision: number
+  adapter: RuntimePlatformAdapterRegistry.PlatformAdapter
+  sources?: RuntimeSourceRegistry.RuntimeSourcesInput
+  tools?: RuntimeToolRegistry.PreparedOwner
+}
+
+type AppliedPlatformRuntime = {
+  configRevision: number
+  enabled: boolean
+  adapter?: RuntimePlatformAdapterRegistry.PlatformAdapter
+  sources?: RuntimeSourceRegistry.RuntimeSourcesInput
+  generation?: number
+  toolSummaries: RuntimeToolRegistry.ToolSummary[]
+}
+
 export class PlatformNotFoundError extends Error {
   constructor(readonly platformId: string) {
     super(`Platform not found: ${platformId}`)
@@ -198,6 +235,8 @@ const noopAudit: PlatformAuditWriter = {
 export class PlatformAdapterManager {
   private readonly contributions = new Map<string, PlatformAdapterContribution>()
   private readonly records = new Map<string, PlatformManagerRecord>()
+  private readonly desiredConfigRevisions = new Map<string, number>()
+  private readonly appliedRuntime = new Map<string, AppliedPlatformRuntime>()
   private readonly backgroundServices = new Map<string, ActivePlatformBackgroundService>()
   private readonly secrets: PlatformSecretAccess
   private readonly audit: PlatformAuditWriter
@@ -217,18 +256,38 @@ export class PlatformAdapterManager {
     for (const contribution of options.contributions) {
       this.contributions.set(contribution.descriptor.id, contribution)
     }
+    for (const id of new Set([...this.contributions.keys(), ...Object.keys(this.config)])) {
+      this.desiredConfigRevisions.set(id, 1)
+    }
     this.rebuildRecords()
   }
 
   configure(config: PlatformManagerConfig) {
-    void this.stopBackgroundServices()
-    this.unregisterRuntimeAdapters()
-    this.config = normalizeConfig(config)
+    const normalized = normalizeConfig(config)
+    const ids = new Set([
+      ...this.contributions.keys(),
+      ...Object.keys(this.config),
+      ...Object.keys(normalized),
+    ])
+    let changed = false
+    for (const id of ids) {
+      if (sameConfigEntry(this.config[id], normalized[id])) continue
+      this.desiredConfigRevisions.set(id, (this.desiredConfigRevisions.get(id) ?? 0) + 1)
+      changed = true
+    }
+    if (!changed) return false
+    this.config = normalized
     this.rebuildRecords()
+    return true
   }
 
   configSnapshot(): PlatformManagerConfig {
     return cloneJson(this.config)
+  }
+
+  async applyConfig(config: PlatformManagerConfig): Promise<PlatformManagerRecord[]> {
+    await this.reconfigureAndRestartBackgroundServices(config)
+    return this.list()
   }
 
   list(): PlatformManagerRecord[] {
@@ -257,6 +316,9 @@ export class PlatformAdapterManager {
       settings: await this.redactSettings(record),
       runtimeStatus: cloneJson(record.runtimeStatus),
       runtimeSources: this.runtimeSourcesForRecord(record),
+      runtimeTools: this.runtimeToolsForRecord(record),
+      desiredConfigRevision: record.desiredConfigRevision,
+      appliedConfigRevision: record.appliedConfigRevision,
     }
   }
 
@@ -265,44 +327,47 @@ export class PlatformAdapterManager {
       const record = this.records.get(contribution.descriptor.id)
       if (!record) continue
       if (!record.enabled) {
-        RuntimePlatformAdapterRegistry.markDisabled({
-          id: record.id,
-          templateIds: record.descriptor.capabilities.templates,
-          reason: 'platform-disabled-by-current-config',
-          message: `Platform "${record.descriptor.name}" is disabled by the current configuration.`,
-        })
-        RuntimeSourceRegistry.unregisterOwner(record.id)
+        this.applyDisabledRuntime(record)
         continue
       }
-      if (record.registered) continue
-      RuntimePlatformAdapterRegistry.unmarkDisabled(record.id)
+      const applied = this.appliedRuntime.get(record.id)
+      if (applied?.enabled && applied.configRevision === record.desiredConfigRevision) continue
       if (!contribution.runtime?.createAdapter) {
-        this.markHealthy(record.id)
+        this.appliedRuntime.set(record.id, {
+          configRevision: record.desiredConfigRevision,
+          enabled: true,
+          toolSummaries: [],
+        })
+        this.markHealthy(record.id, false)
         continue
       }
 
       try {
-        const adapter = contribution.runtime.createAdapter(this.createContext(record))
-        RuntimePlatformAdapterRegistry.register(adapter)
-        this.registerRuntimeSources(record, contribution.runtime.sources)
+        const prepared = this.prepareRuntime(record, contribution)
+        const appliedRuntime = this.commitPreparedRuntime(prepared)
+        this.appliedRuntime.set(record.id, appliedRuntime)
         this.records.set(record.id, {
           ...record,
           registered: true,
           lifecycleStatus: 'healthy',
           runtimeStatus: { status: 'available' },
+          appliedConfigRevision: record.desiredConfigRevision,
           error: undefined,
           errorAt: undefined,
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = sanitizePlatformToolDiagnostic(error instanceof Error ? error.message : String(error))
+        const previous = this.appliedRuntime.get(record.id)
+        const retained = previous?.enabled === true
         this.records.set(record.id, {
           ...record,
-          registered: false,
-          lifecycleStatus: 'error',
+          registered: retained && previous.adapter !== undefined,
+          lifecycleStatus: retained ? 'degraded' : 'error',
           runtimeStatus: {
-            status: 'error',
+            status: retained ? 'degraded' : 'error',
             message,
           },
+          appliedConfigRevision: previous?.configRevision,
           error: message,
           errorAt: new Date().toISOString(),
         })
@@ -324,7 +389,20 @@ export class PlatformAdapterManager {
     }
     await this.stopBackgroundServices()
 
+    await this.startBackgroundServicesForOwners(
+      new Set(this.contributions.keys()),
+      this.lastBackgroundServicesStartOptions,
+    )
+
+    return this.list()
+  }
+
+  private async startBackgroundServicesForOwners(
+    ownerIDs: ReadonlySet<string>,
+    options: PlatformBackgroundServicesStartOptions,
+  ): Promise<void> {
     for (const contribution of this.contributions.values()) {
+      if (!ownerIDs.has(contribution.descriptor.id)) continue
       const record = this.records.get(contribution.descriptor.id)
       if (!record?.installed || !record.enabled) continue
 
@@ -371,13 +449,19 @@ export class PlatformAdapterManager {
         }
       }
     }
-
-    return this.list()
   }
 
   async stopBackgroundServices(): Promise<void> {
-    const active = Array.from(this.backgroundServices.values())
-    this.backgroundServices.clear()
+    await this.stopBackgroundServicesForOwners(new Set(this.contributions.keys()))
+  }
+
+  private async stopBackgroundServicesForOwners(ownerIDs: ReadonlySet<string>): Promise<void> {
+    const active: ActivePlatformBackgroundService[] = []
+    for (const [key, service] of this.backgroundServices) {
+      if (!ownerIDs.has(service.platformId)) continue
+      active.push(service)
+      this.backgroundServices.delete(key)
+    }
     const stopActive = async () => {
       await Promise.all(active.map(async (service) => {
         try {
@@ -411,13 +495,12 @@ export class PlatformAdapterManager {
   }
 
   unregisterRuntimeAdapters(): PlatformManagerRecord[] {
-    void this.stopBackgroundServices()
     for (const record of this.records.values()) {
-      if (record.registered) {
-        RuntimePlatformAdapterRegistry.unregister(record.id)
-      }
+      RuntimeToolRegistry.unregisterOwner(record.id)
+      RuntimePlatformAdapterRegistry.unregister(record.id)
       RuntimeSourceRegistry.unregisterOwner(record.id)
       RuntimePlatformAdapterRegistry.unmarkDisabled(record.id)
+      this.appliedRuntime.delete(record.id)
       const nextStatus: PlatformRuntimeStatus = !record.installed
         ? { status: 'missing', message: `Platform package is not installed: ${record.id}` }
         : record.enabled
@@ -428,8 +511,10 @@ export class PlatformAdapterManager {
         registered: false,
         lifecycleStatus: record.enabled ? 'enabled' : 'disabled',
         runtimeStatus: nextStatus,
+        appliedConfigRevision: undefined,
       })
     }
+    void this.stopBackgroundServices()
     return this.list()
   }
 
@@ -470,11 +555,17 @@ export class PlatformAdapterManager {
       return disabled
     }
 
+    if (record.appliedConfigRevision !== record.desiredConfigRevision) {
+      return record.runtimeStatus
+    }
+
     const contribution = this.contributions.get(id)
     if (!contribution?.getStatus) return record.runtimeStatus
 
     try {
       const runtimeStatus = await contribution.getStatus(this.createContext(record))
+      const current = this.records.get(id)
+      if (current !== record) return current?.runtimeStatus ?? record.runtimeStatus
       this.records.set(id, {
         ...record,
         lifecycleStatus: lifecycleStatusFromRuntime(runtimeStatus.status),
@@ -484,6 +575,8 @@ export class PlatformAdapterManager {
       })
       return runtimeStatus
     } catch (error) {
+      const current = this.records.get(id)
+      if (current !== record) return current?.runtimeStatus ?? record.runtimeStatus
       const message = error instanceof Error ? error.message : String(error)
       const runtimeStatus: PlatformRuntimeStatus = {
         status: 'error',
@@ -572,7 +665,8 @@ export class PlatformAdapterManager {
         })
         currentRecord = this.records.get(id) ?? currentRecord
       }
-      if (result.updatedStatus && !restartedBackgroundServices) {
+      const runtimeConfigApplied = currentRecord.appliedConfigRevision === currentRecord.desiredConfigRevision
+      if (result.updatedStatus && !restartedBackgroundServices && runtimeConfigApplied) {
         this.records.set(id, {
           ...currentRecord,
           lifecycleStatus: lifecycleStatusFromRuntime(result.updatedStatus.status),
@@ -620,23 +714,39 @@ export class PlatformAdapterManager {
       const config = this.config[descriptor.id] ?? {}
       const enabled = config.enabled ?? (descriptor.defaultEnabled !== false)
       const previous = this.records.get(descriptor.id)
+      const applied = this.appliedRuntime.get(descriptor.id)
+      const desiredConfigRevision = this.desiredConfigRevisions.get(descriptor.id) ?? 1
+      const keepAppliedStatus = Boolean(applied && applied.configRevision !== desiredConfigRevision && previous)
       next.set(descriptor.id, {
         id: descriptor.id,
         descriptor,
         installed: true,
         builtIn: true,
         enabled,
-        registered: previous?.registered && previous.enabled === enabled ? previous.registered : false,
-        lifecycleStatus: enabled ? 'enabled' : 'disabled',
-        runtimeStatus: enabled ? { status: 'available' } : { status: 'disabled' },
+        registered: applied?.enabled === true && applied.adapter !== undefined,
+        lifecycleStatus: keepAppliedStatus
+          ? previous!.lifecycleStatus
+          : applied?.configRevision === desiredConfigRevision
+            ? previous?.lifecycleStatus ?? (enabled ? 'enabled' : 'disabled')
+            : enabled ? 'enabled' : 'disabled',
+        runtimeStatus: keepAppliedStatus
+          ? previous!.runtimeStatus
+          : applied?.configRevision === desiredConfigRevision
+            ? previous?.runtimeStatus ?? (enabled ? { status: 'available' } : { status: 'disabled' })
+            : enabled ? { status: 'available' } : { status: 'disabled' },
         features: config.features ?? {},
         settings: settingsRecord(config.settings),
+        desiredConfigRevision,
+        appliedConfigRevision: applied?.configRevision,
+        error: keepAppliedStatus ? previous?.error : undefined,
+        errorAt: keepAppliedStatus ? previous?.errorAt : undefined,
       })
     }
 
     for (const [id, config] of Object.entries(this.config)) {
       if (next.has(id)) continue
       const enabled = config?.enabled ?? false
+      const desiredConfigRevision = this.desiredConfigRevisions.get(id) ?? 1
       next.set(id, {
         id,
         descriptor: missingDescriptor(id),
@@ -651,6 +761,8 @@ export class PlatformAdapterManager {
         },
         features: config?.features ?? {},
         settings: settingsRecord(config?.settings),
+        desiredConfigRevision,
+        appliedConfigRevision: undefined,
       })
     }
 
@@ -660,13 +772,15 @@ export class PlatformAdapterManager {
     }
   }
 
-  private markHealthy(id: string) {
+  private markHealthy(id: string, registered = false) {
     const record = this.records.get(id)
     if (!record) return
     this.records.set(id, {
       ...record,
+      registered,
       lifecycleStatus: 'healthy',
       runtimeStatus: { status: 'available' },
+      appliedConfigRevision: record.desiredConfigRevision,
       error: undefined,
       errorAt: undefined,
     })
@@ -700,20 +814,123 @@ export class PlatformAdapterManager {
     }
   }
 
-  private registerRuntimeSources(record: PlatformManagerRecord, sources?: PlatformRuntimeSourcesProvider) {
-    RuntimeSourceRegistry.registerOwner({
-      owner: {
-        id: record.id,
-        kind: 'platform',
-        enabled: record.enabled,
-      },
-      sources: normalizeRuntimeSources(this.resolveRuntimeSources(record, sources)),
+  private prepareRuntime(
+    record: PlatformManagerRecord,
+    contribution: PlatformAdapterContribution,
+  ): PreparedPlatformRuntime {
+    const runtime = contribution.runtime
+    if (!runtime?.createAdapter) throw new Error(`Platform runtime adapter is missing: ${record.id}`)
+    const context = this.createContext(record)
+    const adapter = runtime.createAdapter(context)
+    if (isPromiseLike(adapter)) throw new Error(`Platform runtime adapter provider must be synchronous: ${record.id}`)
+    if (!adapter || adapter.id !== record.id) {
+      throw new Error(`Platform runtime adapter owner mismatch: ${record.id}`)
+    }
+
+    const sources = normalizeRuntimeSources(this.resolveRuntimeSources(record, runtime.sources))
+    const tools = runtime.tools === undefined
+      ? undefined
+      : RuntimeToolRegistry.prepareOwner({
+          owner: { id: record.id, kind: 'platform', enabled: true },
+          tools: normalizeRuntimeTools(this.resolveRuntimeTools(record, runtime.tools)),
+        })
+    return {
+      ownerID: record.id,
+      configRevision: record.desiredConfigRevision,
+      adapter,
+      sources,
+      tools,
+    }
+  }
+
+  private commitPreparedRuntime(prepared: PreparedPlatformRuntime): AppliedPlatformRuntime {
+    const previous = {
+      adapter: RuntimePlatformAdapterRegistry.captureOwner(prepared.ownerID),
+      sources: RuntimeSourceRegistry.captureOwner(prepared.ownerID),
+      tools: RuntimeToolRegistry.captureOwner(prepared.ownerID),
+    }
+
+    try {
+      if (prepared.tools) RuntimeToolRegistry.commitOwner(prepared.tools)
+      else RuntimeToolRegistry.unregisterOwner(prepared.ownerID)
+      RuntimePlatformAdapterRegistry.register(prepared.adapter)
+      RuntimeSourceRegistry.registerOwner({
+        owner: { id: prepared.ownerID, kind: 'platform', enabled: true },
+        sources: prepared.sources,
+      })
+    } catch (error) {
+      RuntimeSourceRegistry.restoreOwner(previous.sources)
+      RuntimePlatformAdapterRegistry.restoreOwner(previous.adapter)
+      RuntimeToolRegistry.restoreOwner(previous.tools)
+      throw error
+    }
+
+    const registeredTools = RuntimeToolRegistry.listOwner(prepared.ownerID)
+    return {
+      configRevision: prepared.configRevision,
+      enabled: true,
+      adapter: prepared.adapter,
+      sources: cloneRuntimeSources(prepared.sources),
+      generation: registeredTools.generation,
+      toolSummaries: registeredTools.tools.map((tool) => ({ ...tool })),
+    }
+  }
+
+  private applyDisabledRuntime(record: PlatformManagerRecord) {
+    const current = this.appliedRuntime.get(record.id)
+    if (current?.enabled === false && current.configRevision === record.desiredConfigRevision) return
+
+    RuntimeToolRegistry.unregisterOwner(record.id)
+    RuntimePlatformAdapterRegistry.unregister(record.id)
+    RuntimeSourceRegistry.unregisterOwner(record.id)
+    RuntimePlatformAdapterRegistry.markDisabled({
+      id: record.id,
+      templateIds: record.descriptor.capabilities.templates,
+      reason: 'platform-disabled-by-current-config',
+      message: `Platform "${record.descriptor.name}" is disabled by the current configuration.`,
     })
+    const generation = RuntimeToolRegistry.listOwner(record.id).generation ?? current?.generation
+    this.appliedRuntime.set(record.id, {
+      configRevision: record.desiredConfigRevision,
+      enabled: false,
+      sources: cloneRuntimeSources(current?.sources),
+      generation,
+      toolSummaries: current?.toolSummaries.map((tool) => ({ ...tool })) ?? [],
+    })
+    this.records.set(record.id, {
+      ...record,
+      registered: false,
+      lifecycleStatus: 'disabled',
+      runtimeStatus: { status: 'disabled' },
+      appliedConfigRevision: record.desiredConfigRevision,
+      error: undefined,
+      errorAt: undefined,
+    })
+  }
+
+  private runtimeToolsForRecord(record: PlatformManagerRecord): PlatformRuntimeToolSummary[] | undefined {
+    const applied = this.appliedRuntime.get(record.id)
+    if (!applied?.toolSummaries.length) return undefined
+    const status: PlatformRuntimeToolSummary['status'] = !record.enabled || !applied.enabled
+      ? 'disabled'
+      : record.lifecycleStatus === 'error' && !record.registered
+        ? 'error'
+        : 'registered'
+    return applied.toolSummaries.map((tool) => ({
+      id: tool.id,
+      ownerId: tool.ownerID,
+      description: tool.description,
+      catalogVisibility: tool.catalogVisibility,
+      status,
+      generation: tool.generation,
+      ...(record.error ? { error: record.error } : {}),
+    }))
   }
 
   private runtimeSourcesForRecord(record: PlatformManagerRecord): PlatformRuntimeSourcesSummary | undefined {
     const contribution = this.contributions.get(record.id)
-    const sources = this.resolveRuntimeSources(record, contribution?.runtime?.sources)
+    const sources = this.appliedRuntime.get(record.id)?.sources
+      ?? this.resolveRuntimeSources(record, contribution?.runtime?.sources)
     if (!sources?.agents?.length && !sources?.skills?.length) return undefined
 
     const normalizedSources = normalizeRuntimeSources(sources) ?? {}
@@ -771,7 +988,22 @@ export class PlatformAdapterManager {
     record: PlatformManagerRecord,
     sources?: PlatformRuntimeSourcesProvider,
   ): PlatformRuntimeSourcesDescriptor | undefined {
-    return typeof sources === 'function' ? sources(this.createContext(record)) : sources
+    const resolved = typeof sources === 'function' ? sources(this.createContext(record)) : sources
+    if (isPromiseLike(resolved)) {
+      throw new Error(`Platform runtime source provider must be synchronous: ${record.id}`)
+    }
+    return resolved
+  }
+
+  private resolveRuntimeTools(
+    record: PlatformManagerRecord,
+    tools: PlatformRuntimeToolsProvider,
+  ): AnyPlatformToolDefinition[] {
+    const resolved = typeof tools === 'function' ? tools(this.createContext(record)) : tools
+    if (isPromiseLike(resolved)) {
+      throw new Error(`Platform runtime tool provider must be synchronous: ${record.id}`)
+    }
+    return resolved
   }
 
   private async prepareConfigEntry(
@@ -794,11 +1026,10 @@ export class PlatformAdapterManager {
         const value = incomingSettings[field.key]
         const previousValue = previousSettings[field.key]
         const ref = isPlatformSecretRef(previousValue)
-          ? previousValue
+          ? rotatedSecretRef(record.id, field.key)
           : defaultSecretRef(record.id, field.key)
 
         if (value === null) {
-          await this.secrets.delete(ref).catch(() => {})
           delete nextSettings[field.key]
         } else if (typeof value === 'string') {
           if (value.length > 0) {
@@ -922,22 +1153,43 @@ export class PlatformAdapterManager {
   }
 
   private async reconfigureAndRestartBackgroundServices(nextConfig: PlatformManagerConfig): Promise<boolean> {
-    await this.stopBackgroundServices()
-    this.configure(nextConfig)
+    const ownersToApply = new Set(
+      Array.from(this.records.values())
+        .filter((record) => record.installed && record.appliedConfigRevision !== record.desiredConfigRevision)
+        .map((record) => record.id),
+    )
+    for (const id of configChangedOwnerIDs(this.config, nextConfig)) ownersToApply.add(id)
+    const changed = this.configure(nextConfig)
     this.registerRuntimeAdapters()
-    return this.restartBackgroundServicesIfNeeded()
+    if (!changed && ownersToApply.size === 0) return false
+
+    const appliedOwnerIDs = new Set(
+      Array.from(ownersToApply)
+        .filter((id) => {
+          const record = this.records.get(id)
+          return Boolean(
+            record?.installed &&
+            record.appliedConfigRevision === record.desiredConfigRevision,
+          )
+        }),
+    )
+    if (appliedOwnerIDs.size === 0) return false
+
+    await this.stopBackgroundServicesForOwners(appliedOwnerIDs)
+    return this.restartBackgroundServicesIfNeeded(appliedOwnerIDs)
   }
 
-  private async restartBackgroundServicesIfNeeded(): Promise<boolean> {
-    if (!this.lastBackgroundServicesStartOptions || !this.hasConfiguredBackgroundServices()) {
+  private async restartBackgroundServicesIfNeeded(ownerIDs: ReadonlySet<string>): Promise<boolean> {
+    if (!this.lastBackgroundServicesStartOptions || !this.hasConfiguredBackgroundServices(ownerIDs)) {
       return false
     }
-    await this.startBackgroundServices(this.lastBackgroundServicesStartOptions)
+    await this.startBackgroundServicesForOwners(ownerIDs, this.lastBackgroundServicesStartOptions)
     return true
   }
 
-  private hasConfiguredBackgroundServices(): boolean {
+  private hasConfiguredBackgroundServices(ownerIDs: ReadonlySet<string>): boolean {
     for (const record of this.records.values()) {
+      if (!ownerIDs.has(record.id)) continue
       if (!record.installed || !record.enabled) continue
       const contribution = this.contributions.get(record.id)
       if (!contribution?.backgroundServices) continue
@@ -959,6 +1211,23 @@ function normalizeConfig(config: PlatformManagerConfig): PlatformManagerConfig {
       },
     ]),
   )
+}
+
+function sameConfigEntry(left: PlatformConfigEntry | undefined, right: PlatformConfigEntry | undefined) {
+  return JSON.stringify(normalizeConfigEntry(left)) === JSON.stringify(normalizeConfigEntry(right))
+}
+
+function configChangedOwnerIDs(current: PlatformManagerConfig, next: PlatformManagerConfig) {
+  const ids = new Set([...Object.keys(current), ...Object.keys(next)])
+  return Array.from(ids).filter((id) => !sameConfigEntry(current[id], next[id]))
+}
+
+function normalizeConfigEntry(entry: PlatformConfigEntry | undefined): PlatformConfigEntry {
+  return {
+    enabled: entry?.enabled,
+    features: entry?.features ?? {},
+    settings: settingsRecord(entry?.settings),
+  }
 }
 
 function cloneRecord(record: PlatformManagerRecord): PlatformManagerRecord {
@@ -1026,6 +1295,29 @@ function normalizeRuntimeSources(sources?: PlatformRuntimeSourcesDescriptor): Pl
     agents: sources.agents?.map((source) => normalizeRuntimeSource(source)),
     skills: sources.skills?.map((source) => normalizeRuntimeSource(source)),
   }
+}
+
+function cloneRuntimeSources(
+  sources?: RuntimeSourceRegistry.RuntimeSourcesInput,
+): RuntimeSourceRegistry.RuntimeSourcesInput | undefined {
+  if (!sources) return undefined
+  return {
+    agents: sources.agents?.map((source) => ({ ...source })),
+    skills: sources.skills?.map((source) => ({ ...source })),
+  }
+}
+
+function normalizeRuntimeTools(tools: unknown): RuntimeToolRegistry.Definition<any>[] {
+  if (!Array.isArray(tools)) throw new Error('Platform runtime tool provider must return an array')
+  return tools as RuntimeToolRegistry.Definition<any>[]
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return Boolean(
+    value
+    && (typeof value === 'object' || typeof value === 'function')
+    && typeof (value as { then?: unknown }).then === 'function',
+  )
 }
 
 function normalizeRuntimeSource<T extends { directory: string }>(source: T): T {
@@ -1129,6 +1421,13 @@ function defaultSecretRef(platformId: string, fieldKey: string): PlatformSecretR
   return {
     provider: 'nine1bot-local',
     key: `platform:${platformId}:default:${fieldKey}`,
+  }
+}
+
+function rotatedSecretRef(platformId: string, fieldKey: string): PlatformSecretRef {
+  return {
+    provider: 'nine1bot-local',
+    key: `platform:${platformId}:version:${randomUUID()}:${fieldKey}`,
   }
 }
 

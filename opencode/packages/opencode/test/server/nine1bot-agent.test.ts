@@ -7,6 +7,9 @@ import { Server } from "../../src/server/server"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { RuntimeContextEvents } from "../../src/runtime/context/events"
+import { RuntimePlatformAdapterRegistry } from "../../src/runtime/platform/adapter"
+import { RuntimeResourceResolver } from "../../src/runtime/resource/resolver"
+import { RuntimeToolRegistry } from "../../src/runtime/tool/registry"
 import { Log } from "../../src/util/log"
 
 const projectRoot = path.join(__dirname, "../..")
@@ -38,12 +41,69 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  RuntimePlatformAdapterRegistry.clearForTesting()
+  RuntimeToolRegistry.clearForTesting()
   await Instance.disposeAll().catch(() => undefined)
   restoreEnv(envSnapshot)
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
 describe("nine1bot controller api", () => {
+  test("advertises registered platform tool support", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const response = await Server.App().request("/nine1bot/runtime/capabilities", {
+          headers: jsonHeaders,
+        })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as {
+          server: {
+            resourceResolver: boolean
+            registeredTools?: boolean
+          }
+        }
+        expect(body.server.resourceResolver).toBe(true)
+        expect(body.server.registeredTools).toBe(true)
+      },
+    })
+  })
+
+  test("does not advertise registered tools when the resource resolver is disabled", async () => {
+    const configPath = process.env.OPENCODE_CONFIG
+    if (!configPath) throw new Error("Expected isolated OpenCode config path")
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        model: "openai/gpt-4o-mini",
+        runtime: {
+          resourceResolver: {
+            enabled: false,
+          },
+        },
+      }),
+      "utf-8",
+    )
+
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const response = await Server.App().request("/nine1bot/runtime/capabilities", {
+          headers: jsonHeaders,
+        })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as {
+          server: {
+            resourceResolver: boolean
+            registeredTools: boolean
+          }
+        }
+        expect(body.server.resourceResolver).toBe(false)
+        expect(body.server.registeredTools).toBe(false)
+      },
+    })
+  })
+
   test("creates a profiled session and accepts a noReply message with a turn snapshot", async () => {
     await Instance.provide({
       directory: projectRoot,
@@ -171,7 +231,61 @@ describe("nine1bot controller api", () => {
     })
   })
 
+  test("freezes the platform-recommended agent used for resource conditions into the session profile", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        let resourceAgentName: string | undefined
+        RuntimePlatformAdapterRegistry.register({
+          id: "demo",
+          recommendedAgent: ({ templateIds }) => templateIds.includes("demo-page") ? "plan" : undefined,
+          resourceContributions: ({ agentName }) => {
+            resourceAgentName = agentName
+            return RuntimeResourceResolver.emptyResources()
+          },
+        })
+
+        const created = await Server.App().request("/nine1bot/agent/sessions", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            debug: { profileSnapshot: true },
+            entry: {
+              source: "web",
+              templateIds: ["demo-page"],
+            },
+          }),
+        })
+        expect(created.status).toBe(200)
+        const body = (await created.json()) as {
+          sessionId: string
+          profileSnapshot?: {
+            agent: {
+              name: string
+              source: string
+            }
+          }
+        }
+
+        expect(resourceAgentName).toBe("plan")
+        expect(body.profileSnapshot?.agent).toEqual({
+          name: "plan",
+          source: "internal-runtime",
+        })
+
+        await Session.remove(body.sessionId)
+      },
+    })
+  })
+
   test("applies browser extension sidepanel model and prompt only to extension sessions", async () => {
+    RuntimeToolRegistry.registerOwner({
+      owner: { id: "demo", kind: "platform", enabled: true },
+      tools: [
+        registeredToolDefinition("demo_lookup", "user-selectable"),
+        registeredToolDefinition("demo_declared", "declared-only"),
+      ],
+    })
     const envSnapshot = { ...process.env }
     const tempDir = await mkdtemp(path.join(tmpdir(), "nine1bot-browser-extension-agent-"))
     const configPath = path.join(tempDir, "nine1bot.config.jsonc")
@@ -184,6 +298,7 @@ describe("nine1bot controller api", () => {
             prompt: "Browser-only controller prompt.",
             mcpServers: ["filesystem"],
             skills: ["browser-review"],
+            registeredTools: ["demo_lookup"],
           },
         },
       }),
@@ -226,6 +341,7 @@ describe("nine1bot controller api", () => {
                 resources?: {
                   mcp?: { servers?: string[] }
                   skills?: { skills?: string[] }
+                  registeredTools?: { tools?: string[] }
                 }
               }
             }
@@ -237,6 +353,7 @@ describe("nine1bot controller api", () => {
             })
             expect(browserBody.profileSnapshot?.resources?.mcp?.servers).toContain("filesystem")
             expect(browserBody.profileSnapshot?.resources?.skills?.skills).toContain("browser-review")
+            expect(browserBody.profileSnapshot?.resources?.registeredTools?.tools).toContain("demo_lookup")
 
             const browserSent = await app.request(`/nine1bot/agent/sessions/${browserSessionId}/messages`, {
               method: "POST",
@@ -285,6 +402,7 @@ describe("nine1bot controller api", () => {
               resources?: {
                 mcp?: { servers?: string[] }
                 skills?: { skills?: string[] }
+                registeredTools?: { tools?: string[] }
               }
             }
           }
@@ -296,6 +414,7 @@ describe("nine1bot controller api", () => {
           })
           expect(webBody.profileSnapshot?.resources?.mcp?.servers ?? []).not.toContain("filesystem")
           expect(webBody.profileSnapshot?.resources?.skills?.skills ?? []).not.toContain("browser-review")
+          expect(webBody.profileSnapshot?.resources?.registeredTools?.tools ?? []).not.toContain("demo_lookup")
 
             const webSent = await app.request(`/nine1bot/agent/sessions/${webSessionId}/messages`, {
               method: "POST",
@@ -335,6 +454,165 @@ describe("nine1bot controller api", () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   })
+
+  test("ignores stale persisted browser tool defaults while keeping direct selection strict", async () => {
+    RuntimeToolRegistry.registerOwner({
+      owner: { id: "demo", kind: "platform", enabled: true },
+      tools: [registeredToolDefinition("demo_lookup", "user-selectable")],
+    })
+    const configDir = await mkdtemp(path.join(tmpdir(), "nine1bot-browser-stale-tool-"))
+    tempDirs.push(configDir)
+    const configPath = path.join(configDir, "nine1bot.config.jsonc")
+    await writeFile(configPath, JSON.stringify({
+      browser: {
+        sidepanel: {
+          registeredTools: ["demo_lookup"],
+        },
+      },
+    }), "utf-8")
+    process.env.NINE1BOT_CONFIG_PATH = configPath
+    RuntimeToolRegistry.unregisterOwner("demo")
+
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const response = await Server.App().request("/nine1bot/agent/sessions", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            entry: {
+              source: "browser-extension",
+              mode: "browser-sidepanel",
+            },
+            debug: { profileSnapshot: true },
+          }),
+        })
+
+        expect(response.status).toBe(200)
+        const body = await response.json() as {
+          sessionId: string
+          profileSnapshot?: {
+            resources?: { registeredTools?: { tools?: string[] } }
+          }
+        }
+        try {
+          expect(body.profileSnapshot?.resources?.registeredTools?.tools ?? []).not.toContain("demo_lookup")
+        } finally {
+          await Session.remove(body.sessionId).catch(() => undefined)
+        }
+      },
+    })
+  })
+
+  test("returns a safe 400 response for direct selection of a declared-only tool", async () => {
+    RuntimeToolRegistry.registerOwner({
+      owner: { id: "demo", kind: "platform", enabled: true },
+      tools: [registeredToolDefinition("demo_declared", "declared-only")],
+    })
+
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const body = {
+          sessionChoice: {
+            resources: {
+              registeredTools: { tools: ["demo_declared"] },
+            },
+          },
+        }
+        const response = await Server.App().request("/nine1bot/agent/sessions", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        })
+        expect(response.status).toBe(400)
+        const expected = {
+          error: "Some registered tools cannot be selected for this session.",
+          invalid: [{ id: "demo_declared", reason: "declared-only" }],
+        }
+        await expect(response.json()).resolves.toEqual(expected)
+
+        const templateResponse = await Server.App().request("/nine1bot/agent/templates/resolve", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        })
+        expect(templateResponse.status).toBe(400)
+        await expect(templateResponse.json()).resolves.toEqual(expected)
+      },
+    })
+  })
+
+  test("reports declared and conflict-finalized registered tools in session debug", async () => {
+    RuntimeToolRegistry.registerOwner({
+      owner: { id: "demo", kind: "platform", enabled: true },
+      tools: [registeredToolDefinition("demo_lookup")],
+    })
+    RuntimePlatformAdapterRegistry.register({
+      id: "demo",
+      resourceContributions: ({ templateIds }) => templateIds.includes("demo-page")
+        ? {
+            ...RuntimeResourceResolver.emptyResources(),
+            registeredTools: {
+              tools: ["demo_lookup"],
+              lifecycle: "session",
+              mergeMode: "additive-only",
+            },
+          }
+        : undefined,
+    })
+
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const app = Server.App()
+        const created = await app.request("/nine1bot/agent/sessions", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            entry: {
+              source: "web",
+              templateIds: ["demo-page"],
+            },
+            debug: { profileSnapshot: true },
+          }),
+        })
+        expect(created.status).toBe(200)
+        const createdBody = await created.json() as { sessionId: string }
+
+        try {
+          const response = await app.request(
+            `/nine1bot/agent/sessions/${createdBody.sessionId}/debug`,
+            { method: "GET", headers: jsonHeaders },
+          )
+          expect(response.status).toBe(200)
+          const body = await response.json() as {
+            registeredTools?: {
+              declared: string[]
+              resolved: Array<{
+                id: string
+                ownerId: string
+                generation: number
+                status: string
+                reason?: string
+              }>
+            }
+          }
+          expect(body.registeredTools?.declared).toEqual(["demo_lookup"])
+          expect(body.registeredTools?.resolved).toEqual([{
+            id: "demo_lookup",
+            ownerId: "demo",
+            generation: 1,
+            status: "available",
+          }])
+          expect(JSON.stringify(body.registeredTools)).not.toContain("inputSchema")
+          expect(JSON.stringify(body.registeredTools)).not.toContain("execute")
+        } finally {
+          await Session.remove(createdBody.sessionId)
+        }
+      },
+    })
+  }, 30_000)
 
   test("busy controller message returns 409 before writing user message or page context", async () => {
     await Instance.provide({
@@ -395,5 +673,30 @@ function restoreEnv(snapshot: NodeJS.ProcessEnv) {
   for (const [key, value] of Object.entries(snapshot)) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
+  }
+}
+
+function registeredToolDefinition(
+  id: string,
+  catalogVisibility: RuntimeToolRegistry.Definition["catalogVisibility"] = "declared-only",
+): RuntimeToolRegistry.Definition {
+  return {
+    id,
+    description: `Use ${id}`,
+    catalogVisibility,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+    },
+    parse(input) {
+      return input
+    },
+    async execute() {
+      return {
+        status: "ok",
+        title: id,
+        output: id,
+      }
+    },
   }
 }
