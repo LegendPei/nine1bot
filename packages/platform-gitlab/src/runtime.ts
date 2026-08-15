@@ -396,6 +396,18 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
         'At least one GitLab review profile must be enabled, use a valid host,',
         'and bind an existing Nine1Bot project with a unique identity.',
       ].join(' ')
+    } else if (settings.configurationErrors.some((error) => (
+      error.startsWith('project_profile_max_context_bytes_invalid:')
+      || error.startsWith('project_profile_max_files_invalid:')
+    ))) {
+      const limits: string[] = []
+      if (settings.configurationErrors.some((error) => error.startsWith('project_profile_max_context_bytes_invalid:'))) {
+        limits.push('maxContextBytes must be a finite positive number.')
+      }
+      if (settings.configurationErrors.some((error) => error.startsWith('project_profile_max_files_invalid:'))) {
+        limits.push('maxFiles must be a finite positive number.')
+      }
+      fieldErrors['review.projects'] = limits.join(' ')
     } else if (settings.configurationErrors.some((error) => error.startsWith('project_'))) {
       fieldErrors['review.projects'] = [
         'Every GitLab review profile must use a valid host, bind an existing Nine1Bot project,',

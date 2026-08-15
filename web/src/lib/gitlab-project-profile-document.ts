@@ -86,6 +86,19 @@ export function validateGitLabProjectProfileDocument(
     if (!host) diagnostics.push(diagnostic('profile_host_invalid', 'GitLab host 无效。', index, id))
     const binding = optionalText(entry.nine1botProjectID ?? entry.nine1bot_project_id)
     if (!binding) diagnostics.push(diagnostic('profile_binding_missing', '尚未绑定 Nine1Bot 项目。', index, id))
+    const maxContextBytes = entry.maxContextBytes ?? entry.max_context_bytes
+    const maxFiles = entry.maxFiles ?? entry.max_files
+    if (maxContextBytes !== undefined && !isPositiveNumber(maxContextBytes)) {
+      diagnostics.push(diagnostic(
+        'profile_max_context_bytes_invalid',
+        '上下文预算必须是有限正数。',
+        index,
+        id,
+      ))
+    }
+    if (maxFiles !== undefined && !isPositiveNumber(maxFiles)) {
+      diagnostics.push(diagnostic('profile_max_files_invalid', '文件上限必须是有限正数。', index, id))
+    }
 
     if (ids.has(id)) diagnostics.push(diagnostic('profile_id_duplicate', `档案 ID ${id} 重复。`, index, id))
     ids.add(id)

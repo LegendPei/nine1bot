@@ -691,12 +691,19 @@ export interface WebhookStatus {
 
 export interface GitLabReviewRun {
   id: string
+  rootRunId: string
+  attempt: number
+  retryOf?: string
+  triggerKey: string
+  generation: string
   platform: 'gitlab'
   idempotencyKey?: string
   status: 'accepted' | 'rejected' | 'blocked' | 'running' | 'succeeded' | 'failed'
   createdAt: number
   updatedAt: number
   error?: string
+  rejectionKind?: string
+  recoverable?: boolean
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number

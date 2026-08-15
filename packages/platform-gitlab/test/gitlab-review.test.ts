@@ -685,6 +685,45 @@ describe('GitLab review foundation', () => {
     })
   })
 
+  test('reports invalid canonical and alias project context limits as configuration errors', () => {
+    const parsed = parseGitLabReviewProjectProfiles([{
+      id: 'canonical-limits',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      maxContextBytes: '500',
+      maxFiles: -2,
+    }, {
+      id: 'alias-limits',
+      host: 'gitlab.example.com',
+      project_id: 4,
+      nine1bot_project_id: 'project-other',
+      max_context_bytes: Number.POSITIVE_INFINITY,
+      max_files: '20',
+    }])
+
+    expect(parsed.errors).toEqual([
+      'project_profile_max_context_bytes_invalid:canonical-limits',
+      'project_profile_max_files_invalid:canonical-limits',
+      'project_profile_max_context_bytes_invalid:alias-limits',
+      'project_profile_max_files_invalid:alias-limits',
+    ])
+    expect(parsed.profiles).toEqual([
+      expect.objectContaining({ id: 'canonical-limits', maxContextBytes: undefined, maxFiles: undefined }),
+      expect.objectContaining({ id: 'alias-limits', maxContextBytes: undefined, maxFiles: undefined }),
+    ])
+    expect(normalizeGitLabReviewSettings({
+      'review.enabled': true,
+      'review.projects': [{
+        id: 'canonical-limits',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-uf',
+        maxContextBytes: '500',
+      }],
+    }).configurationErrors).toContain('project_profile_max_context_bytes_invalid:canonical-limits')
+  })
+
   test('requires an enabled and bound usable project profile when review is enabled', () => {
     const settings = normalizeGitLabReviewSettings({
       'review.enabled': true,

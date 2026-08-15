@@ -181,11 +181,19 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
       ?? ci?.maxFailedJobs
       ?? ci?.max_failed_jobs
     const maxJobLogBytesInput = ci?.maxJobLogBytes ?? ci?.max_job_log_bytes
+    const maxContextBytesInput = item.maxContextBytes ?? item.max_context_bytes
+    const maxFilesInput = item.maxFiles ?? item.max_files
     if (maxJobLogsInput !== undefined && !isPositiveNumber(maxJobLogsInput)) {
       errors.push(`project_profile_ci_max_job_logs_invalid:${id}`)
     }
     if (maxJobLogBytesInput !== undefined && !isPositiveNumber(maxJobLogBytesInput)) {
       errors.push(`project_profile_ci_max_job_log_bytes_invalid:${id}`)
+    }
+    if (maxContextBytesInput !== undefined && !isPositiveNumber(maxContextBytesInput)) {
+      errors.push(`project_profile_max_context_bytes_invalid:${id}`)
+    }
+    if (maxFilesInput !== undefined && !isPositiveNumber(maxFilesInput)) {
+      errors.push(`project_profile_max_files_invalid:${id}`)
     }
 
     const profile: GitLabReviewProjectProfile = {
@@ -201,8 +209,8 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
       reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
       includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
       excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),
-      maxContextBytes: optionalPositiveNumber(item.maxContextBytes ?? item.max_context_bytes),
-      maxFiles: optionalPositiveNumber(item.maxFiles ?? item.max_files),
+      maxContextBytes: optionalPositiveNumber(maxContextBytesInput),
+      maxFiles: optionalPositiveNumber(maxFilesInput),
       ci: {
         maxJobLogs: positiveNumber(maxJobLogsInput, 3),
         maxJobLogBytes: positiveNumber(maxJobLogBytesInput, 8_000),

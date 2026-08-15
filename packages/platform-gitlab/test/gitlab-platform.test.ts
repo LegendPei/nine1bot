@@ -65,6 +65,31 @@ describe('GitLab platform adapter package', () => {
     })
   })
 
+  test('reports precise project context and file limit errors before saving', async () => {
+    const result = await gitlabPlatformContribution.validateConfig?.({
+      'review.enabled': true,
+      'review.tokenSecretRef': 'token-value',
+      'review.projects': [{
+        id: 'invalid-limits',
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-uf',
+        enabled: true,
+        max_context_bytes: '500',
+        maxFiles: -2,
+      }],
+    })
+    const projectError = String(result && 'fieldErrors' in result ? result.fieldErrors?.['review.projects'] : '')
+
+    expect(result).toMatchObject({
+      ok: false,
+      fieldErrors: {
+        'review.projects': expect.stringContaining('maxContextBytes'),
+      },
+    })
+    expect(projectError).toContain('maxFiles')
+  })
+
   test('reports degraded status and validation when review has no usable project profile', async () => {
     const settings = {
       'review.enabled': true,

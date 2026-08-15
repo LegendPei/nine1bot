@@ -31,6 +31,12 @@ import {
   validateGitLabProjectProfileDocument,
   type GitLabProjectProfileDiagnostic,
 } from '../lib/gitlab-project-profile-document'
+import {
+  canRetryGitLabReviewRun as canRetryGitLabReviewRunPolicy,
+  isIgnoredGitLabReviewRun,
+  isOperationalGitLabReviewRun,
+  reviewRunStatusLabel,
+} from '../lib/gitlab-review-runs'
 
 const props = defineProps<{
   platforms: PlatformSummary[]
@@ -142,8 +148,8 @@ const gitLabMvpFields = computed(() => [
 const operationLocked = computed(() => props.saving || Boolean(props.actionRunning))
 const healthRefreshing = computed(() => props.actionRunning === 'health')
 const isGitLabPlatform = computed(() => props.selectedPlatform?.id === 'gitlab')
-const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.filter((run) => run.status !== 'rejected').slice(0, 8))
-const visibleGitLabIgnoredEvents = computed(() => gitLabReviewRuns.value.filter((run) => run.status === 'rejected').slice(0, 8))
+const visibleGitLabRuns = computed(() => gitLabReviewRuns.value.filter(isOperationalGitLabReviewRun).slice(0, 8))
+const visibleGitLabIgnoredEvents = computed(() => gitLabReviewRuns.value.filter(isIgnoredGitLabReviewRun).slice(0, 8))
 const gitLabWebhookPath = '/webhooks/gitlab/{webhookSecret}'
 const gitLabWebhookSecretFieldKey = 'review.webhookSecretRef'
 const gitLabReviewModelProviderFieldKey = 'review.modelProviderId'
@@ -267,18 +273,6 @@ function statusIcon(status: string) {
   if (status === 'available') return CheckCircle2
   if (status === 'disabled' || status === 'missing') return CircleSlash
   return CircleAlert
-}
-
-function runStatusLabel(status: string) {
-  const labels: Record<string, string> = {
-    accepted: '已接受',
-    rejected: '已忽略',
-    blocked: '已拦截',
-    running: '运行中',
-    succeeded: '成功',
-    failed: '失败',
-  }
-  return labels[status] || status
 }
 
 function eventLevelLabel(level: string) {
@@ -834,7 +828,7 @@ async function loadGitLabReviewRuns() {
 }
 
 function canRetryGitLabRun(run: GitLabReviewRun) {
-  return run.status === 'failed' && !run.publishedAt
+  return canRetryGitLabReviewRunPolicy(run, gitLabReviewRuns.value)
 }
 
 async function retryGitLabReviewRun(run: GitLabReviewRun) {
@@ -867,6 +861,8 @@ function reviewRunObject(run: GitLabReviewRun) {
 
 function reviewRunDetail(run: GitLabReviewRun) {
   const parts = [
+    `尝试 ${run.attempt}`,
+    run.retryOf ? `重试自 ${run.retryOf}` : '',
     run.sessionId ? `会话 ${run.sessionId}` : '',
     run.turnSnapshotId ? `轮次 ${run.turnSnapshotId}` : '',
     run.retryCount ? `重试 ${run.retryCount} 次` : '',
@@ -1572,7 +1568,7 @@ function actionResultDetails(result: PlatformActionResult) {
               </button>
             </div>
             <p class="text-muted text-sm">
-              最近 8 条 review run。这里用于观察触发、运行、发布和失败回写状态；失败且尚未发布的 run 可以重试。
+              最近 8 条 review run。修复项目绑定或 token 配置后，可重试最新的可恢复配置拒绝。
             </p>
             <div v-if="gitLabRunsError" class="platform-alert warning">
               {{ gitLabRunsError }}
@@ -1631,7 +1627,7 @@ function actionResultDetails(result: PlatformActionResult) {
                     <span>{{ retryingGitLabRunIds.has(run.id) ? '重试中' : '重试' }}</span>
                   </button>
                   <span class="platform-status-pill" :class="statusClass(run.status === 'succeeded' ? 'available' : run.status === 'failed' ? 'error' : 'degraded')">
-                    {{ runStatusLabel(run.status) }}
+                    {{ reviewRunStatusLabel(run) }}
                   </span>
                   <span v-if="run.publishedAt" class="gitlab-run-published">已发布</span>
                 </div>

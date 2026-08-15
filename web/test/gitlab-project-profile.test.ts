@@ -201,4 +201,75 @@ describe('GitLab project profiles', () => {
     expect(result.value).not.toContain('maxFailedJobs')
     expect(parseGitLabProjectProfileDocument(result.value).entries).toEqual(reloaded)
   })
+
+  test('blocks invalid canonical limits and preserves them through unrelated edits until repair', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'invalid-canonical',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      displayName: 'Before edit',
+      maxContextBytes: '500',
+      maxFiles: -2,
+    }])
+
+    expect(validateGitLabProjectProfileDocument(document).map(({ code }) => code)).toEqual([
+      'profile_max_context_bytes_invalid',
+      'profile_max_files_invalid',
+    ])
+    const updated = updateGitLabProjectProfileDocument(document, 0, {
+      ...document.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+    expect(updated.entries[0]).toMatchObject({
+      displayName: 'After edit',
+      maxContextBytes: '500',
+      maxFiles: -2,
+    })
+    expect(serializeGitLabProjectProfileDocument(updated)).toMatchObject({
+      ok: false,
+      diagnostics: [
+        { code: 'profile_max_context_bytes_invalid' },
+        { code: 'profile_max_files_invalid' },
+      ],
+    })
+
+    const repaired = updateGitLabProjectProfileDocument(updated, 0, {
+      ...updated.editable[0]!.profile,
+      maxContextBytes: 500,
+      maxFiles: 2,
+    })
+    const serialized = serializeGitLabProjectProfileDocument(repaired)
+    expect(serialized.ok).toBe(true)
+    if (!serialized.ok) throw new Error('expected repaired limits to serialize')
+    expect(JSON.parse(serialized.value)[0]).toMatchObject({ maxContextBytes: 500, maxFiles: 2 })
+  })
+
+  test('blocks invalid limit aliases and preserves the original aliases on unrelated edits', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'invalid-aliases',
+      host: 'gitlab.example.com',
+      project_id: 3,
+      nine1bot_project_id: 'project-uf',
+      display_name: 'Before edit',
+      max_context_bytes: Number.POSITIVE_INFINITY,
+      max_files: '20',
+    }])
+    const updated = updateGitLabProjectProfileDocument(document, 0, {
+      ...document.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+
+    expect(validateGitLabProjectProfileDocument(updated).map(({ code }) => code)).toEqual([
+      'profile_max_context_bytes_invalid',
+      'profile_max_files_invalid',
+    ])
+    expect(updated.entries[0]).toMatchObject({
+      displayName: 'After edit',
+      max_context_bytes: Number.POSITIVE_INFINITY,
+      max_files: '20',
+    })
+    expect(updated.entries[0]).not.toHaveProperty('maxContextBytes')
+    expect(updated.entries[0]).not.toHaveProperty('maxFiles')
+  })
 })
