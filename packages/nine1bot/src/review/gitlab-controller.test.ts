@@ -1187,6 +1187,109 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('rejects missing and throwing live tokens before exposing an active run and links repaired retries', async () => {
+    for (const scenario of [
+      { name: 'missing', error: 'gitlab_token_missing' },
+      { name: 'throwing', error: 'gitlab_token_unavailable' },
+    ] as const) {
+      const headSha = `token-${scenario.name}-head`
+      let tokenReads = 0
+      const requests: string[] = []
+      const unavailableSecrets: PlatformSecretAccess = {
+        async get(ref) {
+          if (ref.key === 'gitlab-webhook') return 'secret'
+          if (ref.key !== 'gitlab-token') return undefined
+          tokenReads++
+          if (scenario.name === 'throwing' && tokenReads === 1) {
+            throw new Error('secret store unavailable')
+          }
+          return undefined
+        },
+        async set() {},
+        async delete() {},
+        async has() { return true },
+      }
+      const livePlatforms = {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.baseUrl': 'https://gitlab.example.com',
+            'review.dryRun': false,
+          },
+        },
+      }
+
+      const rejected = await handleGitLabReviewWebhook({
+        payload: {
+          object_kind: 'merge_request',
+          project: {
+            id: 123,
+            path_with_namespace: 'nine1/nine1bot',
+            web_url: 'https://gitlab.example.com/nine1/nine1bot',
+          },
+          object_attributes: { iid: scenario.name === 'missing' ? 31 : 32, last_commit: { id: headSha } },
+        },
+        headers: { 'x-gitlab-token': 'secret' },
+        platforms: livePlatforms,
+        secrets: unavailableSecrets,
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          throw new Error('live changes must not start without a token')
+        }) as unknown as typeof fetch,
+      })
+
+      expect(rejected).toMatchObject({
+        accepted: false,
+        status: 'rejected',
+        error: scenario.error,
+        httpStatus: 202,
+        attempt: 1,
+      })
+      if (!rejected.runId) throw new Error('expected a persisted configuration rejection')
+      expect(requests).toEqual([])
+      expect(tokenReads).toBe(1)
+      const storedRejection = ReviewRunStore.get(rejected.runId)
+      expect(storedRejection).toMatchObject({
+        status: 'rejected',
+        error: scenario.error,
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })
+      expect(storedRejection).not.toHaveProperty('context')
+      expect(storedRejection).not.toHaveProperty('sessionId')
+
+      const retried = await retryGitLabReviewAttempt({
+        runId: rejected.runId,
+        platforms: livePlatforms,
+        secrets: liveSecrets,
+        fetch: (async (url) => {
+          requests.push(String(url))
+          return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha },
+            changes: [{
+              old_path: 'src/token.ts',
+              new_path: 'src/token.ts',
+              diff: '@@ -1 +1 @@\n-old\n+new\n',
+            }],
+          })
+        }) as typeof fetch,
+      })
+
+      expect(retried).toMatchObject({
+        accepted: true,
+        status: 'accepted',
+        attempt: 2,
+        retryOf: rejected.runId,
+        rootRunId: rejected.runId,
+        context: { diff: { files: [{ newPath: 'src/token.ts' }] } },
+      })
+      expect(requests).toEqual([
+        `https://gitlab.example.com/api/v4/projects/123/merge_requests/${scenario.name === 'missing' ? 31 : 32}/changes`,
+      ])
+    }
+  })
+
   test('does not resolve the API token solely to prefetch CI', async () => {
     const failingTokenSecrets: PlatformSecretAccess = {
       async get(ref) {

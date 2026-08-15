@@ -237,7 +237,15 @@ const recoverableGitLabReviewRejections = new Set([
   'project_profile_disabled',
   'project_binding_missing',
   'project_profile_identity_duplicate',
+  'gitlab_token_missing',
+  'gitlab_token_unavailable',
 ])
+
+class GitLabReviewConfigurationError extends Error {
+  constructor(readonly code: 'gitlab_token_missing' | 'gitlab_token_unavailable') {
+    super(code)
+  }
+}
 
 export function isRecoverableGitLabReviewRejection(error: string | undefined) {
   return Boolean(error && recoverableGitLabReviewRejections.has(error))
@@ -463,6 +471,9 @@ async function executeGitLabReviewAttempt(input: {
       fetch: input.fetch,
     })
   } catch (error) {
+    if (error instanceof GitLabReviewConfigurationError) {
+      return rejectGitLabReviewRuntimeConfiguration(input.run.id, error.code)
+    }
     const message = gitLabApiFailureMessage('load_changes', error)
     ReviewRunStore.update(input.run.id, {
       status: 'failed',
@@ -1056,8 +1067,10 @@ async function loadLiveChanges(input: {
   fetch?: typeof fetch
 }): Promise<GitLabRawChangesResponse | undefined> {
   if (input.settings.dryRun) return undefined
-  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
-  if (!token) return undefined
+  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets).catch(() => {
+    throw new GitLabReviewConfigurationError('gitlab_token_unavailable')
+  })
+  if (!token) throw new GitLabReviewConfigurationError('gitlab_token_missing')
   const resolvedClient = gitLabApiClientForHost({
     settings: input.settings,
     host: input.trigger.host,

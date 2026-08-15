@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
@@ -513,17 +513,22 @@ describe("webhook status URL selection", () => {
   })
 
   test("resolves GitLab review runtime directory from the bound Nine1Bot project", async () => {
+    const rootDirectory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-valid-binding-"))
     const requested: string[] = []
-    const directory = await resolveGitLabReviewRuntimeDirectory(
-      { nine1botProjectID: "project-uf" },
-      async (projectID) => {
-        requested.push(projectID)
-        return { worktree: "C:/worktrees/uf", rootDirectory: "C:/repos/uf" }
-      },
-    )
+    try {
+      const directory = await resolveGitLabReviewRuntimeDirectory(
+        { nine1botProjectID: "project-uf" },
+        async (projectID) => {
+          requested.push(projectID)
+          return { worktree: join(rootDirectory, "unused-worktree"), rootDirectory }
+        },
+      )
 
-    expect(requested).toEqual(["project-uf"])
-    expect(directory).toBe("C:/repos/uf")
+      expect(requested).toEqual(["project-uf"])
+      expect(directory).toBe(rootDirectory)
+    } finally {
+      await rm(rootDirectory, { recursive: true, force: true })
+    }
   })
 
   test("fails GitLab review runtime startup when its project binding is missing or stale", async () => {
@@ -584,6 +589,90 @@ describe("webhook status URL selection", () => {
         recoverable: true,
         attempt: 1,
       })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects missing, file, and inaccessible runtime directories before the start callback", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-runtime-directory-preflight-"))
+    const filePath = join(directory, "project-file")
+    const inaccessiblePath = join(directory, "inaccessible-project")
+    await writeFile(filePath, "not a directory")
+    await mkdir(inaccessiblePath)
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+
+    try {
+      for (const scenario of [
+        { name: "missing", projectPath: join(directory, "missing-project") },
+        { name: "file", projectPath: filePath },
+        {
+          name: "inaccessible",
+          projectPath: inaccessiblePath,
+          inspectDirectory: async () => {
+            const error = new Error("access denied") as NodeJS.ErrnoException
+            error.code = "EACCES"
+            throw error
+          },
+        },
+      ]) {
+        const run = ReviewRunStore.create({
+          platform: "gitlab",
+          status: "running",
+          trigger: {
+            host: "gitlab.example.com",
+            projectId: 123,
+            objectType: "mr",
+            objectIid: 10,
+            headSha: `${scenario.name}-binding-head`,
+            mode: "webhook",
+          },
+        })
+        let starts = 0
+        const result = await startGitLabReviewRuntime({
+          runId: run.id,
+          idempotencyKey: `gitlab:directory:${scenario.name}`,
+          trigger: run.trigger as any,
+          context: {
+            project: { nine1botProjectID: `project-${scenario.name}` },
+            diff: {
+              files: [],
+              skipped: [],
+              blocked: false,
+              stats: {
+                fileCount: 0,
+                includedFileCount: 0,
+                skippedFileCount: 0,
+                includedBytes: 0,
+                truncated: false,
+              },
+            },
+            contextBlocks: [],
+          },
+        } as any, "runtime_start", {
+          getProject: async () => ({ rootDirectory: scenario.projectPath, worktree: scenario.projectPath }),
+          inspectDirectory: scenario.inspectDirectory,
+          start: async () => {
+            starts++
+          },
+        })
+
+        expect(starts).toBe(0)
+        expect(result).toMatchObject({
+          accepted: false,
+          status: "rejected",
+          error: "project_binding_missing",
+          httpStatus: 202,
+          runId: run.id,
+        })
+        expect(ReviewRunStore.get(run.id)).toMatchObject({
+          status: "rejected",
+          error: "project_binding_missing",
+          rejectionKind: "configuration",
+          recoverable: true,
+        })
+      }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

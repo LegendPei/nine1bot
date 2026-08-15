@@ -4,6 +4,8 @@ import { RuntimeControllerProtocol } from "@/runtime/controller/protocol"
 import { Webhook } from "@/webhook/webhook"
 import { Hono } from "hono"
 import { describeRoute, resolver, validator } from "hono-openapi"
+import { constants } from "fs"
+import { access, stat } from "fs/promises"
 import { networkInterfaces, type NetworkInterfaceInfo } from "os"
 import z from "zod"
 import { lazy } from "../../util/lazy"
@@ -80,13 +82,23 @@ function projectDirectory(project: Pick<Project.Info, "rootDirectory" | "worktre
 export async function resolveGitLabReviewRuntimeDirectory(
   project: { nine1botProjectID?: string } | undefined,
   getProject: (projectID: string) => Promise<Pick<Project.Info, "rootDirectory" | "worktree">> = Project.get,
+  inspectDirectory: (directory: string) => Promise<void> = inspectGitLabReviewRuntimeDirectory,
 ) {
   const projectID = project?.nine1botProjectID?.trim()
   if (!projectID) throw new Error("project_binding_missing")
   const boundProject = await getProject(projectID).catch(() => undefined)
   const directory = boundProject ? projectDirectory(boundProject) : undefined
   if (!directory) throw new Error("project_binding_missing")
+  await inspectDirectory(directory).catch(() => {
+    throw new Error("project_binding_missing")
+  })
   return directory
+}
+
+async function inspectGitLabReviewRuntimeDirectory(directory: string) {
+  const info = await stat(directory)
+  if (!info.isDirectory()) throw new Error("project_binding_missing")
+  await access(directory, constants.R_OK | constants.X_OK)
 }
 
 function currentOrigin(c: { req: { url: string } }) {
@@ -542,6 +554,7 @@ export type GitLabReviewRuntimeRunOptions = {
 
 export type GitLabReviewRuntimePreflightOptions = {
   getProject?: Parameters<typeof resolveGitLabReviewRuntimeDirectory>[1]
+  inspectDirectory?: Parameters<typeof resolveGitLabReviewRuntimeDirectory>[2]
   start?: (result: GitLabReviewRuntimeRunInput, directory: string) => Promise<unknown>
 }
 
@@ -552,7 +565,11 @@ export async function startGitLabReviewRuntime(
 ) {
   let directory: string
   try {
-    directory = await resolveGitLabReviewRuntimeDirectory(result.context.project, options.getProject)
+    directory = await resolveGitLabReviewRuntimeDirectory(
+      result.context.project,
+      options.getProject,
+      options.inspectDirectory,
+    )
   } catch {
     return rejectGitLabReviewRuntimeConfiguration(result.runId, "project_binding_missing")
   }
