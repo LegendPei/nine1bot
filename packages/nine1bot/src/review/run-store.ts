@@ -515,15 +515,30 @@ function persistPublicationMutation(mutate: () => void) {
 function prune() {
   const limit = maxRecords()
   if (runs.size <= limit) return
-  const keep = new Set(
-    [...runs.values()]
-      .sort(compareNewestFirst)
-      .slice(0, limit)
-      .map((run) => run.id),
-  )
+  const groups = groupRunsByTriggerKey([...runs.values()])
+  groups.sort((a, b) => compareNewestFirst(a.latest, b.latest))
+  const keep = new Set<string>()
+  for (const group of groups) {
+    if (keep.size === 0 || keep.size + group.records.length <= limit) {
+      for (const run of group.records) keep.add(run.id)
+    }
+  }
   for (const id of runs.keys()) {
     if (!keep.has(id)) runs.delete(id)
   }
+}
+
+function groupRunsByTriggerKey(records: ReviewRunRecord[]) {
+  const byTriggerKey = new Map<string, ReviewRunRecord[]>()
+  for (const run of records) {
+    const group = byTriggerKey.get(run.triggerKey)
+    if (group) group.push(run)
+    else byTriggerKey.set(run.triggerKey, [run])
+  }
+  return [...byTriggerKey.values()].map((group) => {
+    group.sort(compareNewestFirst)
+    return { records: group, latest: group[0]! }
+  })
 }
 
 function inferSequence(records: ReviewRunRecord[]) {

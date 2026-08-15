@@ -1688,6 +1688,77 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.list({ limit: 1 }).map((run) => run.id)).toEqual([third.id])
   })
 
+  test('prunes unrelated runs before retry attempt ancestors at the record limit', () => {
+    ReviewRunStore.setMaxRecordsForTesting(2)
+    const rejected = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'old-rejection',
+      triggerKey: 'old-rejection',
+    })
+    const unrelated = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'unrelated-run',
+      triggerKey: 'unrelated-run',
+    })
+    const retry = ReviewRunStore.createRetryAttempt(rejected, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: rejected.idempotencyKey,
+    })
+
+    expect(retry).toBeDefined()
+    expect(ReviewRunStore.get(unrelated.id)).toBeUndefined()
+    expect(ReviewRunStore.get(rejected.id)).toMatchObject({ rootRunId: rejected.id })
+    expect(ReviewRunStore.get(retry!.id)).toMatchObject({
+      rootRunId: rejected.id,
+      retryOf: rejected.id,
+    })
+    expect(ReviewRunStore.get(retry!.retryOf!)).toBeDefined()
+    expect(ReviewRunStore.get(retry!.rootRunId)).toBeDefined()
+  })
+
+  test('keeps an oversized attempt chain whole and removes it only as a complete older chain', () => {
+    ReviewRunStore.setMaxRecordsForTesting(2)
+    const first = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'oversized-chain',
+      triggerKey: 'oversized-chain',
+    })
+    const second = ReviewRunStore.createRetryAttempt(first, {
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: first.idempotencyKey,
+    })
+    expect(second).toBeDefined()
+    const third = ReviewRunStore.createRetryAttempt(second!, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: first.idempotencyKey,
+    })
+
+    expect(third).toBeDefined()
+    expect(ReviewRunStore.list().map((run) => run.id)).toEqual([third!.id, second!.id, first.id])
+    for (const run of ReviewRunStore.list()) {
+      expect(ReviewRunStore.get(run.rootRunId)).toBeDefined()
+      if (run.retryOf) expect(ReviewRunStore.get(run.retryOf)).toBeDefined()
+    }
+
+    const newer = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'newer-independent-chain',
+      triggerKey: 'newer-independent-chain',
+    })
+
+    expect(ReviewRunStore.list().map((run) => run.id)).toEqual([newer.id])
+    expect(ReviewRunStore.get(first.id)).toBeUndefined()
+    expect(ReviewRunStore.get(second!.id)).toBeUndefined()
+    expect(ReviewRunStore.get(third!.id)).toBeUndefined()
+  })
+
   test('loads live MR changes and writes blocked comments for overflow diffs', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
