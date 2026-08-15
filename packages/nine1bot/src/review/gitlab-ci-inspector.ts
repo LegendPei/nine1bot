@@ -264,7 +264,7 @@ function boundListToolOutput(
 ): GitLabCiToolOutput {
   const jobs = [...output.jobs]
   let next = { ...output, jobs }
-  while (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES && jobs.length > 0) {
+  while (toolOutputBytes(next) >= MAX_TOOL_OUTPUT_BYTES && jobs.length > 0) {
     jobs.pop()
     next = {
       ...next,
@@ -274,7 +274,7 @@ function boundListToolOutput(
       returnedJobs: jobs.length,
     }
   }
-  if (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES && next.target.mrUrl) {
+  if (toolOutputBytes(next) >= MAX_TOOL_OUTPUT_BYTES && next.target.mrUrl) {
     next = {
       ...next,
       target: { ...next.target, mrUrl: undefined },
@@ -282,7 +282,7 @@ function boundListToolOutput(
       truncated: true,
     }
   }
-  if (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES) {
+  if (toolOutputBytes(next) >= MAX_TOOL_OUTPUT_BYTES) {
     return failure('list', 'ci_tool_output_limit_exceeded')
   }
   return next

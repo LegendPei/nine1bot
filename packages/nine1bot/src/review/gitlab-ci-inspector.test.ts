@@ -159,6 +159,36 @@ describe('GitLab CI session inspector', () => {
     expect(fetchCalls).toBe(0)
   })
 
+  test('does not reserve job-log quota when the configured token is missing', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    let fetchCalls = 0
+    const missingSecrets: PlatformSecretAccess = {
+      ...secrets,
+      async get() {
+        return undefined
+      },
+    }
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets: missingSecrets,
+      fetch: (async () => {
+        fetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_token_missing',
+    })
+    expect(fetchCalls).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.ci?.jobLogReadCount).toBeUndefined()
+  })
+
   test('converts secret-store failures into stable diagnostics without GitLab access', async () => {
     createReviewRun('session-a', 3, 10, 'head-a')
     let fetchCalls = 0
@@ -189,6 +219,36 @@ describe('GitLab CI session inspector', () => {
     expect(ReviewRunStore.findBySessionId('session-a')?.ci?.diagnostics).toEqual([
       'ci_token_unavailable:Error',
     ])
+  })
+
+  test('does not reserve job-log quota when the token resolver throws', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    let fetchCalls = 0
+    const throwingSecrets: PlatformSecretAccess = {
+      ...secrets,
+      async get() {
+        throw new Error('secret backend details')
+      },
+    }
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets: throwingSecrets,
+      fetch: (async () => {
+        fetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_token_unavailable:Error',
+    })
+    expect(fetchCalls).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.ci?.jobLogReadCount).toBeUndefined()
   })
 
   test('allows only an active attempt before making any GitLab CI request', async () => {
@@ -614,6 +674,126 @@ describe('GitLab CI session inspector', () => {
     })
   })
 
+  test('consumes one job-log quota attempt when no pipeline exists', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    const calls: string[] = []
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        calls.push(url)
+        if (url.includes('/merge_requests/10/pipelines')) return Response.json([])
+        const mergeRequest = currentMergeRequestMetadataResponse(url)
+        if (mergeRequest) return mergeRequest
+        throw new Error(`unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_pipeline_not_found_for_current_mr',
+    })
+    expect(calls).toHaveLength(2)
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({
+      jobLogReadCount: 1,
+      queriedJobIds: [56],
+    })
+  })
+
+  test('allows exactly two concurrent authenticated job-log reservations', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    const calls: string[] = []
+    const jobIds = [200, 201, 202, 203, 204]
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('/merge_requests/10/pipelines')) return Response.json([])
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    const results = await Promise.all(jobIds.map((jobId) => inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })))
+
+    expect(results.filter((result) => !result.ok && result.diagnostic === 'ci_pipeline_not_found_for_current_mr'))
+      .toHaveLength(2)
+    expect(results.filter((result) => !result.ok && result.diagnostic === 'ci_job_log_limit_reached'))
+      .toHaveLength(3)
+    expect(calls).toHaveLength(4)
+    expect(calls.every((url) => !url.includes('/jobs/'))).toBe(true)
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({
+      jobLogReadCount: 2,
+      queriedJobIds: [200, 201],
+    })
+  })
+
+  test('rejects a whitespace head SHA before GitLab access', async () => {
+    createReviewRun('session-a', 3, 10, 'head a')
+    let fetchCalls = 0
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async () => {
+        fetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'gitlab_review_mr_identity_missing',
+    })
+    expect(fetchCalls).toBe(0)
+  })
+
+  test('fails closed when the complete list payload is exactly 32 KiB', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    const mrIid = 'm'.repeat(32_517)
+    ReviewRunStore.update(run.id, {
+      trigger: {
+        ...run.trigger,
+        objectIid: mrIid,
+      },
+    })
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const pathname = new URL(String(input)).pathname
+        if (pathname.endsWith('/pipelines')) return Response.json([])
+        return Response.json({
+          iid: mrIid,
+          project_id: 3,
+          diff_refs: { head_sha: 'head-a' },
+        })
+      }) as typeof fetch,
+    })
+
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThan(32 * 1024)
+    expect(result).toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_tool_output_limit_exceeded',
+    })
+  })
+
   test('bounds the complete CI session list payload including its review target', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
     ReviewRunStore.update(run.id, {
@@ -648,7 +828,7 @@ describe('GitLab CI session inspector', () => {
 
     expect(result).toMatchObject({ ok: true, action: 'list', truncated: true })
     expect(result.ok && result.action === 'list' ? result.target.mrUrl : undefined).toBeUndefined()
-    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(32 * 1024)
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThan(32 * 1024)
   })
 
   test('refreshes CI through the newly bound session after a retry', async () => {
