@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH } from '@nine1bot/platform-gitlab/review/limits'
 import { CheckCircle2, CircleAlert, CircleSlash, Copy, Play, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
 import { gitLabReviewApi, platformApi, webhookApi, type GitLabReviewRun, type WebhookStatus } from '../api/client'
 import type {
@@ -1389,6 +1390,7 @@ function actionResultDetails(result: PlatformActionResult) {
                       :value="profile.reviewContextMarkdown || ''"
                       class="input platform-input platform-textarea"
                       rows="5"
+                      :maxlength="GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH"
                       placeholder="例如：UF 的模块边界、关键约束、不可回归的兼容性要求"
                       @input="updateGitLabProjectProfile(profile, { reviewContextMarkdown: ($event.target as HTMLTextAreaElement).value || undefined })"
                     />

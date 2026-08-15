@@ -1,4 +1,5 @@
 import { normalizeGitLabAuthority } from './host'
+import { GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH } from './limits'
 
 export type GitLabReviewSettings = {
   enabled: boolean
@@ -183,6 +184,10 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
     const maxJobLogBytesInput = ci?.maxJobLogBytes ?? ci?.max_job_log_bytes
     const maxContextBytesInput = item.maxContextBytes ?? item.max_context_bytes
     const maxFilesInput = item.maxFiles ?? item.max_files
+    const reviewContextInput = item.reviewContextMarkdown
+      ?? item.review_context_markdown
+      ?? item.contextMarkdown
+      ?? item.context_markdown
     if (maxJobLogsInput !== undefined && !isPositiveNumber(maxJobLogsInput)) {
       errors.push(`project_profile_ci_max_job_logs_invalid:${id}`)
     }
@@ -195,6 +200,14 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
     if (maxFilesInput !== undefined && !isPositiveNumber(maxFilesInput)) {
       errors.push(`project_profile_max_files_invalid:${id}`)
     }
+    if (
+      typeof reviewContextInput === 'string'
+      && reviewContextInput.length > GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
+    ) {
+      errors.push(`project_profile_review_context_too_large:${id}`)
+    }
+
+    const reviewContextMarkdown = optionalString(reviewContextInput)
 
     const profile: GitLabReviewProjectProfile = {
       id,
@@ -204,8 +217,10 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
       pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
       displayName: optionalString(item.displayName) ?? optionalString(item.display_name),
       enabled: booleanValue(item.enabled, true),
-      reviewContextMarkdown: optionalString(item.reviewContextMarkdown) ?? optionalString(item.review_context_markdown) ??
-        optionalString(item.contextMarkdown) ?? optionalString(item.context_markdown),
+      reviewContextMarkdown: reviewContextMarkdown !== undefined
+        && reviewContextMarkdown.length <= GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
+        ? reviewContextMarkdown
+        : undefined,
       reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
       includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
       excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),

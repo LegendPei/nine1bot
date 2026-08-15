@@ -724,6 +724,70 @@ describe('GitLab review foundation', () => {
     }).configurationErrors).toContain('project_profile_max_context_bytes_invalid:canonical-limits')
   })
 
+  test('enforces the stored project context limit for canonical and alias fields', () => {
+    const exactContext = 'x'.repeat(64_000)
+    const parsed = parseGitLabReviewProjectProfiles([{
+      id: 'exact-context',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      reviewContextMarkdown: exactContext,
+    }, {
+      id: 'oversized-context',
+      host: 'gitlab.example.com',
+      projectId: 4,
+      nine1botProjectID: 'project-other',
+      context_markdown: `${exactContext}x`,
+    }])
+
+    expect(parsed.profiles[0]?.reviewContextMarkdown).toBe(exactContext)
+    expect(parsed.errors).toEqual([
+      'project_profile_review_context_too_large:oversized-context',
+    ])
+    expect(parsed.profiles[1]?.reviewContextMarkdown).toBeUndefined()
+  })
+
+  test('truncates large ASCII and multibyte context blocks within a linear-time budget', () => {
+    const trigger = {
+      host: 'gitlab.example.com',
+      projectId: 3,
+      objectType: 'mr' as const,
+      objectIid: 1,
+      headSha: 'head',
+      mode: 'webhook' as const,
+    }
+    const samples = [
+      'a'.repeat(50_000),
+      '你😀'.repeat(10_000),
+    ]
+
+    for (const [index, content] of samples.entries()) {
+      const startedAt = performance.now()
+      const context = buildGitLabReviewContext({
+        trigger,
+        changes: { changes: [] },
+        maxDiffBytes: 101,
+        additionalContextBlocks: [{
+          id: `large-${index}`,
+          layer: 'platform',
+          source: 'test.large-context',
+          enabled: true,
+          priority: 1,
+          lifecycle: 'turn',
+          visibility: 'system-required',
+          content,
+        }],
+      })
+      const elapsedMs = performance.now() - startedAt
+      const rendered = context.contextBlocks.find((block) => block.id === `large-${index}`)?.content ?? ''
+      const prefix = rendered.split('\n[context block truncated]')[0]!
+
+      expect(new TextEncoder().encode(rendered).byteLength).toBeLessThanOrEqual(101)
+      expect(new TextDecoder().decode(new TextEncoder().encode(prefix))).toBe(prefix)
+      expect(elapsedMs).toBeLessThan(750)
+    }
+  }, 30_000)
+
   test('requires an enabled and bound usable project profile when review is enabled', () => {
     const settings = normalizeGitLabReviewSettings({
       'review.enabled': true,

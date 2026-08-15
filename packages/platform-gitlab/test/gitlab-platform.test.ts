@@ -77,6 +77,7 @@ describe('GitLab platform adapter package', () => {
         enabled: true,
         max_context_bytes: '500',
         maxFiles: -2,
+        context_markdown: 'x'.repeat(64_001),
       }],
     })
     const projectError = String(result && 'fieldErrors' in result ? result.fieldErrors?.['review.projects'] : '')
@@ -88,6 +89,7 @@ describe('GitLab platform adapter package', () => {
       },
     })
     expect(projectError).toContain('maxFiles')
+    expect(projectError).toContain('reviewContextMarkdown')
   })
 
   test('reports degraded status and validation when review has no usable project profile', async () => {

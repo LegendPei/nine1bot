@@ -20,7 +20,8 @@
     ".": "./src/index.ts",
     "./browser": "./src/browser.ts",
     "./runtime": "./src/runtime.ts",
-    "./review": "./src/review/index.ts"
+    "./review": "./src/review/index.ts",
+    "./review/limits": "./src/review/limits.ts"
   },
   "scripts": {
     "test": "bun test",

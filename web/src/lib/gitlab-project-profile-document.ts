@@ -1,4 +1,7 @@
 import {
+  GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH,
+} from '@nine1bot/platform-gitlab/review/limits'
+import {
   gitLabProjectHost,
   parseGitLabProjectProfiles,
   type GitLabProjectProfile,
@@ -98,6 +101,21 @@ export function validateGitLabProjectProfileDocument(
     }
     if (maxFiles !== undefined && !isPositiveNumber(maxFiles)) {
       diagnostics.push(diagnostic('profile_max_files_invalid', '文件上限必须是有限正数。', index, id))
+    }
+    const reviewContext = entry.reviewContextMarkdown
+      ?? entry.review_context_markdown
+      ?? entry.contextMarkdown
+      ?? entry.context_markdown
+    if (
+      typeof reviewContext === 'string'
+      && reviewContext.length > GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
+    ) {
+      diagnostics.push(diagnostic(
+        'profile_review_context_too_large',
+        `项目审查上下文不能超过 ${GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH} 个字符。`,
+        index,
+        id,
+      ))
     }
 
     if (ids.has(id)) diagnostics.push(diagnostic('profile_id_duplicate', `档案 ID ${id} 重复。`, index, id))

@@ -1888,6 +1888,65 @@ describe('GitLab review controller', () => {
     }
   })
 
+  test('flattens a contiguous suffix when its ancestor exists under another trigger', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'cross-trigger-contiguous-lineage.json')
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 3,
+      runs: [{
+        id: 'review_b_1',
+        rootRunId: 'review_b_1',
+        attempt: 1,
+        triggerKey: 'trigger-b',
+        generation: 'generation-b-1',
+        platform: 'gitlab',
+        status: 'rejected',
+        createdAt: 10,
+        updatedAt: 10,
+      }, {
+        id: 'review_a_2',
+        rootRunId: 'review_b_1',
+        attempt: 2,
+        retryOf: 'review_b_1',
+        triggerKey: 'trigger-a',
+        generation: 'generation-a-2',
+        platform: 'gitlab',
+        status: 'rejected',
+        createdAt: 20,
+        updatedAt: 20,
+      }, {
+        id: 'review_a_3',
+        rootRunId: 'review_b_1',
+        attempt: 3,
+        retryOf: 'review_a_2',
+        triggerKey: 'trigger-a',
+        generation: 'generation-a-3',
+        platform: 'gitlab',
+        status: 'accepted',
+        createdAt: 30,
+        updatedAt: 30,
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+    ReviewRunStore.setMaxRecordsForTesting(3)
+
+    expect(ReviewRunStore.update('review_a_3', { status: 'running' })).toBeDefined()
+    ReviewRunStore.reloadForTesting()
+
+    expect(ReviewRunStore.get('review_b_1')).toMatchObject({
+      rootRunId: 'review_b_1',
+      triggerKey: 'trigger-b',
+    })
+    for (const id of ['review_a_2', 'review_a_3']) {
+      expect(ReviewRunStore.get(id)).toMatchObject({
+        id,
+        rootRunId: id,
+        triggerKey: 'trigger-a',
+      })
+      expect(ReviewRunStore.get(id)?.retryOf).toBeUndefined()
+    }
+  })
+
   test('isolates irreparable persisted lineage without changing valid trigger chains', async () => {
     const persistedPath = join(tempDirs.at(-1)!, 'malformed-review-lineage.json')
     await writeFile(persistedPath, JSON.stringify({

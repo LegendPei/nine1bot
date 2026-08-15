@@ -548,6 +548,13 @@ function repairRunLineage() {
 function isContiguousAttemptChainSuffix(records: ReviewRunRecord[]) {
   const first = records[0]
   if (!first) return false
+  for (const record of records) {
+    for (const reference of [record.rootRunId, record.retryOf]) {
+      if (!reference) continue
+      const target = runs.get(reference)
+      if (target && target.triggerKey !== record.triggerKey) return false
+    }
+  }
   const ids = new Set(records.map((run) => run.id))
   if (first.rootRunId !== first.id && ids.has(first.rootRunId)) return false
   if (first.retryOf && ids.has(first.retryOf)) return false

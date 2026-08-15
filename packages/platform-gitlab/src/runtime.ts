@@ -399,6 +399,7 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
     } else if (settings.configurationErrors.some((error) => (
       error.startsWith('project_profile_max_context_bytes_invalid:')
       || error.startsWith('project_profile_max_files_invalid:')
+      || error.startsWith('project_profile_review_context_too_large:')
     ))) {
       const limits: string[] = []
       if (settings.configurationErrors.some((error) => error.startsWith('project_profile_max_context_bytes_invalid:'))) {
@@ -406,6 +407,9 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
       }
       if (settings.configurationErrors.some((error) => error.startsWith('project_profile_max_files_invalid:'))) {
         limits.push('maxFiles must be a finite positive number.')
+      }
+      if (settings.configurationErrors.some((error) => error.startsWith('project_profile_review_context_too_large:'))) {
+        limits.push('reviewContextMarkdown exceeds the stored project context limit.')
       }
       fieldErrors['review.projects'] = limits.join(' ')
     } else if (settings.configurationErrors.some((error) => error.startsWith('project_'))) {

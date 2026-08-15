@@ -272,4 +272,39 @@ describe('GitLab project profiles', () => {
     expect(updated.entries[0]).not.toHaveProperty('maxContextBytes')
     expect(updated.entries[0]).not.toHaveProperty('maxFiles')
   })
+
+  test('matches the backend stored-context boundary and preserves oversized alias input', () => {
+    const exactContext = 'x'.repeat(64_000)
+    const exact = parseGitLabProjectProfileDocument([{
+      id: 'exact-context',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      reviewContextMarkdown: exactContext,
+    }])
+    expect(validateGitLabProjectProfileDocument(exact)).toEqual([])
+
+    const oversized = parseGitLabProjectProfileDocument([{
+      id: 'oversized-context',
+      host: 'gitlab.example.com',
+      project_id: 4,
+      nine1bot_project_id: 'project-other',
+      context_markdown: `${exactContext}x`,
+      display_name: 'Before edit',
+    }])
+    const updated = updateGitLabProjectProfileDocument(oversized, 0, {
+      ...oversized.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+
+    expect(validateGitLabProjectProfileDocument(updated)).toEqual([
+      expect.objectContaining({ code: 'profile_review_context_too_large' }),
+    ])
+    expect(updated.entries[0]).toMatchObject({
+      context_markdown: `${exactContext}x`,
+      displayName: 'After edit',
+    })
+    expect(updated.entries[0]).not.toHaveProperty('reviewContextMarkdown')
+    expect(serializeGitLabProjectProfileDocument(updated)).toMatchObject({ ok: false })
+  })
 })
