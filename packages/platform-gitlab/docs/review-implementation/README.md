@@ -60,7 +60,7 @@
 20. [20-review-follow-up-hardening-design.md](./20-review-follow-up-hardening-design.md)
    - 分支二次审查后的权限、脱敏、HEAD 一致性、绑定恢复、发布幂等、资源限制和 attempt 链完整性设计。
 21. [21-review-follow-up-hardening-implementation-plan.md](./21-review-follow-up-hardening-implementation-plan.md)
-   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界。
+   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--8 已完成，Task 9 记录最终自动化验证与待人工联调事项。
 22. [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md)
    - 发布对账的前置输入预算、线性 marker 扫描、独立复审与 Task 6 CPU blocker 解除记录。
 
@@ -77,6 +77,12 @@ webhook / browser page context
   -> optional review publish
 ```
 
-大 diff 由 context pipeline 按文件、风险和预算切片，Review finding 只能引用冻结 diff。CI 只作为补充上下文：仅接受与当前 MR/source HEAD 可证明关联的 source、detached、merged-result、merge-train 或 integrated pipeline；找不到可信 CI 时返回稳定诊断并继续 Review，绝不退化到项目最新流水线。
+大 diff 由 context pipeline 按文件、风险和预算切片，Review finding 只能引用冻结 diff。CI 只作为补充上下文：仅接受与当前 MR/source HEAD 可证明关联的 source、detached、merged-result、merge-train 或 integrated pipeline；找不到可信 CI 时返回稳定诊断并继续 Review，绝不退化到项目最新流水线。CI list 最终成功 DTO 的严格序列化合同为 `< 32 KiB`。
 
 配置型拒绝修复后必须调用显式 retry 接口创建新 attempt。原 run、错误、时间和审计信息保持不变，旧异步请求不能覆盖新 attempt。
+
+## 收口状态
+
+二次审查加固 Task 1--8 已完成（`c6df20a..54c3be6`，含 Task 6 的 CPU 补充修复 `3a5f60e`、`9c905ce`、`873ce7d`、`33b3393`）。2026-08-15 fresh 自动化验证：聚焦 `350 pass / 0 fail / 1217 expect()`，根测试 `554 pass / 0 fail / 2040 expect()`，根与 OpenCode typecheck、Web build 均为 exit 0。自动化覆盖旧 HEAD 零发布、并发发布、部分恢复、stale binding retry、CI 配额/输出和 attempt 链修复。
+
+真实 self-managed GitLab 的 webhook、可信 CI、远端 marker 对账与评论回写尚未在本批次执行，全部为 **待人工联调**；自动化测试不构成 live-integration 证据。

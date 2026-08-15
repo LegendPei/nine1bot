@@ -2,8 +2,8 @@
 
 ## 1. 文档状态
 
-- 状态：设计已确认，等待实施
-- 日期：2026-08-10
+- 状态：实施完成；外部 self-managed GitLab 联调待人工执行
+- 日期：2026-08-15
 - 目标分支：`feat/gitlab-review-workflow`
 - 前置设计：`18-review-hardening-and-recovery-design.md`
 - 实施范围：`platform-gitlab`、Nine1Bot Review controller/run store、OpenCode 自动化运行时、Web GitLab 配置页
@@ -179,7 +179,7 @@ type ReviewRunPublication = {
 
 `headSha` 等进入 tool 输出的冻结 target 字段必须有字符和长度上限。异常超长 target 在任何 GitLab 请求前返回 `review_run_ci_target_invalid`。
 
-`boundListToolOutput()` 完成 jobs 和 MR URL 裁剪后必须再次计算 UTF-8 序列化大小。如果仍超过 32 KiB，返回小型稳定失败结果，禁止把超限 success 对象交给模型或持久化层。
+`boundListToolOutput()` 完成 jobs 和 MR URL 裁剪后必须再次计算 UTF-8 序列化大小。最终成功 DTO 的严格合同是 **`< 32 KiB`**；大小等于或超过 32 KiB 时返回小型稳定失败结果，禁止把超限 success 对象交给模型或持久化层。
 
 ### 10.2 job log 额度
 
@@ -232,7 +232,7 @@ run store 按 `triggerKey` 把完整 attempt 链视为一个裁剪单元：
 - 进程重启遗留 claim 通过远端 marker 续传。
 - payload 不一致拒绝续传。
 - 无效 job ID 消耗额度，超限后不再请求 pipeline/jobs。
-- 超长 target 和不可裁剪输出不会突破 32 KiB。
+- 超长 target 和不可裁剪输出不会使最终成功 DTO 突破或等于 32 KiB（严格 `< 32 KiB`）。
 - store 在容量边界保留完整 retry 链。
 
 ### 13.4 Web
@@ -244,11 +244,11 @@ run store 按 `triggerKey` 把完整 attempt 链视为一个裁剪单元：
 
 | Batch | 内容 | 退出条件 |
 | --- | --- | --- |
-| 1 | 权限语义、日志脱敏、diff 行号 | 安全与行号失败测试转绿 |
-| 2 | HEAD 双重校验、项目绑定恢复、Web 校验 | 旧 HEAD 零发布，绑定修复可产生新 attempt |
-| 3 | 发布状态机、稳定 marker、Notes/Discussions 对账 | 并发、部分失败和重启恢复均不重复发布 |
-| 4 | CI 配额、输出上限、attempt 链裁剪 | 所有资源和存储边界测试转绿 |
-| 5 | 全量回归、文档同步和真实 GitLab 联调 | 测试、类型检查、Web 构建、diff 检查通过 |
+| 1 | 权限语义、日志脱敏、diff 行号 | 已完成：`c6df20a`、`c6d67bc`、`cd05baf`、`8c8ffcf`；安全与行号回归通过 |
+| 2 | HEAD 双重校验、项目绑定恢复、Web 校验 | 已完成：`719ae80`--`6a879c3`；自动化断言旧 HEAD 零发布、修复绑定后新 attempt |
+| 3 | 发布状态机、稳定 marker、Notes/Discussions 对账 | 已完成：`84d664f`--`7a733c6`（含 CPU 补充计划修复）；自动化断言并发与部分恢复不重复发布 |
+| 4 | CI 配额、输出上限、attempt 链裁剪 | 已完成：`b0c3bf8`--`54c3be6`；最终成功 CI DTO 严格 `< 32 KiB`，attempt 链修复通过 |
+| 5 | 全量回归、文档同步和真实 GitLab 联调 | 自动化与文档收口完成；真实 GitLab 联调待人工执行 |
 
 每个行为修改必须遵循 TDD：先加入能够复现问题的失败测试并确认失败原因，再做最小实现，最后运行对应层回归。
 
@@ -276,3 +276,8 @@ run store 按 `triggerKey` 把完整 attempt 链视为一个裁剪单元：
 8. 聚焦测试、根测试、两层 typecheck、Web build 和 `git diff --check` 全部通过。
 9. `14-live-integration-test-checklist.md` 增加并执行发布恢复与 HEAD 变化场景；无法自动完成的外部条件必须明确记录。
 
+## 17. 实施收口证据
+
+Task 1--8 已按实施计划完成：Task 1 为 `c6df20a..c6d67bc`，Task 2 为 `cd05baf..8c8ffcf`，Task 3 为 `719ae80..449d3e1`，Task 4 为 `6a879c3`，Task 5 为 `84d664f..5ef8ee3`，Task 6 为 `d265a47..7a733c6`（CPU 补充修复另含 `3a5f60e`、`9c905ce`、`873ce7d`、`33b3393`，前置 `c99195a`），Task 7 为 `b0c3bf8..d18e213`，Task 8 为 `6d08086..54c3be6`。
+
+2026-08-15 的 fresh 自动化证据为：聚焦 `350 pass / 0 fail / 1217 expect()`、根测试 `554 pass / 0 fail / 2040 expect()`、根与 OpenCode typecheck exit 0、Web build exit 0。自动化已覆盖 HEAD 零发布、并发 publication claim、inline 5xx 后同 payload 的部分恢复、stale binding 显式 retry、CI 配额与严格序列化输出边界、以及持久化 attempt 链修复。所有 external self-managed GitLab 动作仍为 **待人工联调**；这些测试不替代真实 webhook、CI、Notes 或 Discussions 联调。

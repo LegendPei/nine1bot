@@ -14,7 +14,7 @@
 - 模型不得获得 GitLab token、CLI、shell、`curl`、`webfetch`、文件写入或未显式允许的工具。
 - MR diff HEAD 在构建上下文前和发布前都必须等于 trigger HEAD。
 - CI 不可用或没有可信流水线不阻断 Review；HEAD 不一致必须阻止旧结果发布。
-- CI list 序列化结果不得超过 32 KiB；job log 额度在产生 GitLab 元数据请求前预占。
+- CI list 最终成功 DTO 的 UTF-8 序列化结果必须严格 `< 32 KiB`；job log 额度在产生 GitLab 元数据请求前预占。
 - 发布 marker 不得包含 token、CI 原始日志、项目上下文或 finding 原文。
 - 同一 run 的部分发布只能使用相同 `payloadHash` 恢复。
 - 每项生产代码修改前先加入失败测试并确认因目标缺陷失败。
@@ -43,7 +43,7 @@
 
 ---
 
-### Task 1: 修复 coordinator task 权限执行语义
+### Task 1: 修复 coordinator task 权限执行语义（已完成：`c6df20a..c6d67bc`）
 
 **Files:**
 - Modify: `opencode/packages/opencode/src/permission/next.ts:280-292`
@@ -54,7 +54,7 @@
 - Keeps: `PermissionNext.evaluateWithSessionGrants(permission, pattern, ruleset, sessionGrants): Rule`
 - Guarantees: 基础 ruleset 最终 deny 不可被 session grant 覆盖；最终 specific allow 可以覆盖较早 wildcard deny
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 const base = PermissionNext.fromConfig({
@@ -69,13 +69,13 @@ expect(PermissionNext.evaluateWithSessionGrants(
 ).action).toBe('deny')
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `bun test opencode/packages/opencode/test/permission/next.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts`
 
 Expected: specific task allow 当前得到 `deny`。
 
-- [ ] **Step 3: 实施最小修复**
+- [x] **Step 3: 实施最小修复**
 
 ```ts
 const base = evaluate(permission, pattern, ruleset)
@@ -83,11 +83,11 @@ if (base.action === 'deny') return base
 return evaluate(permission, pattern, ruleset, sessionGrants)
 ```
 
-- [ ] **Step 4: 运行 GREEN 与 registry 回归**
+- [x] **Step 4: 运行 GREEN 与 registry 回归**
 
 Run: `bun test opencode/packages/opencode/test/permission/next.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts opencode/packages/opencode/test/tool/registry.test.ts`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add opencode/packages/opencode/src/permission/next.ts opencode/packages/opencode/test/permission/next.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts
@@ -96,7 +96,7 @@ git commit -m "fix(gitlab): allow scoped review task delegation"
 
 ---
 
-### Task 2: 修复 CI 脱敏与 inline diff 状态机
+### Task 2: 修复 CI 脱敏与 inline diff 状态机（已完成：`cd05baf..8c8ffcf`）
 
 **Files:**
 - Modify: `packages/platform-gitlab/src/review/ci-inspector.ts:219-230`
@@ -107,7 +107,7 @@ git commit -m "fix(gitlab): allow scoped review task delegation"
 - Keeps: `sanitizeGitLabCiTrace(trace: string): string`
 - Keeps: `validateGitLabInlinePosition(...)`
 
-- [ ] **Step 1: 写不完整 PEM 和 URL secret 失败测试**
+- [x] **Step 1: 写不完整 PEM 和 URL secret 失败测试**
 
 ```ts
 const output = sanitizeGitLabCiTrace([
@@ -121,15 +121,15 @@ expect(output).not.toContain('fragment-secret')
 expect(output).not.toContain('partial-private-material')
 ```
 
-- [ ] **Step 2: 写 `+++counter`、`---flag` 和后续行的 inline position 失败测试**
+- [x] **Step 2: 写 `+++counter`、`---flag` 和后续行的 inline position 失败测试**
 
 新增侧只允许 `new_line`，删除侧只允许 `old_line`，后续 context 的 old/new line 必须同步推进。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 
-- [ ] **Step 4: 实施脱敏和 hunk 状态**
+- [x] **Step 4: 实施脱敏和 hunk 状态**
 
 ```ts
 .replace(
@@ -141,7 +141,7 @@ Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 
 inline parser 增加 `insideHunk`，仅在 hunk 外识别文件头，hunk 内按首字符 `+`/`-` 分类。
 
-- [ ] **Step 5: 运行 GREEN 并提交**
+- [x] **Step 5: 运行 GREEN 并提交**
 
 Run: `bun test packages/platform-gitlab/test`
 
@@ -152,7 +152,7 @@ git commit -m "fix(gitlab): close CI redaction and diff position gaps"
 
 ---
 
-### Task 3: 冻结 MR diff HEAD 并在发布前复核
+### Task 3: 冻结 MR diff HEAD 并在发布前复核（已完成：`719ae80..449d3e1`）
 
 **Files:**
 - Modify: `packages/nine1bot/src/review/gitlab-controller.ts`
@@ -165,19 +165,19 @@ git commit -m "fix(gitlab): close CI redaction and diff position gaps"
 - Produces: 稳定错误 `gitlab_review_diff_head_unverified`、`gitlab_review_head_changed`
 - Keeps: commit review 不执行 MR HEAD 校验
 
-- [ ] **Step 1: 写上下文构建前 HEAD 缺失和不一致测试**
+- [x] **Step 1: 写上下文构建前 HEAD 缺失和不一致测试**
 
 断言 run 为 `rejected`、`recoverable=false`，且不创建 context/session。
 
-- [ ] **Step 2: 写模型运行期间 HEAD 改变的零发布测试**
+- [x] **Step 2: 写模型运行期间 HEAD 改变的零发布测试**
 
 changes 初始匹配，发布时 `getMergeRequest()` 返回新 SHA；断言 Notes/Discussions POST 数为 0，runtime 不把 rejected 覆盖为 failed，也不发布失败提示。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts`
 
-- [ ] **Step 4: 构建 context 前严格比较 HEAD**
+- [x] **Step 4: 构建 context 前严格比较 HEAD**
 
 ```ts
 const headError = gitLabReviewChangesHeadError(input.trigger, changes)
@@ -191,11 +191,11 @@ if (headError) {
 
 所有 dry-run MR fixture 加入匹配的 `diff_refs.head_sha`，不设置测试绕过。
 
-- [ ] **Step 5: 发布前通过 `client.getMergeRequest()` 再次比较 HEAD**
+- [x] **Step 5: 发布前通过 `client.getMergeRequest()` 再次比较 HEAD**
 
 不一致时返回稳定拒绝并保持零发布。OpenCode runtime 在看到当前 run 已是 rejected 时不得再次写 failed。
 
-- [ ] **Step 6: 运行 GREEN 并提交**
+- [x] **Step 6: 运行 GREEN 并提交**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts`
 
@@ -206,7 +206,7 @@ git commit -m "fix(gitlab): bind review evidence to the trigger head"
 
 ---
 
-### Task 4: 将失效项目绑定转换为可恢复配置拒绝
+### Task 4: 将失效项目绑定转换为可恢复配置拒绝（已完成：`6a879c3`）
 
 **Files:**
 - Modify: `packages/nine1bot/src/review/gitlab-controller.ts`
@@ -222,30 +222,30 @@ git commit -m "fix(gitlab): bind review evidence to the trigger head"
 - Produces: `validateGitLabProjectBindings(profiles, projects): string | undefined`
 - Changes: `startGitLabReviewRuntimeRun(result, directory)` 只接收已验证目录
 
-- [ ] **Step 1: 写 stale binding 生命周期和修复后 retry 测试**
+- [x] **Step 1: 写 stale binding 生命周期和修复后 retry 测试**
 
 `Project.get()` 找不到绑定时，断言 session 未创建，attempt 1 为 `project_binding_missing`、configuration、recoverable；修复后 retry 产生 attempt 2，attempt 1 不变。
 
-- [ ] **Step 2: 写 Web 空项目列表仍拒绝陈旧 binding 的测试**
+- [x] **Step 2: 写 Web 空项目列表仍拒绝陈旧 binding 的测试**
 
 ```ts
 expect(validateGitLabProjectBindings([profileWithBinding], [])).toContain('不存在')
 expect(validateGitLabProjectBindings([profileWithBinding], [matchingProject])).toBeUndefined()
 ```
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts web/test/gitlab-project-profile.test.ts`
 
-- [ ] **Step 4: 在 route 启动异步 session 前 await 目录 preflight**
+- [x] **Step 4: 在 route 启动异步 session 前 await 目录 preflight**
 
 preflight 失败调用 controller 转换函数并直接返回 202 rejected；成功后把 directory 传给 runtime。webhook 与 retry 共用同一路径。
 
-- [ ] **Step 5: 抽取 Web 纯函数并删除 `props.projects.length > 0` 绕过**
+- [x] **Step 5: 抽取 Web 纯函数并删除 `props.projects.length > 0` 绕过**
 
 列表未加载、为空或缺少目标时都阻止保存；有效 binding 保持原序列化结果。
 
-- [ ] **Step 6: 运行 GREEN、Web typecheck 并提交**
+- [x] **Step 6: 运行 GREEN、Web typecheck 并提交**
 
 Run: `bun run --cwd web typecheck`
 
@@ -256,7 +256,7 @@ git commit -m "fix(gitlab): recover stale project bindings through retry"
 
 ---
 
-### Task 5: 建立稳定 marker 与受限远端对账
+### Task 5: 建立稳定 marker 与受限远端对账（已完成：`84d664f..5ef8ee3`）
 
 **Files:**
 - Create: `packages/platform-gitlab/src/review/publication-markers.ts`
@@ -280,27 +280,27 @@ type GitLabReviewPublicationContext = {
 }
 ```
 
-- [ ] **Step 1: 写 marker 稳定性和敏感信息边界测试**
+- [x] **Step 1: 写 marker 稳定性和敏感信息边界测试**
 
 同一规范化 finding key 稳定；不同 file/line/body 不同；marker 只含版本、run ID、kind 和固定长度 hash。
 
-- [ ] **Step 2: 写 Notes/Discussions DTO、分页和 500 项上限测试**
+- [x] **Step 2: 写 Notes/Discussions DTO、分页和 500 项上限测试**
 
 GitLab 响应注入 author/email/position 等字段，断言只返回 `{id, body}`。commit 使用 `/repository/commits/:sha/comments`，MR 使用 notes/discussions。
 
-- [ ] **Step 3: 写 publisher 跳过已有 marker 的测试**
+- [x] **Step 3: 写 publisher 跳过已有 marker 的测试**
 
 completed set 已有 summary 和第一个 inline 时，只允许 POST 第二个 inline，成功后 callback 收到其 marker。
 
-- [ ] **Step 4: 运行 RED**
+- [x] **Step 4: 运行 RED**
 
 Run: `bun test packages/platform-gitlab/test/gitlab-review.test.ts`
 
-- [ ] **Step 5: 实现 marker、API DTO 和 marker-aware publisher**
+- [x] **Step 5: 实现 marker、API DTO 和 marker-aware publisher**
 
 finding key 使用 SHA-256 前 24 个十六进制字符。所有读取复用安全重定向、AbortSignal、分页和响应字节上限；每次 POST 成功后立即 await checkpoint callback。
 
-- [ ] **Step 6: 运行 GREEN 并提交**
+- [x] **Step 6: 运行 GREEN 并提交**
 
 Run: `bun test packages/platform-gitlab/test`
 
@@ -385,7 +385,7 @@ broad whole-batch review 后续发现 comment 预算快照和低文本高基数 
 
 ---
 
-### Task 7: 收紧 CI 请求配额和最终输出上限
+### Task 7: 收紧 CI 请求配额和最终输出上限（已完成：`b0c3bf8..d18e213`）
 
 **Files:**
 - Modify: `packages/nine1bot/src/review/gitlab-ci-inspector.ts`
@@ -396,32 +396,32 @@ broad whole-batch review 后续发现 comment 预算快照和低文本高基数 
 - Changes: `boundListToolOutput()` 可返回 `ci_tool_output_limit_exceeded`
 - Guarantees: 超出 job log 次数后不访问 pipeline、MR、jobs 或 trace endpoint
 
-- [ ] **Step 1: 写 40,000 字符 head SHA 和最终输出防线测试**
+- [x] **Step 1: 写 40,000 字符 head SHA 和最终输出防线测试**
 
-断言 tool 返回小型失败 DTO、序列化小于 32 KiB、fetch 调用数为 0。
+断言 tool 返回小型失败 DTO、最终成功 DTO 序列化严格 `< 32 KiB`、fetch 调用数为 0；恰好 32 KiB 也必须失败。
 
-- [ ] **Step 2: 写重复无效 job ID 配额测试**
+- [x] **Step 2: 写重复无效 job ID 配额测试**
 
 `maxJobLogs=2` 时第三次调用直接返回 `ci_job_log_limit_reached`，所有 GitLab endpoint 计数不再增加。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-ci-inspector.test.ts`
 
-- [ ] **Step 4: token 成功解析后、首次 GitLab 请求前 reserve**
+- [x] **Step 4: token 成功解析后、首次 GitLab 请求前 reserve**
 
 移除 trace wrapper 内的迟到 reserve。无 pipeline、无 job 和 ID 不匹配都保留本次消耗。
 
-- [ ] **Step 5: 加入 target 与最终 JSON 字节防线**
+- [x] **Step 5: 加入 target 与最终 JSON 字节防线**
 
 ```ts
 if (headSha.length > 128 || /\s/.test(headSha)) return undefined
-if (toolOutputBytes(next) > MAX_TOOL_OUTPUT_BYTES) {
+if (toolOutputBytes(next) >= MAX_TOOL_OUTPUT_BYTES) {
   return failure('list', 'ci_tool_output_limit_exceeded')
 }
 ```
 
-- [ ] **Step 6: 运行 GREEN 与 OpenCode tool 回归并提交**
+- [x] **Step 6: 运行 GREEN 与 OpenCode tool 回归并提交**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-ci-inspector.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts`
 
@@ -432,7 +432,7 @@ git commit -m "fix(gitlab): enforce CI request and output budgets"
 
 ---
 
-### Task 8: 按完整 attempt 链裁剪 run store
+### Task 8: 按完整 attempt 链裁剪 run store（已完成：`6d08086..54c3be6`）
 
 **Files:**
 - Modify: `packages/nine1bot/src/review/run-store.ts`
@@ -442,19 +442,19 @@ git commit -m "fix(gitlab): enforce CI request and output budgets"
 - Changes: `prune()` 按 `triggerKey` 组成完整链并以链为裁剪单位
 - Guarantees: 任一保留记录的 `retryOf` 和 `rootRunId` 都指向 store 内记录
 
-- [ ] **Step 1: 写容量边界 retry 父记录失败测试**
+- [x] **Step 1: 写容量边界 retry 父记录失败测试**
 
 limit=2 时先创建旧 rejection 与无关 run，再创建 retry；retry、父记录和 root 可达，无关旧链被删除。
 
-- [ ] **Step 2: 写单链超过软限制仍完整的测试**
+- [x] **Step 2: 写单链超过软限制仍完整的测试**
 
 limit=2、三次 attempt 时保留整链且无悬空；增加更新的独立链时只删除完整旧链。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 Run: `bun test packages/nine1bot/src/review/gitlab-controller.test.ts`
 
-- [ ] **Step 4: 按完整 trigger group 实施裁剪**
+- [x] **Step 4: 按完整 trigger group 实施裁剪**
 
 ```ts
 const groups = groupRunsByTriggerKey([...runs.values()])
@@ -468,7 +468,7 @@ for (const group of groups) {
 
 单个最新 group 超过 limit 时完整保留；其他 group 只整组保留或整组删除。
 
-- [ ] **Step 5: 运行 GREEN 并提交**
+- [x] **Step 5: 运行 GREEN 并提交**
 
 ```powershell
 git add packages/nine1bot/src/review/run-store.ts packages/nine1bot/src/review/gitlab-controller.test.ts
@@ -477,7 +477,7 @@ git commit -m "fix(gitlab): preserve complete review attempt chains"
 
 ---
 
-### Task 9: 全量验证、文档收口与推送
+### Task 9: 全量验证、文档收口与推送（验证与自审已完成）
 
 **Files:**
 - Modify: `packages/platform-gitlab/docs/review-implementation/14-live-integration-test-checklist.md`
@@ -485,13 +485,13 @@ git commit -m "fix(gitlab): preserve complete review attempt chains"
 - Modify: `packages/platform-gitlab/docs/review-implementation/21-review-follow-up-hardening-implementation-plan.md`
 - Modify: `packages/platform-gitlab/docs/review-implementation/README.md`
 
-- [ ] **Step 1: 运行全部聚焦测试**
+- [x] **Step 1: 运行全部聚焦测试**
 
 ```powershell
 bun test packages/platform-gitlab/test packages/nine1bot/src/review web/test/gitlab-project-profile.test.ts opencode/packages/opencode/test/permission/next.test.ts opencode/packages/opencode/test/agent/platform-agent-source.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts opencode/packages/opencode/test/tool/gitlab-ci-inspect.test.ts --timeout 30000
 ```
 
-- [ ] **Step 2: 运行根测试、根 typecheck、OpenCode typecheck 与 Web build**
+- [x] **Step 2: 运行根测试、根 typecheck、OpenCode typecheck 与 Web build**
 
 ```powershell
 bun run ci:test --timeout 30000
@@ -500,7 +500,7 @@ bun run --cwd opencode/packages/opencode typecheck
 bun run build:web
 ```
 
-- [ ] **Step 3: 运行 diff 和敏感信息检查**
+- [x] **Step 3: 运行 diff 和敏感信息检查**
 
 ```powershell
 git diff --check
@@ -511,11 +511,11 @@ rg -n "glpat-|PRIVATE-TOKEN|topview624" packages opencode web -g '!*.test.ts' -g
 
 扫描只允许字段名和稳定示例，不允许真实凭证。
 
-- [ ] **Step 4: 更新文档状态与联调清单**
+- [x] **Step 4: 更新文档状态与联调清单**
 
 记录每个 Batch 的提交 SHA、测试数量和 HEAD 零发布、并发发布、部分恢复、stale binding retry 场景。外部 GitLab 未执行的项目明确写成“待人工联调”。
 
-- [ ] **Step 5: 对 `origin/main...HEAD` 做最终代码审查**
+- [x] **Step 5: 对 `origin/main...HEAD` 做最终代码审查**
 
 复查权限可执行性、token/日志边界、HEAD 锁定、publication claim/checkpoint、marker 分页上限、旧异步写入、run store 关系和 Web 无损保存。
 
@@ -538,3 +538,11 @@ git push origin HEAD:feat/gitlab-review-workflow-v2
 - Task 7 同时限制输入、请求次数和最终序列化输出。
 - Task 8 把记录上限定义为跨 trigger 链软限制，优先保证审计引用完整；严格归档不在本轮范围内。
 - 每个生产修改都有先失败测试、目标命令和独立提交点。
+
+## 任务完成记录
+
+2026-08-15 在 `54c3be6` fresh 运行：聚焦测试 `350 pass / 0 fail / 1217 expect()`（9 files），根测试 `554 pass / 0 fail / 2040 expect()`（59 files），根 typecheck、OpenCode typecheck、Web production build 均 exit 0。`git diff --check` 为 exit 0；敏感信息扫描只命中允许的稳定字段名和脱敏规则，没有凭证值。
+
+自动化回归覆盖：Task 3 的 HEAD 缺失/变更零发布，Task 6 的并发 publication claim、checkpoint 与 partial recovery，Task 4 的 stale binding 显式 retry，Task 7 的请求配额和最终成功 DTO 严格 `< 32 KiB`，以及 Task 8 的持久化 attempt-chain repair。`origin/main...HEAD` 自审已复查权限可执行性、token/日志边界、HEAD 锁定、marker 分页上限、旧异步写入和 Web 无损保存；未发现生产代码问题，已修复文档末尾空行。
+
+外部 self-managed GitLab 的 webhook、CI、Notes/Discussions 真实发布与恢复动作本批次均为 **待人工联调**；自动化测试不构成 live-integration 证据。

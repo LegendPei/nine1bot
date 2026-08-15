@@ -2,11 +2,13 @@
 
 > 用途：在隔离的 self-managed GitLab 上验证 Nine1Bot GitLab Review 全链路。本文不保存真实 token、密码、webhook secret 或带凭证 URL；所有尖括号变量都要在本机临时替换，结果只记录非敏感 ID、状态和稳定诊断。
 >
-> 文档日期：2026-08-10　测试人：________　测试日期：________
+> 文档日期：2026-08-15　测试人：Codex（自动化验证）　测试日期：2026-08-15
 
 ## 0. 验收范围与当前状态
 
-本轮自动化验证已经通过，真实 GitLab 联调尚未在本轮执行。联调需要覆盖：
+本批次在 `54c3be6` 运行的自动化验证已通过：聚焦测试 `350 pass / 0 fail / 1217 expect()`（9 files）、根测试 `554 pass / 0 fail / 2040 expect()`（59 files）、根 typecheck、OpenCode typecheck 和 Web production build 均为 exit 0；Web build 转换 1862 个模块。`git diff --check` 为 exit 0；敏感信息扫描仅命中稳定字段名与脱敏规则，未发现凭证值。
+
+本批次没有执行任何 external self-managed GitLab 操作。下列 P1--P6、A1--A6、B1--B4、C1--C5、D1--D5、E1--E7、F1--F6 以及第 7 节结论表的所有外部验证项均为 **待人工联调**；自动化测试不是 live-integration 证据。联调需要覆盖：
 
 1. source 或 detached MR pipeline 能作为审查上下文。
 2. 环境支持时，merged-results 或 merge-train pipeline 经过父提交关系校验后能作为审查上下文。
@@ -41,12 +43,12 @@ GitLab CLI 仅供管理员配置和排查。模型侧没有 CLI、shell、`curl`
 
 | # | 操作 | 预期结果 | 实际结果 | 状态 |
 | --- | --- | --- | --- | --- |
-| P1 | 打开 Web 的 GitLab 配置页 | 页面显示配置文件加载状态、secret 状态和 GitLab 连接引导 | | |
-| P2 | 配置启用的 project profile | host、project ID、profile ID、Nine1Bot project ID 均有效且唯一 | | |
-| P3 | 配置项目上下文 | 项目说明、审查规则和上下文预算保存后重新加载不丢失 | | |
-| P4 | 测试 GitLab token | 连接成功；页面和日志不显示 token | | |
-| P5 | 配置 Project Hook | 开启 Merge request events 与 Note events，secret 与 Nine1Bot 一致 | | |
-| P6 | 检查 Review 设置 | `dryRun=false` 时允许真实回写；自动触发范围符合测试项目 | | |
+| P1 | 打开 Web 的 GitLab 配置页 | 页面显示配置文件加载状态、secret 状态和 GitLab 连接引导 | 未执行 | 待人工联调 |
+| P2 | 配置启用的 project profile | host、project ID、profile ID、Nine1Bot project ID 均有效且唯一 | 未执行 | 待人工联调 |
+| P3 | 配置项目上下文 | 项目说明、审查规则和上下文预算保存后重新加载不丢失 | 未执行 | 待人工联调 |
+| P4 | 测试 GitLab token | 连接成功；页面和日志不显示 token | 未执行 | 待人工联调 |
+| P5 | 配置 Project Hook | 开启 Merge request events 与 Note events，secret 与 Nine1Bot 一致 | 未执行 | 待人工联调 |
+| P6 | 检查 Review 设置 | `dryRun=false` 时允许真实回写；自动触发范围符合测试项目 | 未执行 | 待人工联调 |
 
 非法或重复 profile 必须逐条显示错误并阻止保存，不能静默过滤后覆盖原配置。
 
@@ -128,7 +130,7 @@ curl.exe -X POST '<NINE1BOT_BASE_URL>/webhooks/gitlab/runs/<REJECTED_RUN_ID>/ret
 | --- | --- | --- | --- | --- |
 | F1 | 检查自动 Review session 的工具列表 | MR PM 只有明确白名单；普通对话看不到 `gitlab_ci_inspect`；specialist 无 shell/网络/MCP | | |
 | F2 | 在 CI 日志放入测试用假 token、Authorization、凭据 URL、JWT、PEM 和 ANSI | tool/session/run 只保存脱敏且截断后的内容 | | |
-| F3 | 准备 101+ jobs 或超长日志 | jobs 最多 100、list 最多 32 KiB、单日志最多 16 KiB，并有截断诊断 | | |
+| F3 | 准备 101+ jobs 或超长日志 | jobs 最多 100、最终成功 list 严格 `< 32 KiB`、单日志最多 16 KiB，并有截断诊断 | | |
 | F4 | 超过单 run 日志读取额度 | 最多读取配置额度且绝不超过硬上限 10 | | |
 | F5 | 准备大 MR | context pipeline 按预算切片；finding 行号仍对应冻结 diff，源码以 `+++`/`---` 开头时不偏移 | | |
 | F6 | 审查服务日志、session 文件和公开 run JSON | 不含 token、原始 GitLab 响应、未截断 CI 输出或完整 secret path | | |
