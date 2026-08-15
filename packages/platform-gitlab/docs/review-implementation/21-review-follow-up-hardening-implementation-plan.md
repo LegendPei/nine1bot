@@ -311,7 +311,7 @@ git commit -m "feat(gitlab): add resumable publication markers"
 
 ---
 
-### Task 6: 实施 ReviewRun publication 状态机
+### Task 6: 实施 ReviewRun publication 状态机（已完成；最终修复 `7a733c6`）
 
 **Files:**
 - Modify: `packages/nine1bot/src/review/run-store.ts`
@@ -475,9 +475,15 @@ git add packages/nine1bot/src/review/run-store.ts packages/nine1bot/src/review/g
 git commit -m "fix(gitlab): preserve complete review attempt chains"
 ```
 
+#### 完成记录
+
+`6d08086` 建立按完整 `triggerKey` group 裁剪，`54c3be6` 补齐已持久化旧记录的 lineage repair。每次 persistence save 进入 `prune()` 后先 repair，再执行 under-limit early return：连续的 retained suffix 以最早保留记录重新 root，并只链接仍保留的前驱；存在 gap、branch、cycle、cross-trigger 或 root 不一致的 malformed group 则保守地拆为 self-rooted、无 `retryOf` 的独立记录。
+
+repair 只改 `rootRunId` 与 `retryOf`；ID、`triggerKey`、attempt number、时间戳/排序和其他字段保持原值。缺失祖先不重建、不合成，也不为 malformed group 推断关系。
+
 ---
 
-### Task 9: 全量验证、文档收口与推送（验证与自审已完成）
+### Task 9: 全量验证、文档收口与推送（初始提交/推送已完成；Fix Round 1 待独立复审）
 
 **Files:**
 - Modify: `packages/platform-gitlab/docs/review-implementation/14-live-integration-test-checklist.md`
@@ -519,13 +525,15 @@ rg -n "glpat-|PRIVATE-TOKEN|topview624" packages opencode web -g '!*.test.ts' -g
 
 复查权限可执行性、token/日志边界、HEAD 锁定、publication claim/checkpoint、marker 分页上限、旧异步写入、run store 关系和 Web 无损保存。
 
-- [ ] **Step 6: 提交文档并推送**
+- [x] **Step 6: 提交文档并推送**
 
 ```powershell
 git add -f packages/platform-gitlab/docs/review-implementation/14-live-integration-test-checklist.md packages/platform-gitlab/docs/review-implementation/20-review-follow-up-hardening-design.md packages/platform-gitlab/docs/review-implementation/21-review-follow-up-hardening-implementation-plan.md packages/platform-gitlab/docs/review-implementation/README.md
 git commit -m "docs(gitlab): record follow-up hardening verification"
 git push origin HEAD:feat/gitlab-review-workflow-v2
 ```
+
+`cf86409` 是上述初始验证文档 commit，并已通过普通 fast-forward push 到 `origin/feat/gitlab-review-workflow-v2`。本 follow-up 提交修复随后独立 Task 9 review 的三项 Important finding；在本修复提交编写时，Fix Round 1 的独立复审与 controller 最终 whole-branch review 仍 pending，不能记为已完成或已批准。
 
 ---
 
@@ -546,3 +554,5 @@ git push origin HEAD:feat/gitlab-review-workflow-v2
 自动化回归覆盖：Task 3 的 HEAD 缺失/变更零发布，Task 6 的并发 publication claim、checkpoint 与 partial recovery，Task 4 的 stale binding 显式 retry，Task 7 的请求配额和最终成功 DTO 严格 `< 32 KiB`，以及 Task 8 的持久化 attempt-chain repair。`origin/main...HEAD` 自审已复查权限可执行性、token/日志边界、HEAD 锁定、marker 分页上限、旧异步写入和 Web 无损保存；未发现生产代码问题，已修复文档末尾空行。
 
 外部 self-managed GitLab 的 webhook、CI、Notes/Discussions 真实发布与恢复动作本批次均为 **待人工联调**；自动化测试不构成 live-integration 证据。
+
+`cf86409` 已完成初始文档提交与非强制推送。其独立 Task 9 review 产生的三项 Important finding 由本 follow-up 文档修复处理；本修复尚待 Fix Round 1 独立复审，controller 最终 whole-branch review 也仍待执行。

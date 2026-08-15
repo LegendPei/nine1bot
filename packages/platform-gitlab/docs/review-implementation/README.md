@@ -60,7 +60,7 @@
 20. [20-review-follow-up-hardening-design.md](./20-review-follow-up-hardening-design.md)
    - 分支二次审查后的权限、脱敏、HEAD 一致性、绑定恢复、发布幂等、资源限制和 attempt 链完整性设计。
 21. [21-review-follow-up-hardening-implementation-plan.md](./21-review-follow-up-hardening-implementation-plan.md)
-   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--8 已完成，Task 9 记录最终自动化验证与待人工联调事项。
+   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--8 已完成，Task 9 的初始验证文档提交/推送已完成，follow-up 独立复审仍 pending。
 22. [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md)
    - 发布对账的前置输入预算、线性 marker 扫描、独立复审与 Task 6 CPU blocker 解除记录。
 
@@ -86,3 +86,5 @@ webhook / browser page context
 二次审查加固 Task 1--8 已完成（`c6df20a..54c3be6`，含 Task 6 的 CPU 补充修复 `3a5f60e`、`9c905ce`、`873ce7d`、`33b3393`）。2026-08-15 fresh 自动化验证：聚焦 `350 pass / 0 fail / 1217 expect()`，根测试 `554 pass / 0 fail / 2040 expect()`，根与 OpenCode typecheck、Web build 均为 exit 0。自动化覆盖旧 HEAD 零发布、并发发布、部分恢复、stale binding retry、CI 配额/输出和 attempt 链修复。
 
 真实 self-managed GitLab 的 webhook、可信 CI、远端 marker 对账与评论回写尚未在本批次执行，全部为 **待人工联调**；自动化测试不构成 live-integration 证据。
+
+`cf86409` 是 Task 9 的初始验证文档提交与普通推送。本 follow-up 修复后续独立 Task 9 review 的三项 Important finding；在本提交编写时，Fix Round 1 独立复审与 controller 最终 whole-branch review 仍待执行，当前文档不宣称这两道 review 已完成。

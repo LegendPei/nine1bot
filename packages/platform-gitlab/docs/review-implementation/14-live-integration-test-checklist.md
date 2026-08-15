@@ -8,7 +8,7 @@
 
 本批次在 `54c3be6` 运行的自动化验证已通过：聚焦测试 `350 pass / 0 fail / 1217 expect()`（9 files）、根测试 `554 pass / 0 fail / 2040 expect()`（59 files）、根 typecheck、OpenCode typecheck 和 Web production build 均为 exit 0；Web build 转换 1862 个模块。`git diff --check` 为 exit 0；敏感信息扫描仅命中稳定字段名与脱敏规则，未发现凭证值。
 
-本批次没有执行任何 external self-managed GitLab 操作。下列 P1--P6、A1--A6、B1--B4、C1--C5、D1--D5、E1--E7、F1--F6 以及第 7 节结论表的所有外部验证项均为 **待人工联调**；自动化测试不是 live-integration 证据。联调需要覆盖：
+本批次没有执行任何 external self-managed GitLab 操作。下列 P1--P6、A1--A6、B1--B4、C1--C5、D1--D5、E1--E7、R1--R5、F1--F6 以及第 8 节结论表的所有外部验证项均为 **待人工联调**；自动化测试不是 live-integration 证据。联调需要覆盖：
 
 1. source 或 detached MR pipeline 能作为审查上下文。
 2. 环境支持时，merged-results 或 merge-train pipeline 经过父提交关系校验后能作为审查上下文。
@@ -124,7 +124,21 @@ CI 是补充证据，不是 Review 发布门禁。模型按审查需要调用 `g
 curl.exe -X POST '<NINE1BOT_BASE_URL>/webhooks/gitlab/runs/<REJECTED_RUN_ID>/retry'
 ```
 
-## 6. 安全、上限与长上下文
+## 6. HEAD 锁定与发布恢复
+
+以下用例必须在隔离的 self-managed GitLab 上观察真实 webhook、Notes 和 Discussions 请求。对应自动化回归已经通过，但只证明本地受控行为，不是这些用例的 live-integration 证据。
+
+| # | 操作 | 预期结果 | 实际结果 | 状态 |
+| --- | --- | --- | --- | --- |
+| R1 | Review 运行期间向 MR 推送新 commit，使 source HEAD 改变 | 旧 attempt 以稳定 HEAD 变化诊断结束；旧结果对 summary、discussion、fallback 和失败提示均为零发布，新 HEAD 只由新 webhook 处理 | 未执行 | 待人工联调 |
+| R2 | 对同一 run 和 payload 并发发起两个 publication/callback | 只有一个 publisher 获得 claim；另一个收到稳定冲突，不产生第二套 summary、inline、fallback 或 marker | 未执行 | 待人工联调 |
+| R3 | 让 summary 成功后使 inline POST 失败，再以相同 payload 恢复 | run 先进入 `partial`；恢复时先对账已有 marker，只补缺失 inline 或 fallback，不重复 summary 或任何已确认 marker | 未执行 | 待人工联调 |
+| R4 | 至少一个 marker 已写入远端后重启服务，留下 stale claim，再以相同 payload 恢复 | 新 owner 通过有界 Notes/Discussions GET 对账并只补缺失项；旧 owner 不能 checkpoint、完成或覆盖新 claim | 未执行 | 待人工联调 |
+| R5 | 恢复发布时让有界 Notes/Discussions GET 失败 | run 保持 `partial` 并返回稳定对账失败诊断；本次 POST 数为 0，不盲目重发，GET 恢复后再按相同 payload 续传 | 未执行 | 待人工联调 |
+
+自动化回归已覆盖 R1 的旧 HEAD 零发布、R2 的单 claim、R3 的同 payload 部分恢复、R4 的 stale-claim marker 对账和 R5 的对账失败零盲目 POST；这些通过结果与上表的待人工状态分别记录。
+
+## 7. 安全、上限与长上下文
 
 | # | 操作 | 预期结果 | 实际结果 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -135,7 +149,7 @@ curl.exe -X POST '<NINE1BOT_BASE_URL>/webhooks/gitlab/runs/<REJECTED_RUN_ID>/ret
 | F5 | 准备大 MR | context pipeline 按预算切片；finding 行号仍对应冻结 diff，源码以 `+++`/`---` 开头时不偏移 | | |
 | F6 | 审查服务日志、session 文件和公开 run JSON | 不含 token、原始 GitLab 响应、未截断 CI 输出或完整 secret path | | |
 
-## 7. 问题记录与结论
+## 8. 问题记录与结论
 
 每个问题记录：用例编号、现象、复现步骤、稳定错误码、脱敏日志、GitLab/Nine1Bot 版本和判断。禁止粘贴 token、密码、webhook secret 或完整凭证 URL。
 
@@ -147,6 +161,8 @@ curl.exe -X POST '<NINE1BOT_BASE_URL>/webhooks/gitlab/runs/<REJECTED_RUN_ID>/ret
 | Merged-results/merge-train CI | | |
 | 无可信 CI 非阻断 | | |
 | 配置修复后新 attempt | | |
+| MR HEAD 变化零发布 | 待人工联调 | 未执行 external self-managed GitLab 操作 |
+| 并发 claim 与 publication 恢复 | 待人工联调 | 未执行真实 Notes/Discussions 回写与对账 |
 | Review summary/inline 回写 | | |
 | 工具白名单、脱敏与输出上限 | | |
 | 大 MR 上下文与行号 | | |

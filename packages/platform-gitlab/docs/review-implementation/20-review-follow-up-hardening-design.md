@@ -7,6 +7,7 @@
 - 目标分支：`feat/gitlab-review-workflow`
 - 前置设计：`18-review-hardening-and-recovery-design.md`
 - 实施范围：`platform-gitlab`、Nine1Bot Review controller/run store、OpenCode 自动化运行时、Web GitLab 配置页
+- 复审状态：`cf86409` 已完成初始验证文档提交与推送；本次 follow-up 修复独立 Task 9 review 的三项 Important finding，Fix Round 1 独立复审与 controller 最终 whole-branch review 仍待执行
 
 ## 2. 背景
 
@@ -207,6 +208,12 @@ run store 按 `triggerKey` 把完整 attempt 链视为一个裁剪单元：
 - 如果单条保留链自身超过配置记录数，允许该链暂时超过软限制，以兑现审计链完整性；该限制仍约束不同 trigger 链的累计保留。
 - `createRetryAttempt` 后立即执行的 save 不得删除刚创建 attempt 的父记录。
 
+持久化升级还包含保守的 lineage repair。每次 persistence save 调用 `prune()` 时，必须先执行 repair，再判断记录数是否低于或等于软限制并提前返回，因此 under-limit store 也会在下一次保存时完成修复：
+
+- 如果同一 `triggerKey` 下保留的是连续 attempt 后缀，则以最早保留记录重新作为 `rootRunId`，清除它指向已缺失前驱的 `retryOf`，后续记录只重新链接到仍在 store 内的直接前驱。
+- 如果保留组存在 gap、branch、cycle、cross-trigger 引用或不一致 root，无法证明为连续后缀，则把该组记录保守地拆成独立审计记录：每条记录 self-rooted，且没有 `retryOf`；不猜测原链。
+- repair 只修改 `rootRunId` 和 `retryOf`。记录 ID、`triggerKey`、attempt number、时间戳与排序依据以及其他无关字段保持不变；缺失祖先既不重建，也不合成新记录。
+
 本轮不拆分独立归档数据库。若未来需要严格磁盘硬上限和长期审计，应把终态链迁移到专用持久化存储。
 
 ## 13. 测试策略
@@ -274,10 +281,12 @@ run store 按 `triggerKey` 把完整 attempt 链视为一个裁剪单元：
 6. 并发、部分失败和进程重启恢复不会重复发布同一 marker。
 7. CI 输出、请求次数和 run store 关系满足设计边界。
 8. 聚焦测试、根测试、两层 typecheck、Web build 和 `git diff --check` 全部通过。
-9. `14-live-integration-test-checklist.md` 增加并执行发布恢复与 HEAD 变化场景；无法自动完成的外部条件必须明确记录。
+9. `14-live-integration-test-checklist.md` 包含 HEAD 变化、并发 claim、部分恢复、stale-claim 对账和对账 GET 失败场景；相应自动化回归已执行，external self-managed GitLab 行为保持“待人工联调”，不得把自动化结果记作 live evidence。
 
 ## 17. 实施收口证据
 
 Task 1--8 已按实施计划完成：Task 1 为 `c6df20a..c6d67bc`，Task 2 为 `cd05baf..8c8ffcf`，Task 3 为 `719ae80..449d3e1`，Task 4 为 `6a879c3`，Task 5 为 `84d664f..5ef8ee3`，Task 6 为 `d265a47..7a733c6`（CPU 补充修复另含 `3a5f60e`、`9c905ce`、`873ce7d`、`33b3393`，前置 `c99195a`），Task 7 为 `b0c3bf8..d18e213`，Task 8 为 `6d08086..54c3be6`。
 
 2026-08-15 的 fresh 自动化证据为：聚焦 `350 pass / 0 fail / 1217 expect()`、根测试 `554 pass / 0 fail / 2040 expect()`、根与 OpenCode typecheck exit 0、Web build exit 0。自动化已覆盖 HEAD 零发布、并发 publication claim、inline 5xx 后同 payload 的部分恢复、stale binding 显式 retry、CI 配额与严格序列化输出边界、以及持久化 attempt 链修复。所有 external self-managed GitLab 动作仍为 **待人工联调**；这些测试不替代真实 webhook、CI、Notes 或 Discussions 联调。
+
+`cf86409` 是初始验证文档提交及其普通推送。本 follow-up 仅修复随后独立 Task 9 review 指出的记录问题；在本提交编写时，Fix Round 1 独立复审和 controller 最终 whole-branch review 均未完成，不在本文中宣称通过。
