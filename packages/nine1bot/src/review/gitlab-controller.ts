@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
+  GitLabReviewPublicationBudgetError,
   GitLabReviewPublicationCompatibilityError,
+  GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
@@ -25,7 +27,7 @@ import {
   type GitLabReviewSettings,
   type GitLabReviewTrigger,
 } from '@nine1bot/platform-gitlab/review'
-import { ReviewRunStore, type ReviewRunRecord } from './run-store'
+import { ReviewRunStore, type ReviewRunIdentity, type ReviewRunRecord } from './run-store'
 import type { PlatformManagerConfig } from '../platform/manager'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
@@ -525,17 +527,21 @@ async function executeGitLabReviewAttempt(input: {
       ),
     })
     if (context.diff.blocked) {
-      const publishWarning = await maybeWriteBlockedComment({
+      const blockedPublication = await maybeWriteBlockedComment({
+        identity: reviewRunIdentity(input.run),
         trigger: input.trigger,
         settings: input.settings,
         secrets: input.secrets,
         fetch: input.fetch,
         reason: context.diff.blockReason ?? 'MR diff is too large or was truncated by GitLab.',
       })
+      if (blockedPublication.headError) {
+        return retryRejected(input.run, 409, blockedPublication.headError)
+      }
       const warnings = [
         ...input.warnings,
         context.diff.blockReason ?? 'GitLab diff blocked.',
-        ...(publishWarning ? [publishWarning] : []),
+        ...(blockedPublication.warning ? [blockedPublication.warning] : []),
       ]
       ReviewRunStore.update(input.run.id, {
         status: 'blocked',
@@ -607,6 +613,14 @@ function reviewAttemptMetadata(run: ReviewRunRecord) {
   }
 }
 
+function reviewRunIdentity(run: Pick<ReviewRunRecord, 'id' | 'sessionId' | 'generation'>): ReviewRunIdentity {
+  return {
+    runId: run.id,
+    sessionId: run.sessionId,
+    generation: run.generation,
+  }
+}
+
 function retryRejected(run: ReviewRunRecord, httpStatus: number, error: string): GitLabReviewWebhookResult {
   return {
     accepted: false,
@@ -649,76 +663,41 @@ export async function publishGitLabReviewRunResult(input: {
   const context = run.context as ReturnType<typeof buildGitLabReviewContext> | undefined
   const trigger = run.trigger as GitLabReviewTrigger | undefined
   if (!context || !trigger) return { published: false, runId: input.runId, error: 'review_run_context_missing' }
+  const identity = reviewRunIdentity(run)
 
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (settings.dryRun) {
     const warning = 'GitLab review result publishing skipped because dry-run is enabled.'
-    ReviewRunStore.update(input.runId, { status: 'succeeded', warnings: [warning] })
+    ReviewRunStore.updateIfCurrent(identity, { status: 'succeeded', warnings: [warning] })
     return { published: false, runId: input.runId, error: 'dry_run_enabled', warnings: [warning] }
-  }
-
-  const apiBaseUrl = resolveGitLabApiBaseUrl({
-    configuredBaseUrl: settings.baseUrl,
-    triggerHost: trigger.host,
-  })
-  if (!apiBaseUrl.ok) {
-    ReviewRunStore.update(input.runId, { status: 'failed', error: apiBaseUrl.reason })
-    return { published: false, runId: input.runId, error: apiBaseUrl.reason }
-  }
-
-  const token = await resolveGitLabReviewSecret(settings.tokenSecretRef, input.secrets)
-  const terminalAfterSecret = reviewRunPublicationTerminalResult(input.runId)
-  if (terminalAfterSecret) return terminalAfterSecret
-  if (!token) {
-    ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_token_missing' })
-    await reportGitLabReviewRunFailure({
-      runId: input.runId,
-      platforms: input.platforms,
-      secrets: input.secrets,
-      fetch: input.fetch,
-      phase: 'publish_result',
-      error: 'gitlab_token_missing',
-    })
-    return { published: false, runId: input.runId, error: 'gitlab_token_missing' }
   }
 
   let parsed: ReturnType<typeof parseReviewStageResult>
   try {
-    parsed = parseReviewStageResult(input.stageResult)
-  } catch {
-    ReviewRunStore.update(input.runId, { status: 'failed', error: 'invalid_stage_result' })
-    return { published: false, runId: input.runId, error: 'invalid_stage_result' }
-  }
-  const objectId = trigger.objectType === 'mr' ? trigger.objectIid : trigger.commitSha
-  if (!objectId) {
-    ReviewRunStore.update(input.runId, { status: 'failed', error: 'gitlab_review_object_missing' })
-    return { published: false, runId: input.runId, error: 'gitlab_review_object_missing' }
-  }
-
-  const client = new GitLabApiClient({ baseUrl: apiBaseUrl.baseUrl, token, fetch: input.fetch })
-  try {
-    if (trigger.objectType === 'mr') {
-      const mergeRequest = await client.getMergeRequest(trigger.projectId, objectId)
-      const terminalAfterHead = reviewRunPublicationTerminalResult(input.runId)
-      if (terminalAfterHead) return terminalAfterHead
-      const headError = gitLabReviewChangesHeadError(trigger, mergeRequest)
-      if (headError) {
-        ReviewRunStore.update(input.runId, {
-          status: 'rejected',
-          error: headError,
-          rejectionKind: 'policy',
-          recoverable: false,
-        })
-        return { published: false, runId: input.runId, error: headError }
-      }
-    }
+    parsed = parseReviewStageResult(input.stageResult, { runId: input.runId })
   } catch (error) {
-    const terminalAfterHeadFailure = reviewRunPublicationTerminalResult(input.runId)
-    if (terminalAfterHeadFailure) return terminalAfterHeadFailure
-    const message = gitLabApiFailureMessage('publish_result', error)
-    ReviewRunStore.update(input.runId, { status: 'failed', error: message })
+    const message = error instanceof GitLabReviewPublicationBudgetError
+      ? GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE
+      : 'invalid_stage_result'
+    ReviewRunStore.updateIfCurrent(identity, { status: 'failed', error: message })
     return { published: false, runId: input.runId, error: message }
   }
+
+  const publicationGuard = await prepareGitLabReviewPublication({
+    identity,
+    trigger,
+    settings,
+    secrets: input.secrets,
+    fetch: input.fetch,
+    operation: 'publish_result',
+  })
+  if (!publicationGuard.ok) {
+    if (!isGitLabReviewHeadPolicyError(publicationGuard.error) && !reviewRunIdentityError(identity)) {
+      ReviewRunStore.updateIfCurrent(identity, { status: 'failed', error: publicationGuard.error })
+    }
+    return { published: false, runId: input.runId, error: publicationGuard.error }
+  }
+  const { client, objectId } = publicationGuard
 
   const payloadHash = reviewStageResultHash(parsed)
   const ownerId = input.publisherOwnerId ?? gitLabReviewPublisherOwnerId
@@ -826,7 +805,8 @@ export async function reportGitLabReviewRunFailure(input: {
   const trigger = run.trigger as GitLabReviewTrigger | undefined
   if (!trigger) return { notified: false, runId: input.runId, error: 'review_run_trigger_missing' }
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
-  const notified = await maybeWriteFailureComment({
+  const notification = await maybeWriteFailureComment({
+    identity: reviewRunIdentity(run),
     trigger,
     settings,
     secrets: input.secrets,
@@ -834,9 +814,12 @@ export async function reportGitLabReviewRunFailure(input: {
     phase: input.phase,
     error: input.error,
   })
-  if (notified) {
-    ReviewRunStore.update(input.runId, { failureNotifiedAt: Date.now() })
+  if (notification.notified) {
+    ReviewRunStore.updateIfCurrent(reviewRunIdentity(run), { failureNotifiedAt: Date.now() })
     return { notified: true, runId: input.runId }
+  }
+  if (notification.error && isGitLabReviewHeadPolicyError(notification.error)) {
+    return { notified: false, runId: input.runId, error: notification.error }
   }
   return { notified: false, runId: input.runId, error: 'gitlab_failure_comment_not_posted' }
 }
@@ -855,35 +838,36 @@ function gitLabApiFailureMessage(operation: string, error: unknown) {
 }
 
 async function maybeWriteFailureComment(input: {
+  identity: ReviewRunIdentity
   trigger: GitLabReviewTrigger
   settings: GitLabReviewSettings
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
   phase: string
   error: string
-}): Promise<boolean> {
-  if (input.settings.dryRun) return false
-  const object = gitLabReviewObject(input.trigger)
-  if (!object) return false
-  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
-  if (!token) return false
-  const resolvedClient = gitLabApiClientForHost({
+}): Promise<{ notified: boolean; error?: string }> {
+  if (input.settings.dryRun) return { notified: false }
+  const guard = await prepareGitLabReviewPublication({
+    identity: input.identity,
+    trigger: input.trigger,
     settings: input.settings,
-    host: input.trigger.host,
-    token,
+    secrets: input.secrets,
     fetch: input.fetch,
+    operation: 'failure_comment',
   })
-  if (!resolvedClient.ok) return false
+  if (!guard.ok) return { notified: false, error: guard.error }
   try {
-    await resolvedClient.client.createNote({
+    assertReviewRunIdentityCurrent(input.identity)
+    await guard.client.createNote({
       projectId: input.trigger.projectId,
-      resource: object.resource,
-      resourceId: object.resourceId,
+      resource: guard.resource,
+      resourceId: guard.objectId,
       body: renderFailureComment(input.phase, input.error),
     })
-    return true
+    assertReviewRunIdentityCurrent(input.identity)
+    return { notified: true }
   } catch {
-    return false
+    return { notified: false }
   }
 }
 
@@ -1088,33 +1072,142 @@ async function loadLiveChanges(input: {
   return undefined
 }
 
-async function maybeWriteBlockedComment(input: {
+type GitLabReviewPublicationGuard =
+  | {
+      ok: true
+      client: GitLabApiClient
+      resource: 'merge_requests' | 'repository/commits'
+      objectId: string | number
+    }
+  | { ok: false; error: string }
+
+async function prepareGitLabReviewPublication(input: {
+  identity: ReviewRunIdentity
   trigger: GitLabReviewTrigger
   settings: GitLabReviewSettings
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
-  reason: string
-}): Promise<string | undefined> {
-  if (input.settings.dryRun || input.trigger.objectType !== 'mr' || !input.trigger.objectIid) return
-  const token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
-  if (!token) return
+  operation: string
+}): Promise<GitLabReviewPublicationGuard> {
+  const identityError = reviewRunIdentityError(input.identity)
+  if (identityError) return { ok: false, error: identityError }
+  const object = gitLabReviewObject(input.trigger)
+  if (!object) return { ok: false, error: 'gitlab_review_object_missing' }
+
+  let token: string | undefined
+  try {
+    token = await resolveGitLabReviewSecret(input.settings.tokenSecretRef, input.secrets)
+  } catch {
+    return { ok: false, error: 'gitlab_token_unavailable' }
+  }
+  const afterSecretError = reviewRunIdentityError(input.identity)
+  if (afterSecretError) return { ok: false, error: afterSecretError }
+  if (!token) return { ok: false, error: 'gitlab_token_missing' }
+
   const resolvedClient = gitLabApiClientForHost({
     settings: input.settings,
     host: input.trigger.host,
     token,
     fetch: input.fetch,
   })
-  if (!resolvedClient.ok) return resolvedClient.reason
+  if (!resolvedClient.ok) return { ok: false, error: resolvedClient.reason }
+
+  if (input.trigger.objectType === 'mr') {
+    try {
+      const mergeRequest = await resolvedClient.client.getMergeRequest(
+        input.trigger.projectId,
+        object.resourceId,
+      )
+      const afterHeadError = reviewRunIdentityError(input.identity)
+      if (afterHeadError) return { ok: false, error: afterHeadError }
+      const headError = gitLabReviewChangesHeadError(input.trigger, mergeRequest)
+      if (headError) {
+        if (ReviewRunStore.updateIfCurrent(input.identity, {
+          status: 'rejected',
+          error: headError,
+          rejectionKind: 'policy',
+          recoverable: false,
+        })) {
+          return { ok: false, error: headError }
+        }
+        return { ok: false, error: reviewRunIdentityError(input.identity) ?? headError }
+      }
+    } catch (error) {
+      const afterHeadFailure = reviewRunIdentityError(input.identity)
+      if (afterHeadFailure) return { ok: false, error: afterHeadFailure }
+      return { ok: false, error: gitLabApiFailureMessage(input.operation, error) }
+    }
+  }
+
+  return {
+    ok: true,
+    client: resolvedClient.client,
+    resource: object.resource,
+    objectId: object.resourceId,
+  }
+}
+
+function reviewRunIdentityError(identity: ReviewRunIdentity) {
+  const run = ReviewRunStore.get(identity.runId)
+  if (!run) return 'review_run_not_found'
+  if (run.generation !== identity.generation || run.sessionId !== identity.sessionId) {
+    return 'review_run_not_current'
+  }
+  if (ReviewRunStore.findLatestByTriggerKey(run.triggerKey)?.id !== run.id) {
+    return 'review_run_not_latest'
+  }
+  if (run.status === 'rejected') return run.error ?? 'review_run_rejected'
+  if (run.publishedAt || run.publication?.state === 'published') return 'review_run_already_published'
+  return undefined
+}
+
+function assertReviewRunIdentityCurrent(identity: ReviewRunIdentity) {
+  const error = reviewRunIdentityError(identity)
+  if (error) throw new Error(error)
+}
+
+function isGitLabReviewHeadPolicyError(error: string) {
+  return error === 'gitlab_review_head_changed' || error === 'gitlab_review_diff_head_unverified'
+}
+
+async function maybeWriteBlockedComment(input: {
+  identity: ReviewRunIdentity
+  trigger: GitLabReviewTrigger
+  settings: GitLabReviewSettings
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
+  reason: string
+}): Promise<{ warning?: string; headError?: string }> {
+  if (input.settings.dryRun || input.trigger.objectType !== 'mr' || !input.trigger.objectIid) return {}
+  const guard = await prepareGitLabReviewPublication({
+    identity: input.identity,
+    trigger: input.trigger,
+    settings: input.settings,
+    secrets: input.secrets,
+    fetch: input.fetch,
+    operation: 'blocked_comment',
+  })
+  if (!guard.ok) {
+    return isGitLabReviewHeadPolicyError(guard.error)
+      ? { headError: guard.error }
+      : { warning: guard.error }
+  }
   try {
-    await resolvedClient.client.createNote({
+    assertReviewRunIdentityCurrent(input.identity)
+    await guard.client.createNote({
       projectId: input.trigger.projectId,
       resource: 'merge_requests',
       resourceId: input.trigger.objectIid,
       body: renderBlockedDiffComment(input.reason),
     })
+    assertReviewRunIdentityCurrent(input.identity)
   } catch (error) {
-    return gitLabApiFailureMessage('blocked_comment', error)
+    const message = error instanceof Error ? error.message : String(error)
+    return isGitLabReviewHeadPolicyError(message)
+      ? { headError: message }
+      : { warning: gitLabApiFailureMessage('blocked_comment', error) }
   }
+  return {}
 }
 
 export function reviewStageResultHash(parsed: ReturnType<typeof parseReviewStageResult>) {

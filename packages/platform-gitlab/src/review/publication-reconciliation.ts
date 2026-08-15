@@ -3,6 +3,10 @@ import type { GitLabPublishedComment } from './api-client'
 import { validateGitLabInlinePosition } from './inline-position'
 import { gitLabReviewPublicationMarker } from './publication-markers'
 import { buildGitLabReviewPublicationPlan } from './publisher'
+import {
+  GitLabReviewPublicationBudgetError,
+  snapshotGitLabReviewPublicationContent,
+} from './publication-budget'
 import type {
   GitLabDiffManifest,
   GitLabReviewObjectType,
@@ -12,8 +16,6 @@ import type {
 export const GITLAB_REVIEW_LEGACY_PUBLICATION_AMBIGUOUS = 'gitlab_review_publication_legacy_ambiguous'
 
 const RECONCILIATION_COMMENT_CODE_UNIT_BUDGET = 256_000
-const RECONCILIATION_REVIEW_CODE_UNIT_BUDGET = 256_000
-const RECONCILIATION_FINDING_COUNT_BUDGET = 500
 // Legacy reconciliation is synchronous, so unique bodies and canonical finding patterns share one fixed budget.
 const LEGACY_COMPATIBILITY_CODE_UNIT_BUDGET = 256_000
 const PUBLICATION_MARKER_PREFIX = '<!-- nine1bot:gitlab-review-publication:'
@@ -114,67 +116,20 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
 function snapshotReconciliationInput(
   input: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0],
 ): Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0] {
-  const inputFindings = input.findings
-  if (inputFindings.length > RECONCILIATION_FINDING_COUNT_BUDGET) {
-    throw new GitLabReviewPublicationCompatibilityError()
-  }
-
-  let reviewCodeUnits = 0
-  const addReviewString = (value: string | undefined) => {
-    if (value === undefined) return
-    reviewCodeUnits = addReconciliationInputCodeUnits(
-      reviewCodeUnits,
-      value.length,
-      RECONCILIATION_REVIEW_CODE_UNIT_BUDGET,
-    )
-  }
-
-  const runId = snapshotRequiredReconciliationString(input.runId)
-  addReviewString(runId)
-  const summary = snapshotRequiredReconciliationString(input.summary)
-  addReviewString(summary)
-  const inputWarnings = input.warnings
-  const warnings = inputWarnings?.map((warning) => {
-    const snapshot = snapshotRequiredReconciliationString(warning)
-    addReviewString(snapshot)
-    return snapshot
-  })
-  const findings = inputFindings.map((finding): ReviewFinding => {
-    const id = snapshotOptionalReconciliationString(finding.id)
-    addReviewString(id)
-    const title = snapshotRequiredReconciliationString(finding.title)
-    addReviewString(title)
-    const body = snapshotRequiredReconciliationString(finding.body)
-    addReviewString(body)
-    const category = snapshotOptionalReconciliationString(finding.category)
-    addReviewString(category)
-    const file = snapshotOptionalReconciliationString(finding.file)
-    addReviewString(file)
-    const source = snapshotOptionalReconciliationString(finding.source)
-    addReviewString(source)
-    const inputSuggestion = finding.suggestion
-    let suggestion: ReviewFinding['suggestion']
-    if (inputSuggestion !== undefined) {
-      const replacement = snapshotRequiredReconciliationString(inputSuggestion.replacement)
-      addReviewString(replacement)
-      suggestion = {
-        replacement,
-        confidence: inputSuggestion.confidence,
-      }
+  let publicationInput: ReturnType<typeof snapshotGitLabReviewPublicationContent>
+  try {
+    publicationInput = snapshotGitLabReviewPublicationContent({
+      runId: input.runId,
+      summary: input.summary,
+      findings: input.findings,
+      warnings: input.warnings,
+    })
+  } catch (error) {
+    if (error instanceof GitLabReviewPublicationBudgetError) {
+      throw new GitLabReviewPublicationCompatibilityError()
     }
-    return {
-      id,
-      title,
-      body,
-      severity: finding.severity,
-      category,
-      file,
-      oldLine: finding.oldLine,
-      newLine: finding.newLine,
-      suggestion,
-      source,
-    }
-  })
+    throw error
+  }
 
   const commentBodies = new Set<string>()
   let commentCodeUnits = 0
@@ -197,13 +152,13 @@ function snapshotReconciliationInput(
   const discussions = snapshotComments(input.discussions)
 
   return {
-    runId,
+    runId: publicationInput.runId!,
     objectType: input.objectType,
     inlineComments: input.inlineComments,
-    summary,
-    findings,
+    summary: publicationInput.summary,
+    findings: publicationInput.findings,
     manifest: input.manifest,
-    warnings,
+    warnings: publicationInput.warnings,
     notes,
     discussions,
   }
@@ -211,13 +166,6 @@ function snapshotReconciliationInput(
 
 function snapshotRequiredReconciliationString(value: string) {
   if (typeof value !== 'string') throw new GitLabReviewPublicationCompatibilityError()
-  return value
-}
-
-function snapshotOptionalReconciliationString(value: string | undefined) {
-  if (value !== undefined && typeof value !== 'string') {
-    throw new GitLabReviewPublicationCompatibilityError()
-  }
   return value
 }
 

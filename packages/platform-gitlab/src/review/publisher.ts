@@ -3,6 +3,7 @@ import { aggregateReviewFindings } from './finding-aggregator'
 import { renderReviewSummaryComment } from './comment-renderer'
 import { renderInlineFindingBody, validateGitLabInlinePosition } from './inline-position'
 import { gitLabReviewFindingPublicationMarkers, gitLabReviewPublicationMarker } from './publication-markers'
+import { assertGitLabReviewRenderedBodyBudget } from './publication-budget'
 import type { GitLabDiffManifest, GitLabReviewObjectType, ReviewFinding } from './types'
 
 export type GitLabReviewPublicationContext = {
@@ -123,11 +124,13 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
   })
   let summaryPosted = false
   if (!isCompleted(input.publication, summaryMarker)) {
+    const body = withMarkers(summaryBody, [summaryMarker, ...summaryFallbackMarkers])
+    assertGitLabReviewRenderedBodyBudget(body)
     await input.client.createNote({
       projectId: input.projectId,
       resource,
       resourceId: input.objectId,
-      body: withMarkers(summaryBody, [summaryMarker, ...summaryFallbackMarkers]),
+      body,
     })
     summaryPosted = true
     await completeMarker(input.publication, summaryMarker)
@@ -152,11 +155,13 @@ export async function publishGitLabReviewResult(input: PublishGitLabReviewInput)
       const markers = candidate.publicationFinding.markers
       if (isFindingCompleted(input.publication, markers)) continue
       try {
+        const body = withMarkers(renderInlineFindingBody(finding), [markers?.inlineMarker])
+        assertGitLabReviewRenderedBodyBudget(body)
         await input.client.createDiscussion({
           projectId: input.projectId,
           resource,
           resourceId: input.objectId,
-          body: withMarkers(renderInlineFindingBody(finding), [markers?.inlineMarker]),
+          body,
           position: candidate.position,
         })
         inlinePosted += 1
@@ -215,17 +220,19 @@ async function publishFindingFallback(input: PublishGitLabReviewInput & {
   finding: ReturnType<typeof aggregateGitLabReviewPublicationFindings>[number]
   marker?: string
 }) {
+  const body = withMarkers(renderReviewSummaryComment({
+    title: 'Nine1bot Inline Publish Fallback',
+    summary: 'A validated inline comment could not be posted as a GitLab diff thread after the summary was created.',
+    findings: [input.finding],
+    manifest: input.manifest,
+    warnings: input.warnings,
+  }), [input.marker])
+  assertGitLabReviewRenderedBodyBudget(body)
   await input.client.createNote({
     projectId: input.projectId,
     resource: input.resource,
     resourceId: input.objectId,
-    body: withMarkers(renderReviewSummaryComment({
-      title: 'Nine1bot Inline Publish Fallback',
-      summary: 'A validated inline comment could not be posted as a GitLab diff thread after the summary was created.',
-      findings: [input.finding],
-      manifest: input.manifest,
-      warnings: input.warnings,
-    }), [input.marker]),
+    body,
   })
 }
 

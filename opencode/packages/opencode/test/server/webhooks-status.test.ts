@@ -7,6 +7,7 @@ import {
   reportGitLabReviewRunFailure,
 } from "../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore } from "../../../../../packages/nine1bot/src/review/run-store"
+import { gitLabReviewPublicationBudget } from "../../../../../packages/platform-gitlab/src/review"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
@@ -20,6 +21,7 @@ import {
   resolveGitLabReviewRuntimeDirectory,
   startGitLabReviewRuntime,
   startGitLabReviewRuntimeRun,
+  WebhookRoutes,
   webhookLocalOrigin,
 } from "../../src/server/routes/webhooks"
 
@@ -276,6 +278,28 @@ describe("webhook status URL selection", () => {
     expect(gitLabReviewPublishStatus("review_run_already_active")).toBe(409)
     expect(gitLabReviewPublishStatus("gitlab_api_publish_failed:403:Forbidden")).toBe(502)
     expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)
+    expect(gitLabReviewPublishStatus("gitlab_review_publication_input_too_large")).toBe(413)
+  })
+
+  test("rejects an oversized GitLab publication request before JSON validation", async () => {
+    const response = await WebhookRoutes().request(
+      "http://localhost/gitlab/runs/not-used/publish",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(gitLabReviewPublicationBudget.maxManagementRequestBytes + 1),
+        },
+        body: JSON.stringify({ stageResult: {} }),
+      },
+    )
+
+    expect(response.status).toBe(413)
+    await expect(response.json()).resolves.toEqual({
+      published: false,
+      runId: "not-used",
+      error: "gitlab_review_publication_input_too_large",
+    })
   })
 
   test("records a nonblocking diagnostic when runtime finishes without querying CI", () => {

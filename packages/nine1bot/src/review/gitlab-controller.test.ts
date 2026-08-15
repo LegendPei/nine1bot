@@ -2034,6 +2034,11 @@ describe('GitLab review controller', () => {
           changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
         })
       }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'overflow-sha' },
+        })
+      }
       return Response.json({ id: 1 })
     }) as typeof fetch
 
@@ -2071,8 +2076,64 @@ describe('GitLab review controller', () => {
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
+  })
+
+  test('rejects a blocked MR when its HEAD changes before the blocked note with zero POSTs', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'blocked-frozen-head' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/changes')) {
+          return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-frozen-head' },
+            overflow: true,
+            changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
+          })
+        }
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-new-head' },
+          })
+        }
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      httpStatus: 409,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+    ])
+    expect(result.accepted ? undefined : ReviewRunStore.get(result.runId!)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
   })
 
   test('keeps blocked review accepted when blocked comment publishing fails', async () => {
@@ -2082,6 +2143,11 @@ describe('GitLab review controller', () => {
           diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-comment-fail-sha' },
           overflow: true,
           changes: [{ old_path: 'src/large.ts', new_path: 'src/large.ts', diff: '', overflow: true }],
+        })
+      }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-comment-fail-sha' },
         })
       }
       return new Response('Forbidden', {
@@ -4038,7 +4104,7 @@ describe('GitLab review controller', () => {
         newLine: 2,
       })),
     }
-    const payloadHash = publicationPayloadHash(stageResult)
+    const payloadHash = createHash('sha256').update(JSON.stringify(stageResult)).digest('hex')
     const existingMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
     const original = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
     if (!original.ok) throw new Error(`expected original claim: ${original.error}`)
@@ -4067,13 +4133,7 @@ describe('GitLab review controller', () => {
       fetch: (async (url: string | URL | Request, init?: RequestInit) => {
         const value = String(url)
         calls.push({ url: value, init })
-        if (value.endsWith('/merge_requests/10') && requestMethod(init) === 'GET') {
-          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
-        }
-        if (value.includes('/notes') && requestMethod(init) === 'GET') return Response.json([])
-        if (value.includes('/discussions') && requestMethod(init) === 'GET') return Response.json([])
-        if (requestMethod(init) === 'POST') return Response.json({ id: 10 })
-        throw new Error(`unexpected finding count request: ${requestMethod(init)} ${value}`)
+        return Response.json({})
       }) as typeof fetch,
     })
 
@@ -4092,7 +4152,7 @@ describe('GitLab review controller', () => {
       result: {
         published: false,
         runId: run.id,
-        error: 'gitlab_review_publication_legacy_ambiguous',
+        error: 'gitlab_review_publication_input_too_large',
       },
       postCount: 0,
       publication: {
@@ -4100,10 +4160,47 @@ describe('GitLab review controller', () => {
         ownerId: undefined,
         claimId: undefined,
         completedMarkers: [existingMarker],
-        error: 'gitlab_review_publication_legacy_ambiguous',
+        error: 'reconciliation_finding_count_crash',
       },
     })
+    expect(calls).toEqual([])
   }, 30_000)
+
+  test('rejects an oversized first publication before hashing, claiming, or GitLab access', async () => {
+    const run = createPublishableReviewRun({ headSha: 'first-publication-budget-head' })
+    const stageResult = {
+      ...publicationStageResult('First publication input budget.'),
+      findings: Array.from({ length: 501 }, (_, index) => ({
+        title: 'Shared finding',
+        body: `Tiny body ${index}`,
+        severity: 'info' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      })),
+    }
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+
+    await expect(publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init })
+        return Response.json({ id: 1, diff_refs: { head_sha: 'first-publication-budget-head' } })
+      }) as typeof fetch,
+    })).resolves.toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_review_publication_input_too_large',
+    })
+    expect(calls).toEqual([])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_review_publication_input_too_large',
+      publication: undefined,
+    })
+  })
 
   test('recovers fallback A without duplication and publishes a distinct fallback for finding B', async () => {
     const run = createPublishableReviewRun({ headSha: 'per-finding-fallback-head' })
@@ -5125,6 +5222,11 @@ describe('GitLab review controller', () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init })
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'failure-note-head' },
+        })
+      }
       return Response.json({ id: 1 })
     }) as typeof fetch
 
@@ -5137,6 +5239,8 @@ describe('GitLab review controller', () => {
         projectId: 123,
         objectType: 'mr',
         objectIid: 10,
+        headSha: 'failure-note-head',
+        mode: 'webhook',
       },
     })
 
@@ -5165,9 +5269,10 @@ describe('GitLab review controller', () => {
       failureNotifiedAt: expect.any(Number),
     })
     expect(calls.map((call) => call.url)).toEqual([
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
-    expect(String(calls[0]?.init?.body)).toContain('Nine1Bot+review+failed')
+    expect(String(calls[1]?.init?.body)).toContain('Nine1Bot+review+failed')
 
     await expect(reportGitLabReviewRunFailure({
       runId: run.id,
@@ -5180,7 +5285,57 @@ describe('GitLab review controller', () => {
       notified: false,
       error: 'review_run_failure_already_notified',
     })
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
+  })
+
+  test('rejects a failed MR when its HEAD changes before the failure note with zero POSTs', async () => {
+    const run = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'failed',
+      error: 'gitlab_review_result_missing',
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        objectType: 'mr',
+        objectIid: 10,
+        headSha: 'failure-frozen-head',
+        mode: 'webhook',
+      },
+    })
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+
+    await expect(reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        calls.push({ url: value, init })
+        if (value.endsWith('/merge_requests/10')) {
+          return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'failure-new-head' },
+          })
+        }
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+      phase: 'runtime_output',
+      error: 'gitlab_review_result_missing',
+    })).resolves.toEqual({
+      notified: false,
+      runId: run.id,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
+    expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+    ])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(ReviewRunStore.get(run.id)?.failureNotifiedAt).toBeUndefined()
   })
 
   test('does not write a failure note for a policy-rejected review run', async () => {

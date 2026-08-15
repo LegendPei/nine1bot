@@ -343,6 +343,104 @@ describe('GitLab review foundation', () => {
     expect(aggregated.every((finding) => finding.duplicates.length === 0)).toBe(true)
   })
 
+  test('bounds publication input at exact code-unit, UTF-8, field, and count limits', () => {
+    const exactAscii = parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: 'x'.repeat(255_999),
+      findings: [],
+    })
+    expect(exactAscii.summary).toHaveLength(255_999)
+    expect(() => parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: 'x'.repeat(256_000),
+      findings: [],
+    })).toThrow('gitlab_review_publication_input_too_large')
+
+    const exactUtf8Summary = `${'你'.repeat(170_666)}x`
+    expect(parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: exactUtf8Summary,
+      findings: [],
+    }).summary).toBe(exactUtf8Summary)
+    expect(() => parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: `${exactUtf8Summary}y`,
+      findings: [],
+    })).toThrow('gitlab_review_publication_input_too_large')
+
+    const finding = {
+      title: 't'.repeat(4_096),
+      body: '',
+      severity: 'info' as const,
+    }
+    expect(parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: '',
+      findings: [finding],
+    }).findings[0]?.title).toHaveLength(4_096)
+    expect(() => parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: '',
+      findings: [{ ...finding, title: `${finding.title}t` }],
+    })).toThrow('gitlab_review_publication_input_too_large')
+
+    const boundedFindings = Array.from({ length: 500 }, (_, index) => ({
+      title: `Finding ${index}`,
+      body: '',
+      severity: 'info' as const,
+    }))
+    expect(parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: '',
+      findings: boundedFindings,
+    }).findings).toHaveLength(500)
+    expect(() => parseReviewStageResult({
+      stage: 's',
+      status: 'ok',
+      summary: '',
+      findings: [...boundedFindings, boundedFindings[0]],
+    })).toThrow('gitlab_review_publication_input_too_large')
+  })
+
+  test('bounds aggregate output for adversarial duplicate findings at the exact limit', () => {
+    const findings = Array.from({ length: 500 }, (_, index): ReviewFinding => ({
+      title: 'Shared finding',
+      body: `${index.toString().padStart(3, '0')}${'x'.repeat(index === 499 ? 509 : 507)}`,
+      severity: 'info',
+      file: 'src/app.ts',
+      newLine: 2,
+    }))
+
+    const exact = aggregateReviewFindings(findings)
+    expect(exact).toHaveLength(1)
+    expect(exact[0]?.duplicates).toHaveLength(499)
+    expect(exact[0]?.body).toHaveLength(256_000)
+
+    expect(() => aggregateReviewFindings([
+      ...findings.slice(0, -1),
+      { ...findings.at(-1)!, body: `${findings.at(-1)!.body}x` },
+    ])).toThrow('gitlab_review_publication_input_too_large')
+
+    const exactUtf8Body = `${'你'.repeat(170_666)}xx`
+    expect(aggregateReviewFindings([{
+      title: 'UTF-8 aggregate',
+      body: exactUtf8Body,
+      severity: 'info',
+    }])[0]?.body).toBe(exactUtf8Body)
+    expect(() => aggregateReviewFindings([{
+      title: 'UTF-8 aggregate',
+      body: `${exactUtf8Body}y`,
+      severity: 'info',
+    }])).toThrow('gitlab_review_publication_input_too_large')
+  })
+
   test('extracts subagent review JSON from task output and aggregates findings deterministically', () => {
     const specs = buildInitialGitLabReviewSubagentTasks()
     const compiled = compileSubagentStageResults({

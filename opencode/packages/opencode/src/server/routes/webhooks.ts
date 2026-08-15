@@ -3,6 +3,7 @@ import { Project } from "@/project/project"
 import { RuntimeControllerProtocol } from "@/runtime/controller/protocol"
 import { Webhook } from "@/webhook/webhook"
 import { Hono } from "hono"
+import { bodyLimit } from "hono/body-limit"
 import { describeRoute, resolver, validator } from "hono-openapi"
 import { constants } from "fs"
 import { access, stat } from "fs/promises"
@@ -32,6 +33,10 @@ import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 import { registerBuiltinPlatformAdapters } from "../../../../../../packages/nine1bot/src/platform/builtin"
+import {
+  GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
+  gitLabReviewPublicationBudget,
+} from "../../../../../../packages/platform-gitlab/src/review"
 
 const WEBHOOK_CLIENT_CAPABILITIES = {
   interactions: false,
@@ -64,6 +69,17 @@ const GITLAB_REVIEW_CLIENT_CAPABILITIES = {
 const GitLabReviewPublishBody = z.object({
   stageResult: z.unknown(),
 }).strict()
+
+const gitLabReviewPublishBodyLimit = bodyLimit({
+  maxSize: gitLabReviewPublicationBudget.maxManagementRequestBytes,
+  onError(c) {
+    return c.json({
+      published: false,
+      runId: c.req.param("runId"),
+      error: GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
+    }, 413)
+  },
+})
 
 const RUN_MONITOR_TIMEOUT_MS = 30 * 60 * 1000
 const PROMPT_PREVIEW_LIMIT = 4000
@@ -798,6 +814,7 @@ export function gitLabReviewRuntimeFailure(
 export function gitLabReviewPublishStatus(error: string | undefined) {
   if (!error) return 400
   if (error === "review_run_not_found") return 404
+  if (error === GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE) return 413
   if (
     error === "review_run_already_published"
     || error === "review_run_already_active"
@@ -964,6 +981,7 @@ export const WebhookRoutes = lazy(() =>
     .post(
       "/gitlab/runs/:runId/publish",
       validator("param", z.object({ runId: z.string() })),
+      gitLabReviewPublishBodyLimit,
       validator("json", GitLabReviewPublishBody),
       async (c) => {
         const result = await publishGitLabReviewRunResult({
