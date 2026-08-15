@@ -1719,6 +1719,167 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.get(retry!.rootRunId)).toBeDefined()
   })
 
+  test('repairs a persisted prefix-pruned attempt chain before an under-limit save', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'prefix-pruned-review-runs.json')
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 3,
+      runs: [
+        {
+          id: 'review_prefix_2',
+          rootRunId: 'review_prefix_1',
+          attempt: 2,
+          retryOf: 'review_prefix_1',
+          triggerKey: 'prefix-pruned-trigger',
+          generation: 'generation-2',
+          platform: 'gitlab',
+          idempotencyKey: 'prefix-pruned-trigger',
+          status: 'rejected',
+          createdAt: 20,
+          updatedAt: 20,
+        },
+        {
+          id: 'review_prefix_3',
+          rootRunId: 'review_prefix_1',
+          attempt: 3,
+          retryOf: 'review_prefix_2',
+          triggerKey: 'prefix-pruned-trigger',
+          generation: 'generation-3',
+          platform: 'gitlab',
+          idempotencyKey: 'prefix-pruned-trigger',
+          status: 'accepted',
+          createdAt: 30,
+          updatedAt: 30,
+        },
+      ],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+    ReviewRunStore.setMaxRecordsForTesting(2)
+
+    expect(ReviewRunStore.update('review_prefix_3', { status: 'running' })).toBeDefined()
+    ReviewRunStore.reloadForTesting()
+
+    const retained = ReviewRunStore.list()
+    expect(retained.map((run) => run.id)).toEqual(['review_prefix_3', 'review_prefix_2'])
+    expect(ReviewRunStore.get('review_prefix_2')).toMatchObject({
+      id: 'review_prefix_2',
+      rootRunId: 'review_prefix_2',
+      attempt: 2,
+      triggerKey: 'prefix-pruned-trigger',
+      createdAt: 20,
+      updatedAt: 20,
+    })
+    expect(ReviewRunStore.get('review_prefix_2')?.retryOf).toBeUndefined()
+    expect(ReviewRunStore.get('review_prefix_3')).toMatchObject({
+      id: 'review_prefix_3',
+      rootRunId: 'review_prefix_2',
+      attempt: 3,
+      retryOf: 'review_prefix_2',
+      triggerKey: 'prefix-pruned-trigger',
+      createdAt: 30,
+      status: 'running',
+    })
+    for (const run of retained) {
+      expect(ReviewRunStore.get(run.rootRunId)).toBeDefined()
+      if (run.retryOf) expect(ReviewRunStore.get(run.retryOf)).toBeDefined()
+    }
+  })
+
+  test('isolates irreparable persisted lineage without changing valid trigger chains', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'malformed-review-lineage.json')
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 4,
+      runs: [
+        {
+          id: 'review_valid_1',
+          rootRunId: 'review_valid_1',
+          attempt: 1,
+          triggerKey: 'valid-trigger',
+          generation: 'valid-generation-1',
+          platform: 'gitlab',
+          status: 'rejected',
+          createdAt: 10,
+          updatedAt: 10,
+        },
+        {
+          id: 'review_valid_2',
+          rootRunId: 'review_valid_1',
+          attempt: 2,
+          retryOf: 'review_valid_1',
+          triggerKey: 'valid-trigger',
+          generation: 'valid-generation-2',
+          platform: 'gitlab',
+          status: 'accepted',
+          createdAt: 20,
+          updatedAt: 20,
+        },
+        {
+          id: 'review_malformed_2',
+          rootRunId: 'review_valid_1',
+          attempt: 2,
+          retryOf: 'review_valid_1',
+          triggerKey: 'malformed-trigger',
+          generation: 'malformed-generation-2',
+          platform: 'gitlab',
+          status: 'rejected',
+          createdAt: 30,
+          updatedAt: 30,
+        },
+        {
+          id: 'review_malformed_4',
+          rootRunId: 'review_valid_1',
+          attempt: 4,
+          retryOf: 'review_malformed_2',
+          triggerKey: 'malformed-trigger',
+          generation: 'malformed-generation-4',
+          platform: 'gitlab',
+          status: 'accepted',
+          createdAt: 40,
+          updatedAt: 40,
+        },
+      ],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+    ReviewRunStore.setMaxRecordsForTesting(4)
+
+    expect(ReviewRunStore.update('review_malformed_4', { status: 'running' })).toBeDefined()
+    ReviewRunStore.reloadForTesting()
+
+    expect(ReviewRunStore.get('review_malformed_2')).toMatchObject({
+      rootRunId: 'review_malformed_2',
+      attempt: 2,
+      triggerKey: 'malformed-trigger',
+      createdAt: 30,
+      updatedAt: 30,
+    })
+    expect(ReviewRunStore.get('review_malformed_2')?.retryOf).toBeUndefined()
+    expect(ReviewRunStore.get('review_malformed_4')).toMatchObject({
+      rootRunId: 'review_malformed_4',
+      attempt: 4,
+      triggerKey: 'malformed-trigger',
+      createdAt: 40,
+      status: 'running',
+    })
+    expect(ReviewRunStore.get('review_malformed_4')?.retryOf).toBeUndefined()
+    expect(ReviewRunStore.get('review_valid_1')).toMatchObject({
+      rootRunId: 'review_valid_1',
+      attempt: 1,
+      triggerKey: 'valid-trigger',
+      createdAt: 10,
+      updatedAt: 10,
+    })
+    expect(ReviewRunStore.get('review_valid_1')?.retryOf).toBeUndefined()
+    expect(ReviewRunStore.get('review_valid_2')).toMatchObject({
+      rootRunId: 'review_valid_1',
+      attempt: 2,
+      retryOf: 'review_valid_1',
+      triggerKey: 'valid-trigger',
+      createdAt: 20,
+      updatedAt: 20,
+    })
+  })
+
   test('keeps an oversized attempt chain whole and removes it only as a complete older chain', () => {
     ReviewRunStore.setMaxRecordsForTesting(2)
     const first = ReviewRunStore.create({

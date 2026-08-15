@@ -513,6 +513,7 @@ function persistPublicationMutation(mutate: () => void) {
 }
 
 function prune() {
+  repairRunLineage()
   const limit = maxRecords()
   if (runs.size <= limit) return
   const groups = groupRunsByTriggerKey([...runs.values()])
@@ -526,6 +527,47 @@ function prune() {
   for (const id of runs.keys()) {
     if (!keep.has(id)) runs.delete(id)
   }
+}
+
+function repairRunLineage() {
+  for (const group of groupRunsByTriggerKey([...runs.values()])) {
+    const ordered = [...group.records].sort(compareOldestAttemptFirst)
+    if (isContiguousAttemptChainSuffix(ordered)) {
+      const rootRunId = ordered[0]!.id
+      for (let index = 0; index < ordered.length; index += 1) {
+        setRunLineage(ordered[index]!, rootRunId, index === 0 ? undefined : ordered[index - 1]!.id)
+      }
+      continue
+    }
+
+    // Malformed groups stay as standalone self-rooted audit entries; no lineage is invented.
+    for (const run of ordered) setRunLineage(run, run.id, undefined)
+  }
+}
+
+function isContiguousAttemptChainSuffix(records: ReviewRunRecord[]) {
+  const first = records[0]
+  if (!first) return false
+  const ids = new Set(records.map((run) => run.id))
+  if (first.rootRunId !== first.id && ids.has(first.rootRunId)) return false
+  if (first.retryOf && ids.has(first.retryOf)) return false
+  for (let index = 1; index < records.length; index += 1) {
+    const previous = records[index - 1]!
+    const current = records[index]!
+    if (
+      current.attempt !== previous.attempt + 1
+      || current.retryOf !== previous.id
+      || current.rootRunId !== first.rootRunId
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function setRunLineage(run: ReviewRunRecord, rootRunId: string, retryOf: string | undefined) {
+  if (run.rootRunId === rootRunId && run.retryOf === retryOf) return
+  runs.set(run.id, { ...run, rootRunId, retryOf })
 }
 
 function groupRunsByTriggerKey(records: ReviewRunRecord[]) {
@@ -551,6 +593,13 @@ function compareNewestFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
 
 function compareLatestAttemptFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
   return b.attempt - a.attempt || compareNewestFirst(a, b)
+}
+
+function compareOldestAttemptFirst(a: ReviewRunRecord, b: ReviewRunRecord) {
+  return a.attempt - b.attempt
+    || a.createdAt - b.createdAt
+    || a.updatedAt - b.updatedAt
+    || a.id.localeCompare(b.id)
 }
 
 function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunRecord {
