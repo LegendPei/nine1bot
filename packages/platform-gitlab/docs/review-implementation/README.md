@@ -63,6 +63,8 @@
    - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--8 已完成，Task 9 的初始验证文档提交/推送已完成，follow-up 独立复审仍 pending。
 22. [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md)
    - 发布对账的前置输入预算、线性 marker 扫描、独立复审与 Task 6 CPU blocker 解除记录。
+23. [23-final-review-residual-hardening-implementation-plan.md](./23-final-review-residual-hardening-implementation-plan.md)
+   - 最终复审遗留的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整发布预算和项目档案逐表示无损校验计划。
 
 ## 当前交付目标
 
@@ -87,4 +89,4 @@ webhook / browser page context
 
 真实 self-managed GitLab 的 webhook、可信 CI、远端 marker 对账与评论回写尚未在本批次执行，全部为 **待人工联调**；自动化测试不构成 live-integration 证据。
 
-`cf86409` 是 Task 9 的初始验证文档提交与普通推送。本 follow-up 修复后续独立 Task 9 review 的三项 Important finding；在本提交编写时，Fix Round 1 独立复审与 controller 最终 whole-branch review 仍待执行，当前文档不宣称这两道 review 已完成。
+Plan 21 的首轮最终修复已形成 `6dc1c7d`、`1c291de`、`ca7c3ff`、`509eb44` 四个提交，并普通推送到 `origin/feat/gitlab-review-workflow-v2`。fresh 根测试为 `571 pass / 0 fail`，根与 OpenCode typecheck、Web build 均通过。后续 scoped 复审仍确认 4 组架构性遗留，已由 Plan 23 接管；在 Plan 23 的生产任务、独立复审和最终验证完成前，分支不宣称达到最终合并条件。
