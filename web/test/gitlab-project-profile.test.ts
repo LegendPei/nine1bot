@@ -7,6 +7,7 @@ import {
 } from '../src/lib/gitlab-project-profiles'
 import {
   parseGitLabProjectProfileDocument,
+  renderGitLabProjectProfileDocument,
   serializeGitLabProjectProfileDocument,
   updateGitLabProjectProfileDocument,
   validateGitLabProjectProfileDocument,
@@ -42,7 +43,7 @@ describe('GitLab project profiles', () => {
       projectId: 3,
       nine1botProjectID: 'project-uf',
       contextMarkdown: 'Legacy overlay',
-      reviewFocus: [' auth ', '', 'security'],
+      reviewFocus: [' auth ', 'security'],
       ci: {
         enabled: false,
         includeFailedJobLogs: false,
@@ -202,6 +203,243 @@ describe('GitLab project profiles', () => {
     expect(parseGitLabProjectProfileDocument(result.value).entries).toEqual(reloaded)
   })
 
+  test('preserves colliding and null raw representations through unrelated edits until explicit repair', () => {
+    const exactContext = 'x'.repeat(64_000)
+    const scenarios = [
+      {
+        name: 'valid canonical with invalid alias',
+        fields: { maxContextBytes: 500, max_context_bytes: 'invalid-alias' },
+        diagnostic: { code: 'profile_max_context_bytes_invalid', field: 'max_context_bytes' },
+        representations: ['maxContextBytes', 'max_context_bytes'],
+        canonical: 'maxContextBytes',
+        repairedValue: 600,
+        repair: (profile: ReturnType<typeof parseGitLabProjectProfiles>[number]) => ({
+          ...profile,
+          maxContextBytes: 600,
+        }),
+      },
+      {
+        name: 'invalid canonical with valid alias',
+        fields: { maxContextBytes: 'invalid-canonical', max_context_bytes: 500 },
+        diagnostic: { code: 'profile_max_context_bytes_invalid', field: 'maxContextBytes' },
+        representations: ['maxContextBytes', 'max_context_bytes'],
+        canonical: 'maxContextBytes',
+        repairedValue: 600,
+        repair: (profile: ReturnType<typeof parseGitLabProjectProfiles>[number]) => ({
+          ...profile,
+          maxContextBytes: 600,
+        }),
+      },
+      {
+        name: 'explicit null with valid alias',
+        fields: { reviewFocus: null, review_focus: ['legacy'] },
+        diagnostic: { code: 'profile_review_focus_invalid', field: 'reviewFocus' },
+        representations: ['reviewFocus', 'review_focus'],
+        canonical: 'reviewFocus',
+        repairedValue: ['security'],
+        repair: (profile: ReturnType<typeof parseGitLabProjectProfiles>[number]) => ({
+          ...profile,
+          reviewFocus: ['security'],
+        }),
+      },
+      {
+        name: 'exact canonical context with oversized alias',
+        fields: { reviewContextMarkdown: exactContext, context_markdown: `${exactContext}x` },
+        diagnostic: { code: 'profile_review_context_too_large', field: 'context_markdown' },
+        representations: [
+          'reviewContextMarkdown',
+          'review_context_markdown',
+          'contextMarkdown',
+          'context_markdown',
+        ],
+        canonical: 'reviewContextMarkdown',
+        repairedValue: 'Repaired context',
+        repair: (profile: ReturnType<typeof parseGitLabProjectProfiles>[number]) => ({
+          ...profile,
+          reviewContextMarkdown: 'Repaired context',
+        }),
+      },
+    ] as const
+
+    for (const scenario of scenarios) {
+      const document = parseGitLabProjectProfileDocument([{
+        id: `profile-${scenario.name}`,
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-uf',
+        displayName: 'Before edit',
+        extensionField: { preserve: scenario.name },
+        ...scenario.fields,
+      }])
+      expect(document.editable, scenario.name).toHaveLength(1)
+      const updated = updateGitLabProjectProfileDocument(document, 0, {
+        ...document.editable[0]!.profile,
+        displayName: 'After edit',
+      })
+
+      expect(updated.entries[0], scenario.name).toMatchObject({
+        ...scenario.fields,
+        displayName: 'After edit',
+        extensionField: { preserve: scenario.name },
+      })
+      expect(JSON.parse(renderGitLabProjectProfileDocument(updated))[0], scenario.name)
+        .toEqual(updated.entries[0])
+      expect(validateGitLabProjectProfileDocument(updated), scenario.name).toEqual([
+        expect.objectContaining(scenario.diagnostic),
+      ])
+      expect(serializeGitLabProjectProfileDocument(updated), scenario.name).toMatchObject({
+        ok: false,
+        diagnostics: [expect.objectContaining(scenario.diagnostic)],
+      })
+
+      const repaired = updateGitLabProjectProfileDocument(updated, 0, scenario.repair(updated.editable[0]!.profile))
+      const repairedEntry = repaired.entries[0] as Record<string, unknown>
+      expect(repairedEntry[scenario.canonical], scenario.name).toEqual(scenario.repairedValue)
+      for (const key of scenario.representations) {
+        if (key !== scenario.canonical) expect(repairedEntry, scenario.name).not.toHaveProperty(key)
+      }
+      expect(repairedEntry.extensionField, scenario.name).toEqual({ preserve: scenario.name })
+      const serialized = serializeGitLabProjectProfileDocument(repaired)
+      expect(serialized.ok, scenario.name).toBe(true)
+    }
+  })
+
+  test('keeps an invalid identity canonical editable through its valid alias and repairs both keys', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'identity-collision',
+      host: 'gitlab.example.com',
+      projectId: { malformed: true },
+      project_id: 3,
+      nine1botProjectID: 'project-uf',
+      displayName: 'Before edit',
+      extensionField: 'preserved',
+    }])
+
+    expect(document.editable).toHaveLength(1)
+    const updated = updateGitLabProjectProfileDocument(document, 0, {
+      ...document.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+    expect(updated.entries[0]).toMatchObject({
+      projectId: { malformed: true },
+      project_id: 3,
+      displayName: 'After edit',
+      extensionField: 'preserved',
+    })
+    expect(validateGitLabProjectProfileDocument(updated)).toEqual([
+      expect.objectContaining({ code: 'profile_project_id_missing', field: 'projectId' }),
+    ])
+    expect(serializeGitLabProjectProfileDocument(updated)).toMatchObject({ ok: false })
+
+    const repaired = updateGitLabProjectProfileDocument(updated, 0, {
+      ...updated.editable[0]!.profile,
+      projectId: 4,
+    })
+    expect(repaired.entries[0]).toMatchObject({ projectId: 4, extensionField: 'preserved' })
+    expect(repaired.entries[0]).not.toHaveProperty('project_id')
+    expect(serializeGitLabProjectProfileDocument(repaired)).toMatchObject({ ok: true })
+  })
+
+  test('validates CI aliases independently and only canonicalizes explicitly changed CI fields', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'ci-collision',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      displayName: 'Before edit',
+      ci: {
+        maxJobLogs: 4,
+        max_job_logs: 0,
+        maxFailedJobs: 'four',
+        max_failed_jobs: null,
+        maxJobLogBytes: 8_000,
+        max_job_log_bytes: null,
+        extensionLimit: 12,
+      },
+    }])
+    const updated = updateGitLabProjectProfileDocument(document, 0, {
+      ...document.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+
+    expect(updated.entries[0]).toEqual(expect.objectContaining({
+      displayName: 'After edit',
+      ci: {
+        maxJobLogs: 4,
+        max_job_logs: 0,
+        maxFailedJobs: 'four',
+        max_failed_jobs: null,
+        maxJobLogBytes: 8_000,
+        max_job_log_bytes: null,
+        extensionLimit: 12,
+      },
+    }))
+    expect(validateGitLabProjectProfileDocument(updated).map(({ code, field }) => ({ code, field }))).toEqual([
+      { code: 'profile_ci_max_job_logs_invalid', field: 'max_job_logs' },
+      { code: 'profile_ci_max_job_logs_invalid', field: 'maxFailedJobs' },
+      { code: 'profile_ci_max_job_logs_invalid', field: 'max_failed_jobs' },
+      { code: 'profile_ci_max_job_log_bytes_invalid', field: 'max_job_log_bytes' },
+    ])
+
+    const logsRepaired = updateGitLabProjectProfileDocument(updated, 0, {
+      ...updated.editable[0]!.profile,
+      ci: { ...updated.editable[0]!.profile.ci, maxJobLogs: 5 },
+    })
+    expect(logsRepaired.entries[0]).toEqual(expect.objectContaining({
+      ci: {
+        maxJobLogs: 5,
+        maxJobLogBytes: 8_000,
+        max_job_log_bytes: null,
+        extensionLimit: 12,
+      },
+    }))
+    expect(validateGitLabProjectProfileDocument(logsRepaired)).toEqual([
+      expect.objectContaining({
+        code: 'profile_ci_max_job_log_bytes_invalid',
+        field: 'max_job_log_bytes',
+      }),
+    ])
+    expect(serializeGitLabProjectProfileDocument(logsRepaired)).toMatchObject({ ok: false })
+
+    const repaired = updateGitLabProjectProfileDocument(logsRepaired, 0, {
+      ...logsRepaired.editable[0]!.profile,
+      ci: { ...logsRepaired.editable[0]!.profile.ci, maxJobLogBytes: 9_000 },
+    })
+    expect(repaired.entries[0]).toEqual(expect.objectContaining({
+      ci: { maxJobLogs: 5, maxJobLogBytes: 9_000, extensionLimit: 12 },
+    }))
+    expect(serializeGitLabProjectProfileDocument(repaired)).toMatchObject({ ok: true })
+  })
+
+  test('preserves an explicit null CI object until a nested CI field is changed', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'null-ci',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      displayName: 'Before edit',
+      ci: null,
+      extensionField: true,
+    }])
+    const updated = updateGitLabProjectProfileDocument(document, 0, {
+      ...document.editable[0]!.profile,
+      displayName: 'After edit',
+    })
+
+    expect(updated.entries[0]).toMatchObject({ ci: null, displayName: 'After edit', extensionField: true })
+    expect(validateGitLabProjectProfileDocument(updated)).toEqual([
+      expect.objectContaining({ code: 'profile_ci_invalid', field: 'ci' }),
+    ])
+    expect(serializeGitLabProjectProfileDocument(updated)).toMatchObject({ ok: false })
+
+    const repaired = updateGitLabProjectProfileDocument(updated, 0, {
+      ...updated.editable[0]!.profile,
+      ci: { ...updated.editable[0]!.profile.ci, maxJobLogs: 5 },
+    })
+    expect(repaired.entries[0]).toMatchObject({ ci: { maxJobLogs: 5 }, extensionField: true })
+    expect(serializeGitLabProjectProfileDocument(repaired)).toMatchObject({ ok: true })
+  })
+
   test('blocks invalid canonical limits and preserves them through unrelated edits until repair', () => {
     const document = parseGitLabProjectProfileDocument([{
       id: 'invalid-canonical',
@@ -275,6 +513,33 @@ describe('GitLab project profiles', () => {
 
   test('matches the backend stored-context boundary and preserves oversized alias input', () => {
     const exactContext = 'x'.repeat(64_000)
+    for (const sourceKey of [
+      'reviewContextMarkdown',
+      'review_context_markdown',
+      'contextMarkdown',
+      'context_markdown',
+    ]) {
+      const exactDocument = parseGitLabProjectProfileDocument([{
+        id: `exact-${sourceKey}`,
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-uf',
+        [sourceKey]: exactContext,
+      }])
+      expect(validateGitLabProjectProfileDocument(exactDocument), sourceKey).toEqual([])
+
+      const oversizedDocument = parseGitLabProjectProfileDocument([{
+        id: `oversized-${sourceKey}`,
+        host: 'gitlab.example.com',
+        projectId: 3,
+        nine1botProjectID: 'project-uf',
+        [sourceKey]: `${exactContext}x`,
+      }])
+      expect(validateGitLabProjectProfileDocument(oversizedDocument), sourceKey).toEqual([
+        expect.objectContaining({ code: 'profile_review_context_too_large', field: sourceKey }),
+      ])
+    }
+
     const exact = parseGitLabProjectProfileDocument([{
       id: 'exact-context',
       host: 'gitlab.example.com',

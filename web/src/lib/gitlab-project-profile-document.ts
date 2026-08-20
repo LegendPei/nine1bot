@@ -2,7 +2,16 @@ import {
   GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH,
 } from '@nine1bot/platform-gitlab/review/limits'
 import {
-  gitLabProjectHost,
+  gitLabReviewProjectProfileInputDescriptorList,
+  gitLabReviewProjectProfileInputDescriptors,
+  gitLabReviewProjectProfileSourceKeys,
+  hasGitLabReviewProjectProfileRepresentation,
+  selectGitLabReviewProjectProfileValue,
+  validateGitLabReviewProjectProfileRepresentations,
+  type GitLabReviewProjectProfileInputDescriptor,
+  type GitLabReviewProjectProfileRepresentationIssue,
+} from '@nine1bot/platform-gitlab/review/project-profile-input'
+import {
   parseGitLabProjectProfiles,
   type GitLabProjectProfile,
 } from './gitlab-project-profiles'
@@ -12,6 +21,7 @@ export type GitLabProjectProfileDiagnostic = {
   message: string
   index?: number
   profileId?: string
+  field?: string
 }
 
 export type GitLabProjectProfileDocument = {
@@ -74,48 +84,47 @@ export function validateGitLabProjectProfileDocument(
       continue
     }
 
-    const id = optionalText(entry.id)
+    const representationIssues = validateGitLabReviewProjectProfileRepresentations(entry)
+    const id = selectGitLabReviewProjectProfileValue(
+      entry,
+      gitLabReviewProjectProfileInputDescriptors.id,
+    )?.value
+    for (const issue of representationIssues) {
+      diagnostics.push(representationDiagnostic(issue, index, id))
+    }
     if (!id) {
-      diagnostics.push(diagnostic('profile_id_missing', '缺少有效的档案 ID。', index))
+      if (!hasGitLabReviewProjectProfileRepresentation(entry, gitLabReviewProjectProfileInputDescriptors.id)) {
+        diagnostics.push(diagnostic('profile_id_missing', '缺少有效的档案 ID。', index))
+      }
       continue
     }
-    const projectId = entry.projectId ?? entry.project_id
-    if (!isProjectId(projectId)) {
-      diagnostics.push(diagnostic('profile_project_id_missing', '缺少有效的 GitLab 项目 ID。', index, id))
+    const projectId = selectGitLabReviewProjectProfileValue(
+      entry,
+      gitLabReviewProjectProfileInputDescriptors.projectId,
+    )?.value
+    if (projectId === undefined) {
+      if (!hasGitLabReviewProjectProfileRepresentation(entry, gitLabReviewProjectProfileInputDescriptors.projectId)) {
+        diagnostics.push(diagnostic('profile_project_id_missing', '缺少有效的 GitLab 项目 ID。', index, id))
+      }
       continue
     }
 
-    const host = gitLabProjectHost(entry.host)
-    if (!host) diagnostics.push(diagnostic('profile_host_invalid', 'GitLab host 无效。', index, id))
-    const binding = optionalText(entry.nine1botProjectID ?? entry.nine1bot_project_id)
-    if (!binding) diagnostics.push(diagnostic('profile_binding_missing', '尚未绑定 Nine1Bot 项目。', index, id))
-    const maxContextBytes = entry.maxContextBytes ?? entry.max_context_bytes
-    const maxFiles = entry.maxFiles ?? entry.max_files
-    if (maxContextBytes !== undefined && !isPositiveNumber(maxContextBytes)) {
-      diagnostics.push(diagnostic(
-        'profile_max_context_bytes_invalid',
-        '上下文预算必须是有限正数。',
-        index,
-        id,
-      ))
+    const host = selectGitLabReviewProjectProfileValue(
+      entry,
+      gitLabReviewProjectProfileInputDescriptors.host,
+    )?.value
+    if (!host && !hasGitLabReviewProjectProfileRepresentation(entry, gitLabReviewProjectProfileInputDescriptors.host)) {
+      diagnostics.push(diagnostic('profile_host_invalid', 'GitLab host 无效。', index, id))
     }
-    if (maxFiles !== undefined && !isPositiveNumber(maxFiles)) {
-      diagnostics.push(diagnostic('profile_max_files_invalid', '文件上限必须是有限正数。', index, id))
-    }
-    const reviewContext = entry.reviewContextMarkdown
-      ?? entry.review_context_markdown
-      ?? entry.contextMarkdown
-      ?? entry.context_markdown
+    const binding = selectGitLabReviewProjectProfileValue(
+      entry,
+      gitLabReviewProjectProfileInputDescriptors.nine1botProjectID,
+    )?.value
     if (
-      typeof reviewContext === 'string'
-      && reviewContext.length > GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
+      !binding
+      && !hasGitLabReviewProjectProfileRepresentation(entry, gitLabReviewProjectProfileInputDescriptors.nine1botProjectID)
     ) {
-      diagnostics.push(diagnostic(
-        'profile_review_context_too_large',
-        `项目审查上下文不能超过 ${GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH} 个字符。`,
-        index,
-        id,
-      ))
+      diagnostics.push(diagnostic('profile_binding_missing', '尚未绑定 Nine1Bot 项目。', index, id))
     }
 
     if (ids.has(id)) diagnostics.push(diagnostic('profile_id_duplicate', `档案 ID ${id} 重复。`, index, id))
@@ -128,19 +137,6 @@ export function validateGitLabProjectProfileDocument(
       identities.add(identity)
     }
 
-    if (entry.ci !== undefined && !isRecord(entry.ci)) {
-      diagnostics.push(diagnostic('profile_ci_invalid', 'CI 配置必须是对象。', index, id))
-      continue
-    }
-    const ci = isRecord(entry.ci) ? entry.ci : {}
-    const maxJobLogs = ci.maxJobLogs ?? ci.max_job_logs ?? ci.maxFailedJobs ?? ci.max_failed_jobs
-    const maxJobLogBytes = ci.maxJobLogBytes ?? ci.max_job_log_bytes
-    if (maxJobLogs !== undefined && !isPositiveNumber(maxJobLogs)) {
-      diagnostics.push(diagnostic('profile_ci_max_job_logs_invalid', 'CI 日志数量必须是正数。', index, id))
-    }
-    if (maxJobLogBytes !== undefined && !isPositiveNumber(maxJobLogBytes)) {
-      diagnostics.push(diagnostic('profile_ci_max_job_log_bytes_invalid', 'CI 日志字节上限必须是正数。', index, id))
-    }
   }
   return diagnostics
 }
@@ -187,32 +183,102 @@ export function serializeGitLabProjectProfileDocument(
   return { ok: true, value: JSON.stringify(entries, null, 2) }
 }
 
+function representationDiagnostic(
+  issue: GitLabReviewProjectProfileRepresentationIssue,
+  index: number,
+  profileId?: string,
+) {
+  const details: Record<string, { code: string; message: string }> = {
+    project_profile_id_missing: { code: 'profile_id_missing', message: '缺少有效的档案 ID。' },
+    project_profile_host_invalid: { code: 'profile_host_invalid', message: 'GitLab host 无效。' },
+    project_profile_project_id_missing: {
+      code: 'profile_project_id_missing',
+      message: '缺少有效的 GitLab 项目 ID。',
+    },
+    project_binding_missing: { code: 'profile_binding_missing', message: '尚未绑定 Nine1Bot 项目。' },
+    project_profile_path_with_namespace_invalid: {
+      code: 'profile_path_with_namespace_invalid',
+      message: '项目路径必须是非空字符串。',
+    },
+    project_profile_display_name_invalid: {
+      code: 'profile_display_name_invalid',
+      message: '显示名称必须是非空字符串。',
+    },
+    project_profile_enabled_invalid: { code: 'profile_enabled_invalid', message: '启用状态必须是布尔值。' },
+    project_profile_review_context_invalid: {
+      code: 'profile_review_context_invalid',
+      message: '项目审查上下文必须是非空字符串。',
+    },
+    project_profile_review_context_too_large: {
+      code: 'profile_review_context_too_large',
+      message: `项目审查上下文不能超过 ${GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH} 个字符。`,
+    },
+    project_profile_review_focus_invalid: {
+      code: 'profile_review_focus_invalid',
+      message: '审查重点必须是非空字符串数组。',
+    },
+    project_profile_include_path_prefixes_invalid: {
+      code: 'profile_include_path_prefixes_invalid',
+      message: '包含路径必须是非空字符串数组。',
+    },
+    project_profile_exclude_path_patterns_invalid: {
+      code: 'profile_exclude_path_patterns_invalid',
+      message: '排除路径必须是非空字符串数组。',
+    },
+    project_profile_max_context_bytes_invalid: {
+      code: 'profile_max_context_bytes_invalid',
+      message: '上下文预算必须是有限正数。',
+    },
+    project_profile_max_files_invalid: {
+      code: 'profile_max_files_invalid',
+      message: '文件上限必须是有限正数。',
+    },
+    project_profile_ci_invalid: { code: 'profile_ci_invalid', message: 'CI 配置必须是对象。' },
+    project_profile_ci_max_job_logs_invalid: {
+      code: 'profile_ci_max_job_logs_invalid',
+      message: 'CI 日志数量必须是正数。',
+    },
+    project_profile_ci_max_job_log_bytes_invalid: {
+      code: 'profile_ci_max_job_log_bytes_invalid',
+      message: 'CI 日志字节上限必须是正数。',
+    },
+  }
+  const detail = details[issue.code] ?? { code: 'profile_invalid', message: '项目档案字段无效。' }
+  return diagnostic(detail.code, detail.message, index, profileId, issue.sourceKey)
+}
+
 function updateRawProfile(raw: unknown, previous: GitLabProjectProfile, next: GitLabProjectProfile) {
   const output = isRecord(raw) ? { ...raw } : {}
-  updateField(output, previous.id, next.id, 'id', [])
-  updateField(output, previous.host, next.host, 'host', [])
-  updateField(output, previous.projectId, next.projectId, 'projectId', ['project_id'])
-  updateField(output, previous.nine1botProjectID, next.nine1botProjectID, 'nine1botProjectID', ['nine1bot_project_id'])
-  updateField(output, previous.pathWithNamespace, next.pathWithNamespace, 'pathWithNamespace', ['path_with_namespace'])
-  updateField(output, previous.displayName, next.displayName, 'displayName', ['display_name'])
-  updateField(output, previous.enabled, next.enabled, 'enabled', [])
-  updateField(output, previous.reviewContextMarkdown, next.reviewContextMarkdown, 'reviewContextMarkdown', [
-    'review_context_markdown',
-    'contextMarkdown',
-    'context_markdown',
-  ])
-  updateField(output, previous.reviewFocus, next.reviewFocus, 'reviewFocus', ['review_focus'])
-  updateField(output, previous.includePathPrefixes, next.includePathPrefixes, 'includePathPrefixes', ['include_path_prefixes'])
-  updateField(output, previous.excludePathPatterns, next.excludePathPatterns, 'excludePathPatterns', ['exclude_path_patterns'])
-  updateField(output, previous.maxContextBytes, next.maxContextBytes, 'maxContextBytes', ['max_context_bytes'])
-  updateField(output, previous.maxFiles, next.maxFiles, 'maxFiles', ['max_files'])
+  const descriptors = gitLabReviewProjectProfileInputDescriptors
+  updateField(output, previous.id, next.id, descriptors.id)
+  updateField(output, previous.host, next.host, descriptors.host)
+  updateField(output, previous.projectId, next.projectId, descriptors.projectId)
+  updateField(output, previous.nine1botProjectID, next.nine1botProjectID, descriptors.nine1botProjectID)
+  updateField(output, previous.pathWithNamespace, next.pathWithNamespace, descriptors.pathWithNamespace)
+  updateField(output, previous.displayName, next.displayName, descriptors.displayName)
+  updateField(output, previous.enabled, next.enabled, descriptors.enabled)
+  updateField(
+    output,
+    previous.reviewContextMarkdown,
+    next.reviewContextMarkdown,
+    descriptors.reviewContextMarkdown,
+  )
+  updateField(output, previous.reviewFocus, next.reviewFocus, descriptors.reviewFocus)
+  updateField(output, previous.includePathPrefixes, next.includePathPrefixes, descriptors.includePathPrefixes)
+  updateField(output, previous.excludePathPatterns, next.excludePathPatterns, descriptors.excludePathPatterns)
+  updateField(output, previous.maxContextBytes, next.maxContextBytes, descriptors.maxContextBytes)
+  updateField(output, previous.maxFiles, next.maxFiles, descriptors.maxFiles)
 
-  if (!sameValue(previous.ci, next.ci)) {
+  const maxJobLogsChanged = !sameValue(previous.ci.maxJobLogs, next.ci.maxJobLogs)
+  const maxJobLogBytesChanged = !sameValue(previous.ci.maxJobLogBytes, next.ci.maxJobLogBytes)
+  if (maxJobLogsChanged || maxJobLogBytesChanged) {
     const ci = isRecord(output.ci) ? { ...output.ci } : {}
-    for (const key of ['maxJobLogs', 'max_job_logs', 'maxFailedJobs', 'max_failed_jobs']) delete ci[key]
-    for (const key of ['maxJobLogBytes', 'max_job_log_bytes']) delete ci[key]
-    ci.maxJobLogs = next.ci.maxJobLogs
-    ci.maxJobLogBytes = next.ci.maxJobLogBytes
+    if (maxJobLogsChanged) {
+      updateField(ci, previous.ci.maxJobLogs, next.ci.maxJobLogs, descriptors.maxJobLogs)
+    }
+    if (maxJobLogBytesChanged) {
+      updateField(ci, previous.ci.maxJobLogBytes, next.ci.maxJobLogBytes, descriptors.maxJobLogBytes)
+    }
     output.ci = ci
   }
   return output
@@ -220,22 +286,21 @@ function updateRawProfile(raw: unknown, previous: GitLabProjectProfile, next: Gi
 
 function canonicalProfileEntry(raw: unknown, profile: GitLabProjectProfile) {
   const output = isRecord(raw) ? { ...raw } : {}
-  for (const key of [
-    'id', 'host', 'projectId', 'project_id', 'nine1botProjectID', 'nine1bot_project_id',
-    'pathWithNamespace', 'path_with_namespace', 'displayName', 'display_name', 'enabled',
-    'reviewContextMarkdown', 'review_context_markdown', 'contextMarkdown', 'context_markdown',
-    'reviewFocus', 'review_focus', 'includePathPrefixes', 'include_path_prefixes',
-    'excludePathPatterns', 'exclude_path_patterns', 'maxContextBytes', 'max_context_bytes',
-    'maxFiles', 'max_files', 'ci',
-  ]) delete output[key]
+  for (const descriptor of gitLabReviewProjectProfileInputDescriptorList) {
+    if (descriptor.scope !== 'profile') continue
+    for (const key of gitLabReviewProjectProfileSourceKeys(descriptor)) delete output[key]
+  }
 
   const rawCi = isRecord((raw as Record<string, unknown> | undefined)?.ci)
     ? { ...(raw as Record<string, unknown>).ci as Record<string, unknown> }
     : {}
-  for (const key of [
-    'maxJobLogs', 'max_job_logs', 'maxFailedJobs', 'max_failed_jobs',
-    'maxJobLogBytes', 'max_job_log_bytes', 'enabled', 'includeFailedJobLogs', 'include_failed_job_logs',
-  ]) delete rawCi[key]
+  for (const descriptor of [
+    gitLabReviewProjectProfileInputDescriptors.maxJobLogs,
+    gitLabReviewProjectProfileInputDescriptors.maxJobLogBytes,
+  ]) {
+    for (const key of gitLabReviewProjectProfileSourceKeys(descriptor)) delete rawCi[key]
+  }
+  for (const key of ['enabled', 'includeFailedJobLogs', 'include_failed_job_logs']) delete rawCi[key]
 
   return {
     ...output,
@@ -264,33 +329,25 @@ function updateField(
   output: Record<string, unknown>,
   previous: unknown,
   next: unknown,
-  canonical: string,
-  aliases: string[],
+  descriptor: GitLabReviewProjectProfileInputDescriptor,
 ) {
   if (sameValue(previous, next)) return
-  for (const key of [canonical, ...aliases]) delete output[key]
-  if (next !== undefined) output[canonical] = next
+  for (const key of gitLabReviewProjectProfileSourceKeys(descriptor)) delete output[key]
+  if (next !== undefined) output[descriptor.canonicalKey] = next
 }
 
-function diagnostic(code: string, message: string, index: number, profileId?: string) {
-  return { code, message, index, profileId }
+function diagnostic(code: string, message: string, index: number, profileId?: string, field?: string) {
+  return {
+    code,
+    message,
+    index,
+    ...(profileId ? { profileId } : {}),
+    ...(field ? { field } : {}),
+  }
 }
 
 function sameValue(left: unknown, right: unknown) {
   return JSON.stringify(left) === JSON.stringify(right)
-}
-
-function optionalText(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
-}
-
-function isProjectId(value: unknown): value is string | number {
-  return (typeof value === 'string' && value.trim().length > 0)
-    || (typeof value === 'number' && Number.isFinite(value))
-}
-
-function isPositiveNumber(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

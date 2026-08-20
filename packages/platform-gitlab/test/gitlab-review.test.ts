@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import * as gitLabReview from '../src'
 import {
   aggregateReviewFindings,
@@ -889,14 +889,286 @@ describe('GitLab review foundation', () => {
       'project_profile_project_id_missing:missing-project',
       'project_profile_id_duplicate:duplicate',
       'project_profile_identity_duplicate:gitlab.example.com:4',
-      'project_profile_host_invalid:bad-host',
-      'project_profile_ci_max_job_logs_invalid:bad-ci',
-      'project_profile_ci_max_job_log_bytes_invalid:bad-ci',
+      'project_profile_host_invalid:bad-host:host',
+      'project_profile_ci_max_job_logs_invalid:bad-ci:maxJobLogs',
+      'project_profile_ci_max_job_log_bytes_invalid:bad-ci:maxJobLogBytes',
     ]))
     expect(result.profiles.find((profile) => profile.id === 'bad-ci')?.ci).toEqual({
       maxJobLogs: 3,
       maxJobLogBytes: 8_000,
     })
+  })
+
+  test('validates every present canonical and alias representation without collision masking', () => {
+    const descriptors = gitLabReview.gitLabReviewProjectProfileInputDescriptors
+    const cases = [
+      {
+        logicalField: 'projectId', descriptor: descriptors.projectId, canonical: 'projectId',
+        aliases: ['project_id'], valid: 3, invalid: { malformed: true },
+        code: 'project_profile_project_id_missing', scope: 'profile',
+      },
+      {
+        logicalField: 'nine1botProjectID', descriptor: descriptors.nine1botProjectID,
+        canonical: 'nine1botProjectID', aliases: ['nine1bot_project_id'], valid: 'project-uf', invalid: 7,
+        code: 'project_binding_missing', scope: 'profile',
+      },
+      {
+        logicalField: 'pathWithNamespace', descriptor: descriptors.pathWithNamespace,
+        canonical: 'pathWithNamespace', aliases: ['path_with_namespace'], valid: 'root/uftest', invalid: false,
+        code: 'project_profile_path_with_namespace_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'displayName', descriptor: descriptors.displayName,
+        canonical: 'displayName', aliases: ['display_name'], valid: 'UF Test', invalid: [],
+        code: 'project_profile_display_name_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'reviewContextMarkdown', descriptor: descriptors.reviewContextMarkdown,
+        canonical: 'reviewContextMarkdown',
+        aliases: ['review_context_markdown', 'contextMarkdown', 'context_markdown'],
+        valid: 'Review authorization boundaries.', invalid: 9,
+        code: 'project_profile_review_context_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'reviewFocus', descriptor: descriptors.reviewFocus,
+        canonical: 'reviewFocus', aliases: ['review_focus'], valid: ['security'], invalid: ['security', 9],
+        code: 'project_profile_review_focus_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'includePathPrefixes', descriptor: descriptors.includePathPrefixes,
+        canonical: 'includePathPrefixes', aliases: ['include_path_prefixes'], valid: ['src/'], invalid: [null],
+        code: 'project_profile_include_path_prefixes_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'excludePathPatterns', descriptor: descriptors.excludePathPatterns,
+        canonical: 'excludePathPatterns', aliases: ['exclude_path_patterns'], valid: ['**/*.gen.ts'], invalid: 'src/',
+        code: 'project_profile_exclude_path_patterns_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'maxContextBytes', descriptor: descriptors.maxContextBytes,
+        canonical: 'maxContextBytes', aliases: ['max_context_bytes'], valid: 4_000, invalid: Number.POSITIVE_INFINITY,
+        code: 'project_profile_max_context_bytes_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'maxFiles', descriptor: descriptors.maxFiles,
+        canonical: 'maxFiles', aliases: ['max_files'], valid: 20, invalid: 0,
+        code: 'project_profile_max_files_invalid', scope: 'profile',
+      },
+      {
+        logicalField: 'maxJobLogs', descriptor: descriptors.maxJobLogs,
+        canonical: 'maxJobLogs', aliases: ['max_job_logs', 'maxFailedJobs', 'max_failed_jobs'], valid: 4, invalid: 0,
+        code: 'project_profile_ci_max_job_logs_invalid', scope: 'ci',
+      },
+      {
+        logicalField: 'maxJobLogBytes', descriptor: descriptors.maxJobLogBytes,
+        canonical: 'maxJobLogBytes', aliases: ['max_job_log_bytes'], valid: 8_000, invalid: '8000',
+        code: 'project_profile_ci_max_job_log_bytes_invalid', scope: 'ci',
+      },
+    ] as const
+    const entryFor = (scope: 'profile' | 'ci', values: Record<string, unknown>) => (
+      scope === 'ci' ? { ci: values } : values
+    )
+
+    for (const field of cases) {
+      for (const alias of field.aliases) {
+        const canonicalFirst = entryFor(field.scope, {
+          [field.canonical]: field.valid,
+          [alias]: field.invalid,
+        })
+        expect(
+          gitLabReview.validateGitLabReviewProjectProfileRepresentations(canonicalFirst)
+            .filter((issue) => issue.logicalField === field.logicalField),
+          `${field.logicalField}: valid canonical must not mask ${alias}`,
+        ).toEqual([{
+          code: field.code,
+          logicalField: field.logicalField,
+          sourceKey: alias,
+        }])
+        expect(gitLabReview.selectGitLabReviewProjectProfileValue(canonicalFirst, field.descriptor)).toEqual({
+          sourceKey: field.canonical,
+          value: field.valid,
+        })
+
+        const aliasFallback = entryFor(field.scope, {
+          [field.canonical]: field.invalid,
+          [alias]: field.valid,
+        })
+        expect(
+          gitLabReview.validateGitLabReviewProjectProfileRepresentations(aliasFallback)
+            .filter((issue) => issue.logicalField === field.logicalField),
+          `${field.logicalField}: valid ${alias} must not mask invalid canonical`,
+        ).toEqual([{
+          code: field.code,
+          logicalField: field.logicalField,
+          sourceKey: field.canonical,
+        }])
+        expect(gitLabReview.selectGitLabReviewProjectProfileValue(aliasFallback, field.descriptor)).toEqual({
+          sourceKey: alias,
+          value: field.valid,
+        })
+
+        const explicitNull = entryFor(field.scope, { [alias]: null })
+        expect(
+          gitLabReview.validateGitLabReviewProjectProfileRepresentations(explicitNull)
+            .filter((issue) => issue.logicalField === field.logicalField),
+          `${field.logicalField}: explicit null ${alias} differs from missing`,
+        ).toEqual([{
+          code: field.code,
+          logicalField: field.logicalField,
+          sourceKey: alias,
+        }])
+      }
+    }
+
+    expect(gitLabReview.validateGitLabReviewProjectProfileRepresentations({})).toEqual([])
+    expect(gitLabReview.validateGitLabReviewProjectProfileRepresentations({
+      id: null,
+      host: null,
+      enabled: null,
+      ci: null,
+      displayName: undefined,
+    })).toEqual([
+      { code: 'project_profile_id_missing', logicalField: 'id', sourceKey: 'id' },
+      { code: 'project_profile_host_invalid', logicalField: 'host', sourceKey: 'host' },
+      { code: 'project_profile_display_name_invalid', logicalField: 'displayName', sourceKey: 'displayName' },
+      { code: 'project_profile_enabled_invalid', logicalField: 'enabled', sourceKey: 'enabled' },
+      { code: 'project_profile_ci_invalid', logicalField: 'ci', sourceKey: 'ci' },
+    ])
+  })
+
+  test('enforces 64000/64001 code-unit boundaries for all four project context representations', () => {
+    const exact = 'x'.repeat(64_000)
+    const oversized = `${exact}x`
+    const descriptor = gitLabReview.gitLabReviewProjectProfileInputDescriptors.reviewContextMarkdown
+    for (const sourceKey of [
+      'reviewContextMarkdown',
+      'review_context_markdown',
+      'contextMarkdown',
+      'context_markdown',
+    ]) {
+      const exactEntry = { [sourceKey]: exact }
+      expect(gitLabReview.validateGitLabReviewProjectProfileRepresentations(exactEntry), sourceKey).toEqual([])
+      expect(gitLabReview.selectGitLabReviewProjectProfileValue(exactEntry, descriptor)).toEqual({
+        sourceKey,
+        value: exact,
+      })
+      expect(
+        gitLabReview.validateGitLabReviewProjectProfileRepresentations({ [sourceKey]: oversized }),
+        sourceKey,
+      ).toEqual([{
+        code: 'project_profile_review_context_too_large',
+        logicalField: 'reviewContextMarkdown',
+        sourceKey,
+      }])
+    }
+  })
+
+  test('reports colliding profile representations while selecting valid runtime fallbacks', () => {
+    const exactContext = 'x'.repeat(64_000)
+    const parsed = parseGitLabReviewProjectProfiles([{
+      id: 'canonical-first',
+      host: 'gitlab-one.example.com',
+      projectId: 3,
+      project_id: { malformed: true },
+      nine1botProjectID: 'project-one',
+      nine1bot_project_id: 9,
+      reviewContextMarkdown: exactContext,
+      context_markdown: `${exactContext}x`,
+      reviewFocus: ['security'],
+      review_focus: ['security', 9],
+      maxContextBytes: 4_000,
+      max_context_bytes: '4000',
+      maxFiles: 20,
+      max_files: 0,
+      ci: {
+        maxJobLogs: 4,
+        max_job_logs: 0,
+        maxFailedJobs: 'four',
+        max_failed_jobs: null,
+        maxJobLogBytes: 8_000,
+        max_job_log_bytes: null,
+      },
+    }, {
+      id: 'alias-fallback',
+      host: 'gitlab-two.example.com',
+      projectId: { malformed: true },
+      project_id: 4,
+      nine1botProjectID: null,
+      nine1bot_project_id: 'project-two',
+      pathWithNamespace: false,
+      path_with_namespace: 'root/two',
+      displayName: 7,
+      display_name: 'Project Two',
+      reviewContextMarkdown: 7,
+      review_context_markdown: 'Alias context',
+      reviewFocus: null,
+      review_focus: ['api'],
+      includePathPrefixes: null,
+      include_path_prefixes: ['src/'],
+      excludePathPatterns: null,
+      exclude_path_patterns: ['**/*.gen.ts'],
+      maxContextBytes: 0,
+      max_context_bytes: 5_000,
+      maxFiles: null,
+      max_files: 30,
+      ci: {
+        maxJobLogs: null,
+        max_failed_jobs: 5,
+        maxJobLogBytes: null,
+        max_job_log_bytes: 9_000,
+      },
+    }])
+
+    expect(parsed.errors).toEqual(expect.arrayContaining([
+      'project_profile_project_id_missing:canonical-first:project_id',
+      'project_binding_missing:canonical-first:nine1bot_project_id',
+      'project_profile_review_context_too_large:canonical-first:context_markdown',
+      'project_profile_review_focus_invalid:canonical-first:review_focus',
+      'project_profile_max_context_bytes_invalid:canonical-first:max_context_bytes',
+      'project_profile_max_files_invalid:canonical-first:max_files',
+      'project_profile_ci_max_job_logs_invalid:canonical-first:max_job_logs',
+      'project_profile_ci_max_job_logs_invalid:canonical-first:maxFailedJobs',
+      'project_profile_ci_max_job_logs_invalid:canonical-first:max_failed_jobs',
+      'project_profile_ci_max_job_log_bytes_invalid:canonical-first:max_job_log_bytes',
+      'project_profile_project_id_missing:alias-fallback:projectId',
+      'project_binding_missing:alias-fallback:nine1botProjectID',
+      'project_profile_path_with_namespace_invalid:alias-fallback:pathWithNamespace',
+      'project_profile_display_name_invalid:alias-fallback:displayName',
+      'project_profile_review_context_invalid:alias-fallback:reviewContextMarkdown',
+      'project_profile_review_focus_invalid:alias-fallback:reviewFocus',
+      'project_profile_include_path_prefixes_invalid:alias-fallback:includePathPrefixes',
+      'project_profile_exclude_path_patterns_invalid:alias-fallback:excludePathPatterns',
+      'project_profile_max_context_bytes_invalid:alias-fallback:maxContextBytes',
+      'project_profile_max_files_invalid:alias-fallback:maxFiles',
+      'project_profile_ci_max_job_logs_invalid:alias-fallback:maxJobLogs',
+      'project_profile_ci_max_job_log_bytes_invalid:alias-fallback:maxJobLogBytes',
+    ]))
+    expect(parsed.profiles).toEqual([
+      expect.objectContaining({
+        id: 'canonical-first',
+        projectId: 3,
+        nine1botProjectID: 'project-one',
+        reviewContextMarkdown: exactContext,
+        reviewFocus: ['security'],
+        maxContextBytes: 4_000,
+        maxFiles: 20,
+        ci: { maxJobLogs: 4, maxJobLogBytes: 8_000 },
+      }),
+      expect.objectContaining({
+        id: 'alias-fallback',
+        projectId: 4,
+        nine1botProjectID: 'project-two',
+        pathWithNamespace: 'root/two',
+        displayName: 'Project Two',
+        reviewContextMarkdown: 'Alias context',
+        reviewFocus: ['api'],
+        includePathPrefixes: ['src/'],
+        excludePathPatterns: ['**/*.gen.ts'],
+        maxContextBytes: 5_000,
+        maxFiles: 30,
+        ci: { maxJobLogs: 5, maxJobLogBytes: 9_000 },
+      }),
+    ])
   })
 
   test('reports invalid canonical and alias project context limits as configuration errors', () => {
@@ -917,10 +1189,10 @@ describe('GitLab review foundation', () => {
     }])
 
     expect(parsed.errors).toEqual([
-      'project_profile_max_context_bytes_invalid:canonical-limits',
-      'project_profile_max_files_invalid:canonical-limits',
-      'project_profile_max_context_bytes_invalid:alias-limits',
-      'project_profile_max_files_invalid:alias-limits',
+      'project_profile_max_context_bytes_invalid:canonical-limits:maxContextBytes',
+      'project_profile_max_files_invalid:canonical-limits:maxFiles',
+      'project_profile_max_context_bytes_invalid:alias-limits:max_context_bytes',
+      'project_profile_max_files_invalid:alias-limits:max_files',
     ])
     expect(parsed.profiles).toEqual([
       expect.objectContaining({ id: 'canonical-limits', maxContextBytes: undefined, maxFiles: undefined }),
@@ -935,7 +1207,7 @@ describe('GitLab review foundation', () => {
         nine1botProjectID: 'project-uf',
         maxContextBytes: '500',
       }],
-    }).configurationErrors).toContain('project_profile_max_context_bytes_invalid:canonical-limits')
+    }).configurationErrors).toContain('project_profile_max_context_bytes_invalid:canonical-limits:maxContextBytes')
   })
 
   test('enforces the stored project context limit for canonical and alias fields', () => {
@@ -956,51 +1228,55 @@ describe('GitLab review foundation', () => {
 
     expect(parsed.profiles[0]?.reviewContextMarkdown).toBe(exactContext)
     expect(parsed.errors).toEqual([
-      'project_profile_review_context_too_large:oversized-context',
+      'project_profile_review_context_too_large:oversized-context:context_markdown',
     ])
     expect(parsed.profiles[1]?.reviewContextMarkdown).toBeUndefined()
   })
 
-  test('truncates large ASCII and multibyte context blocks within a linear-time budget', () => {
-    const trigger = {
-      host: 'gitlab.example.com',
-      projectId: 3,
-      objectType: 'mr' as const,
-      objectIid: 1,
-      headSha: 'head',
-      mode: 'webhook' as const,
+  test('truncates context with constant UTF-8 encodes and one forward code-point scan', () => {
+    const marker = '[context block truncated]'
+    const measure = (content: string, maxBytes: number) => {
+      const encode = spyOn(TextEncoder.prototype, 'encode')
+      const codePointAt = spyOn(String.prototype, 'codePointAt')
+      try {
+        const rendered = gitLabReview.truncateGitLabReviewContextBlock(content, maxBytes, marker)
+        return {
+          rendered,
+          encodeCalls: encode.mock.calls.length,
+          scannedCodePoints: codePointAt.mock.calls.length,
+        }
+      } finally {
+        codePointAt.mockRestore()
+        encode.mockRestore()
+      }
     }
-    const samples = [
-      'a'.repeat(50_000),
-      '你😀'.repeat(10_000),
-    ]
 
-    for (const [index, content] of samples.entries()) {
-      const startedAt = performance.now()
-      const context = buildGitLabReviewContext({
-        trigger,
-        changes: { changes: [] },
-        maxDiffBytes: 101,
-        additionalContextBlocks: [{
-          id: `large-${index}`,
-          layer: 'platform',
-          source: 'test.large-context',
-          enabled: true,
-          priority: 1,
-          lifecycle: 'turn',
-          visibility: 'system-required',
-          content,
-        }],
-      })
-      const elapsedMs = performance.now() - startedAt
-      const rendered = context.contextBlocks.find((block) => block.id === `large-${index}`)?.content ?? ''
-      const prefix = rendered.split('\n[context block truncated]')[0]!
+    const ascii = 'a'.repeat(50_000)
+    const asciiResult = measure(ascii, 101)
+    expect(asciiResult.encodeCalls).toBeLessThanOrEqual(2)
+    expect(asciiResult.scannedCodePoints).toBeGreaterThan(0)
+    expect(asciiResult.scannedCodePoints).toBeLessThanOrEqual(ascii.length + 1)
+    expect(asciiResult.rendered.endsWith(`\n${marker}`)).toBe(true)
+    expect(new TextEncoder().encode(asciiResult.rendered).byteLength).toBeLessThanOrEqual(101)
 
-      expect(new TextEncoder().encode(rendered).byteLength).toBeLessThanOrEqual(101)
-      expect(new TextDecoder().decode(new TextEncoder().encode(prefix))).toBe(prefix)
-      expect(elapsedMs).toBeLessThan(750)
-    }
-  }, 30_000)
+    const multibyte = '你😀'.repeat(10_000)
+    const multibyteResult = measure(multibyte, 31)
+    expect(multibyteResult.encodeCalls).toBeLessThanOrEqual(2)
+    expect(multibyteResult.scannedCodePoints).toBeGreaterThan(0)
+    expect(multibyteResult.scannedCodePoints).toBeLessThanOrEqual(multibyte.length + 1)
+    expect(multibyteResult.rendered).toBe(`你\n${marker}`)
+    expect(multibyteResult.rendered).not.toContain('\uFFFD')
+    expect(new TextDecoder('utf-8', { fatal: true }).decode(
+      new TextEncoder().encode(multibyteResult.rendered),
+    )).toBe(multibyteResult.rendered)
+    expect(new TextEncoder().encode(multibyteResult.rendered).byteLength).toBeLessThanOrEqual(31)
+
+    const tinyBudget = measure(multibyte, 5)
+    expect(tinyBudget.encodeCalls).toBeLessThanOrEqual(2)
+    expect(tinyBudget.scannedCodePoints).toBeLessThanOrEqual(multibyte.length + marker.length + 1)
+    expect(tinyBudget.rendered).toBe('[cont')
+    expect(new TextEncoder().encode(tinyBudget.rendered).byteLength).toBeLessThanOrEqual(5)
+  })
 
   test('requires an enabled and bound usable project profile when review is enabled', () => {
     const settings = normalizeGitLabReviewSettings({

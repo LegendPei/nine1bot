@@ -1,5 +1,11 @@
 import { normalizeGitLabAuthority } from './host'
-import { GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH } from './limits'
+import {
+  gitLabReviewProjectProfileInputDescriptors,
+  hasGitLabReviewProjectProfileRepresentation,
+  selectGitLabReviewProjectProfileValue,
+  validateGitLabReviewProjectProfileRepresentations,
+  type GitLabReviewProjectProfileRepresentationIssue,
+} from './project-profile-input'
 
 export type GitLabReviewSettings = {
   enabled: boolean
@@ -161,74 +167,94 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
       continue
     }
 
-    const id = optionalString(item.id)
+    const representationIssues = validateGitLabReviewProjectProfileRepresentations(item)
+    const id = selectGitLabReviewProjectProfileValue(
+      item,
+      gitLabReviewProjectProfileInputDescriptors.id,
+    )?.value
+    for (const issue of representationIssues) {
+      errors.push(projectProfileRepresentationError(issue, id, index))
+    }
     if (!id) {
-      errors.push(`project_profile_id_missing:index:${index}`)
+      if (!hasGitLabReviewProjectProfileRepresentation(item, gitLabReviewProjectProfileInputDescriptors.id)) {
+        errors.push(`project_profile_id_missing:index:${index}`)
+      }
       continue
     }
 
-    const projectId = item.projectId ?? item.project_id
-    if (!validProjectId(projectId)) {
-      errors.push(`project_profile_project_id_missing:${id}`)
+    const projectId = selectGitLabReviewProjectProfileValue(
+      item,
+      gitLabReviewProjectProfileInputDescriptors.projectId,
+    )?.value
+    if (projectId === undefined) {
+      if (!hasGitLabReviewProjectProfileRepresentation(item, gitLabReviewProjectProfileInputDescriptors.projectId)) {
+        errors.push(`project_profile_project_id_missing:${id}`)
+      }
       continue
     }
 
-    const host = normalizeGitLabAuthority(optionalString(item.host))
-    if (!host) errors.push(`project_profile_host_invalid:${id}`)
-
-    const ci = recordValue(item.ci)
-    const maxJobLogsInput = ci?.maxJobLogs
-      ?? ci?.max_job_logs
-      ?? ci?.maxFailedJobs
-      ?? ci?.max_failed_jobs
-    const maxJobLogBytesInput = ci?.maxJobLogBytes ?? ci?.max_job_log_bytes
-    const maxContextBytesInput = item.maxContextBytes ?? item.max_context_bytes
-    const maxFilesInput = item.maxFiles ?? item.max_files
-    const reviewContextInput = item.reviewContextMarkdown
-      ?? item.review_context_markdown
-      ?? item.contextMarkdown
-      ?? item.context_markdown
-    if (maxJobLogsInput !== undefined && !isPositiveNumber(maxJobLogsInput)) {
-      errors.push(`project_profile_ci_max_job_logs_invalid:${id}`)
+    const host = selectGitLabReviewProjectProfileValue(
+      item,
+      gitLabReviewProjectProfileInputDescriptors.host,
+    )?.value
+    if (!host && !hasGitLabReviewProjectProfileRepresentation(item, gitLabReviewProjectProfileInputDescriptors.host)) {
+      errors.push(`project_profile_host_invalid:${id}`)
     }
-    if (maxJobLogBytesInput !== undefined && !isPositiveNumber(maxJobLogBytesInput)) {
-      errors.push(`project_profile_ci_max_job_log_bytes_invalid:${id}`)
-    }
-    if (maxContextBytesInput !== undefined && !isPositiveNumber(maxContextBytesInput)) {
-      errors.push(`project_profile_max_context_bytes_invalid:${id}`)
-    }
-    if (maxFilesInput !== undefined && !isPositiveNumber(maxFilesInput)) {
-      errors.push(`project_profile_max_files_invalid:${id}`)
-    }
-    if (
-      typeof reviewContextInput === 'string'
-      && reviewContextInput.length > GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
-    ) {
-      errors.push(`project_profile_review_context_too_large:${id}`)
-    }
-
-    const reviewContextMarkdown = optionalString(reviewContextInput)
+    const binding = selectGitLabReviewProjectProfileValue(
+      item,
+      gitLabReviewProjectProfileInputDescriptors.nine1botProjectID,
+    )?.value
 
     const profile: GitLabReviewProjectProfile = {
       id,
       host,
       projectId,
-      nine1botProjectID: optionalString(item.nine1botProjectID) ?? optionalString(item.nine1bot_project_id) ?? '',
-      pathWithNamespace: optionalString(item.pathWithNamespace) ?? optionalString(item.path_with_namespace),
-      displayName: optionalString(item.displayName) ?? optionalString(item.display_name),
-      enabled: booleanValue(item.enabled, true),
-      reviewContextMarkdown: reviewContextMarkdown !== undefined
-        && reviewContextMarkdown.length <= GITLAB_REVIEW_PROJECT_CONTEXT_MAX_LENGTH
-        ? reviewContextMarkdown
-        : undefined,
-      reviewFocus: stringList(item.reviewFocus ?? item.review_focus),
-      includePathPrefixes: stringList(item.includePathPrefixes ?? item.include_path_prefixes),
-      excludePathPatterns: stringList(item.excludePathPatterns ?? item.exclude_path_patterns),
-      maxContextBytes: optionalPositiveNumber(maxContextBytesInput),
-      maxFiles: optionalPositiveNumber(maxFilesInput),
+      nine1botProjectID: binding ?? '',
+      pathWithNamespace: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.pathWithNamespace,
+      )?.value,
+      displayName: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.displayName,
+      )?.value,
+      enabled: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.enabled,
+      )?.value ?? true,
+      reviewContextMarkdown: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.reviewContextMarkdown,
+      )?.value,
+      reviewFocus: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.reviewFocus,
+      )?.value ?? [],
+      includePathPrefixes: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.includePathPrefixes,
+      )?.value ?? [],
+      excludePathPatterns: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.excludePathPatterns,
+      )?.value ?? [],
+      maxContextBytes: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.maxContextBytes,
+      )?.value,
+      maxFiles: selectGitLabReviewProjectProfileValue(
+        item,
+        gitLabReviewProjectProfileInputDescriptors.maxFiles,
+      )?.value,
       ci: {
-        maxJobLogs: positiveNumber(maxJobLogsInput, 3),
-        maxJobLogBytes: positiveNumber(maxJobLogBytesInput, 8_000),
+        maxJobLogs: selectGitLabReviewProjectProfileValue(
+          item,
+          gitLabReviewProjectProfileInputDescriptors.maxJobLogs,
+        )?.value ?? 3,
+        maxJobLogBytes: selectGitLabReviewProjectProfileValue(
+          item,
+          gitLabReviewProjectProfileInputDescriptors.maxJobLogBytes,
+        )?.value ?? 8_000,
       },
     }
 
@@ -239,7 +265,12 @@ export function parseGitLabReviewProjectProfiles(input: unknown): {
       if (identities.has(identity)) errors.push(`project_profile_identity_duplicate:${identity}`)
       identities.add(identity)
     }
-    if (!profile.nine1botProjectID) errors.push(`project_binding_missing:${profile.id}`)
+    if (
+      !profile.nine1botProjectID
+      && !hasGitLabReviewProjectProfileRepresentation(item, gitLabReviewProjectProfileInputDescriptors.nine1botProjectID)
+    ) {
+      errors.push(`project_binding_missing:${profile.id}`)
+    }
     profiles.push(profile)
   }
 
@@ -280,6 +311,14 @@ export function gitLabReviewProjectIdsForHookSync(settings: GitLabReviewSettings
       ? settings.includedProjects
       : settings.allowedProjectIds.map((id) => ({ id }))
   return uniqueIds(candidates.map((project) => project.id))
+}
+
+function projectProfileRepresentationError(
+  issue: GitLabReviewProjectProfileRepresentationIssue,
+  profileId: string | undefined,
+  index: number,
+) {
+  return `${issue.code}:${profileId ?? `index:${index}`}:${issue.sourceKey}`
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {
@@ -330,12 +369,6 @@ function optionalSecretRef(input: unknown): GitLabReviewSecretRef | undefined {
     }
   }
   return undefined
-}
-
-function stringList(input: unknown) {
-  return Array.isArray(input)
-    ? input.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
-    : []
 }
 
 function allowedHostList(input: unknown) {
@@ -412,19 +445,6 @@ function positiveNumber(input: unknown, fallback: number) {
 
 function isPositiveNumber(input: unknown): input is number {
   return typeof input === 'number' && Number.isFinite(input) && input > 0
-}
-
-function validProjectId(input: unknown): input is string | number {
-  if (typeof input === 'string') return input.trim().length > 0
-  return typeof input === 'number' && Number.isFinite(input)
-}
-
-function optionalPositiveNumber(input: unknown) {
-  return typeof input === 'number' && Number.isFinite(input) && input > 0 ? input : undefined
-}
-
-function recordValue(input: unknown): Record<string, unknown> | undefined {
-  return isRecord(input) ? input : undefined
 }
 
 function setting(record: Record<string, unknown>, ...keys: string[]) {

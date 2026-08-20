@@ -109,10 +109,10 @@ function boundedBlock(
   maxBytes: number,
   marker: string,
 ) {
-  return { ...block, content: truncateUtf8WithMarker(block.content, maxBytes, marker) }
+  return { ...block, content: truncateGitLabReviewContextBlock(block.content, maxBytes, marker) }
 }
 
-function truncateUtf8WithMarker(value: string, maxBytes: number, marker: string) {
+export function truncateGitLabReviewContextBlock(value: string, maxBytes: number, marker: string) {
   if (byteLength(value) <= maxBytes) return value
   const markerText = `\n${marker}`
   const markerBytes = byteLength(markerText)
