@@ -249,6 +249,12 @@ class GitLabReviewConfigurationError extends Error {
   }
 }
 
+class GitLabReviewWriteHeadReadError extends Error {
+  constructor(readonly originalError: unknown) {
+    super('gitlab_review_write_head_read_failed')
+  }
+}
+
 export function isRecoverableGitLabReviewRejection(error: string | undefined) {
   return Boolean(error && recoverableGitLabReviewRejections.has(error))
 }
@@ -740,7 +746,6 @@ export async function publishGitLabReviewRunResult(input: {
         client,
         trigger,
         objectId,
-        identity,
         assertCurrent() {
           assertReviewRunIdentityCurrent(identity)
           assertPublicationClaimCurrent(claimIdentity)
@@ -775,7 +780,11 @@ export async function publishGitLabReviewRunResult(input: {
     }
   } catch (error) {
     const message = publicationFailureMessage('publish_result', error)
-    ReviewRunStore.failPublication({ ...claimIdentity, error: message })
+    if (isGitLabReviewHeadPolicyError(message)) {
+      ReviewRunStore.rejectPublicationForPolicy({ ...claimIdentity, error: message })
+    } else {
+      ReviewRunStore.failPublication({ ...claimIdentity, error: message })
+    }
     return {
       published: false,
       runId: input.runId,
@@ -840,10 +849,11 @@ function reviewRunStatusForStageResult(status: ReturnType<typeof parseReviewStag
 }
 
 function gitLabApiFailureMessage(operation: string, error: unknown) {
-  if (error instanceof GitLabApiError) {
-    return `gitlab_api_${operation}_failed:${error.status}:${error.statusText || 'unknown'}`
+  const apiError = error instanceof GitLabReviewWriteHeadReadError ? error.originalError : error
+  if (apiError instanceof GitLabApiError) {
+    return `gitlab_api_${operation}_failed:${apiError.status}:${apiError.statusText || 'unknown'}`
   }
-  return `gitlab_api_${operation}_failed:${error instanceof Error ? error.message : String(error)}`
+  return `gitlab_api_${operation}_failed:${apiError instanceof Error ? apiError.message : String(apiError)}`
 }
 
 async function maybeWriteFailureComment(input: {
@@ -869,7 +879,6 @@ async function maybeWriteFailureComment(input: {
     client: guard.client,
     trigger: input.trigger,
     objectId: guard.objectId,
-    identity: input.identity,
     assertCurrent: () => assertReviewRunIdentityCurrent(input.identity),
   })
   try {
@@ -882,7 +891,10 @@ async function maybeWriteFailureComment(input: {
     return { notified: true }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (isGitLabReviewHeadPolicyError(message)) return { notified: false, error: message }
+    if (isGitLabReviewHeadPolicyError(message)) {
+      rejectGitLabReviewRunForHeadPolicy(input.identity, message)
+      return { notified: false, error: message }
+    }
     return { notified: false }
   }
 }
@@ -1186,6 +1198,15 @@ function isGitLabReviewHeadPolicyError(error: string) {
   return error === 'gitlab_review_head_changed' || error === 'gitlab_review_diff_head_unverified'
 }
 
+function rejectGitLabReviewRunForHeadPolicy(identity: ReviewRunIdentity, error: string) {
+  ReviewRunStore.updateIfCurrent(identity, {
+    status: 'rejected',
+    error,
+    rejectionKind: 'policy',
+    recoverable: false,
+  })
+}
+
 async function maybeWriteBlockedComment(input: {
   identity: ReviewRunIdentity
   trigger: GitLabReviewTrigger
@@ -1212,7 +1233,6 @@ async function maybeWriteBlockedComment(input: {
     client: guard.client,
     trigger: input.trigger,
     objectId: guard.objectId,
-    identity: input.identity,
     assertCurrent: () => assertReviewRunIdentityCurrent(input.identity),
   })
   try {
@@ -1224,9 +1244,11 @@ async function maybeWriteBlockedComment(input: {
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return isGitLabReviewHeadPolicyError(message)
-      ? { headError: message }
-      : { warning: gitLabApiFailureMessage('blocked_comment', error) }
+    if (isGitLabReviewHeadPolicyError(message)) {
+      rejectGitLabReviewRunForHeadPolicy(input.identity, message)
+      return { headError: message }
+    }
+    return { warning: gitLabApiFailureMessage('blocked_comment', error) }
   }
   return {}
 }
@@ -1261,7 +1283,6 @@ async function assertGitLabReviewWriteHeadCurrent(input: {
   client: Pick<GitLabApiClient, 'getMergeRequest'>
   trigger: GitLabReviewTrigger
   objectId: string | number
-  identity: ReviewRunIdentity
   assertCurrent: () => void
 }) {
   input.assertCurrent()
@@ -1272,18 +1293,12 @@ async function assertGitLabReviewWriteHeadCurrent(input: {
     mergeRequest = await input.client.getMergeRequest(input.trigger.projectId, input.objectId)
   } catch (error) {
     input.assertCurrent()
-    throw error
+    throw new GitLabReviewWriteHeadReadError(error)
   }
   input.assertCurrent()
 
   const headError = gitLabReviewChangesHeadError(input.trigger, mergeRequest)
   if (headError) {
-    ReviewRunStore.updateIfCurrent(input.identity, {
-      status: 'rejected',
-      error: headError,
-      rejectionKind: 'policy',
-      recoverable: false,
-    })
     input.assertCurrent()
     throw new Error(headError)
   }
@@ -1294,7 +1309,6 @@ function headGuardedPublicationClient(input: {
   client: Pick<GitLabApiClient, 'getMergeRequest' | 'createNote' | 'createDiscussion'>
   trigger: GitLabReviewTrigger
   objectId: string | number
-  identity: ReviewRunIdentity
   assertCurrent: () => void
 }) {
   const assertHeadCurrent = () => assertGitLabReviewWriteHeadCurrent(input)

@@ -2747,11 +2747,38 @@ describe('GitLab review controller', () => {
     expect(headGets).toBe(3)
     expect(summaryPosts).toBe(1)
     expect(discussionPosts).toBe(0)
-    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
-    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+    const storedAfterFailure = ReviewRunStore.get(run.id)
+    const replayCalls: Array<{ url: string; init?: RequestInit }> = []
+    const replay = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        replayCalls.push({ url: String(url), init })
+        if (String(url).endsWith('/merge_requests/10') && requestMethod(init) === 'GET') {
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+        }
+        return Response.json({ id: replayCalls.length })
+      }) as typeof fetch,
+    })
+
+    expect(replayCalls).toEqual([])
+    expect(replay).toEqual({ published: false, runId: run.id, error: 'gitlab_review_head_changed' })
+    expect(storedAfterFailure).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_head_changed',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(storedAfterFailure?.publishedAt).toBeUndefined()
+    expect(storedAfterFailure?.publication).toMatchObject({
       state: 'partial',
       completedMarkers: [gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })],
     })
+    expect(storedAfterFailure?.publication?.claimId).toBeUndefined()
+    expect(storedAfterFailure?.publication?.ownerId).toBeUndefined()
   })
 
   test('keeps the first inline marker but stops before the second discussion when MR HEAD changes', async () => {
@@ -2871,15 +2898,71 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('does not treat a discussion-adjacent MR metadata 400 as an inline POST fallback', async () => {
+    const headSha = 'metadata-400-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = publicationStageResult('Metadata 400 review.')
+    let headGets = 0
+    let notePosts = 0
+    let discussionPosts = 0
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        const method = requestMethod(init)
+        if (value.endsWith('/merge_requests/10') && method === 'GET') {
+          headGets += 1
+          if (headGets === 3) {
+            return new Response('sensitive metadata response', { status: 400, statusText: 'Bad Request' })
+          }
+          return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+        }
+        if (value.includes('/notes') && method === 'POST') {
+          notePosts += 1
+          return Response.json({ id: notePosts })
+        }
+        if (value.includes('/discussions') && method === 'POST') {
+          discussionPosts += 1
+          return Response.json({ id: discussionPosts })
+        }
+        throw new Error(`unexpected metadata 400 request: ${method} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_api_publish_result_failed:400:Bad Request',
+    })
+    expect(result.published ? undefined : result.error).not.toContain('sensitive metadata response')
+    expect(headGets).toBe(3)
+    expect(notePosts).toBe(1)
+    expect(discussionPosts).toBe(0)
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_api_publish_result_failed:400:Bad Request',
+      publication: {
+        state: 'partial',
+        completedMarkers: [gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })],
+      },
+    })
+  })
+
   test('returns an exact unverified error when write-adjacent MR metadata omits HEAD', async () => {
     const headSha = 'write-unverified-head'
     const run = createPublishableReviewRun({ headSha })
+    const stageResult = { ...publicationStageResult('Unverified write review.'), findings: [] }
     let headGets = 0
     let posts = 0
 
     const result = await publishGitLabReviewRunResult({
       runId: run.id,
-      stageResult: { ...publicationStageResult('Unverified write review.'), findings: [] },
+      stageResult,
       platforms: publishingPlatforms(),
       secrets: liveSecrets,
       publisherOwnerId: 'publisher-a',
@@ -2907,10 +2990,34 @@ describe('GitLab review controller', () => {
     })
     expect(headGets).toBe(2)
     expect(posts).toBe(0)
-    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+    const storedAfterFailure = ReviewRunStore.get(run.id)
+    const replayCalls: Array<{ url: string; init?: RequestInit }> = []
+    const replay = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-b',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        replayCalls.push({ url: String(url), init })
+        return Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+      }) as typeof fetch,
+    })
+
+    expect(replayCalls).toEqual([])
+    expect(replay).toEqual({ published: false, runId: run.id, error: 'gitlab_review_diff_head_unverified' })
+    expect(storedAfterFailure).toMatchObject({
+      status: 'rejected',
+      error: 'gitlab_review_diff_head_unverified',
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    expect(storedAfterFailure?.publication).toMatchObject({
       state: 'partial',
       completedMarkers: [],
     })
+    expect(storedAfterFailure?.publication?.claimId).toBeUndefined()
+    expect(storedAfterFailure?.publication?.ownerId).toBeUndefined()
   })
 
   test('rejects a different live owner without issuing any of its publication POSTs', async () => {

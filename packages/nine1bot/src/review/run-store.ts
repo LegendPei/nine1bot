@@ -312,6 +312,33 @@ export namespace ReviewRunStore {
     return true
   }
 
+  export function rejectPublicationForPolicy(input: PublicationClaimIdentity & { error: string }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    const now = Date.now()
+    persistPublicationMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
+        status: 'rejected',
+        error: input.error,
+        rejectionKind: 'policy',
+        recoverable: false,
+        updatedAt: now,
+        publication: {
+          ...existing.publication!,
+          state: 'partial',
+          claimId: undefined,
+          ownerId: undefined,
+          updatedAt: now,
+          error: input.error,
+        },
+      })
+      activePublicationClaims.delete(existing.id)
+    })
+    return true
+  }
+
   export function completePublication(input: PublicationClaimIdentity & {
     status: Extract<ReviewRunStatus, 'blocked' | 'succeeded' | 'failed'>
     warnings: string[]
