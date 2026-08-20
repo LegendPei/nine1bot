@@ -5,14 +5,84 @@ Status: DONE
 ## Commit Boundary
 
 - Required Task 2 dependency: `783efcfeeaf2294658d94059eec5efbb5dd9fc3e`
-- Task 3 subject: `fix(gitlab): preflight complete publication plans`
-- Task 3 SHA: the commit containing this report; its exact SHA is recorded in the final handoff because a commit cannot embed its own content-derived SHA.
+- Task 3 implementation: `7fc88d05c327b5ca9cdbeeb8207c47682fbcab74` (`fix(gitlab): preflight complete publication plans`)
+- Review fix round 1 subject: `test(gitlab): cover encoded publication preflight`
+- Review fix round 1 SHA: the commit containing this report; its exact SHA is recorded in the final handoff because a commit cannot embed its own content-derived SHA.
 
 ## Result
 
 Task 3 prepares one deeply frozen GitLab review publication plan immediately after raw stage parsing. The controller passes the same plan through reconciliation, publication, and completion. Every possible outbound publication body is rendered and encoded before token resolution, initial HEAD verification, payload hashing, claim acquisition, reconciliation, or other GitLab access.
 
 The parsed stage result remains the payload-hash source. The prepared plan is not part of hash calculation.
+
+## Scoped Review Fix Round 1
+
+Review verdict: APPROVE, with no Critical or Important findings and one Minor test-depth gap. The gap was controller and management-route coverage for a real publication that passes raw, aggregate, and rendered budgets but exceeds the encoded outbound form budget.
+
+No production behavior changed in this round. Only the controller test, management route test, and this report changed.
+
+### Fixture validation
+
+The fixture uses 60 distinct findings. Each has a unique near-4,096-code-unit file path containing repeated two-byte Unicode characters. Summary-only MR publication renders each path in both its file-group heading and finding location. This remains a real public publication path with `review.inlineComments=false`.
+
+The first probe retained inline comments. Invalid-position warnings repeated every long file path and produced `732,690` rendered code units and `1,451,970` rendered UTF-8 bytes. That probe exceeded the rendered limits and was rejected before any test edit because it did not isolate encoded overflow.
+
+The accepted probe measured:
+
+- Raw snapshot: `240,147` code units and `479,907` UTF-8 bytes, within `256,000` and `512,000`.
+- Largest aggregate body: `1` code unit and `1` UTF-8 byte, within `256,000` and `512,000`.
+- Final rendered summary with markers: `488,416` code units and `967,936` UTF-8 bytes, within `512,000` and `1,024,000`.
+- Actual `URLSearchParams.toString()` form: `2,889,075` UTF-8 bytes, above `2,000,000`.
+
+The tests independently assert each budget relationship, then invoke public `prepareGitLabReviewPublicationPlan()`, the real controller publication entry, and the real management route. They do not mock the plan builder or synthesize an error.
+
+### Added coverage
+
+- First controller publication returns the exact `gitlab_review_publication_input_too_large` result with zero secret reads, zero claim calls, zero GitLab requests, and no publication object.
+- Existing partial resume returns the same stable result with zero secret reads, claims, or GitLab requests and preserves the complete prior publication/checkpoint object.
+- Management publication returns HTTP 413 and the stable error with zero claim calls, zero GitLab requests, and no publication object.
+
+### Fix-round verification
+
+Focused behavior tests:
+
+```powershell
+bun test packages/nine1bot/src/review/gitlab-controller.test.ts -t "encoded form expansion" --timeout 30000
+bun test opencode/packages/opencode/test/server/webhooks-status.test.ts -t "form encoding expands" --timeout 30000
+```
+
+Results:
+
+- Controller: `2 pass`, `0 fail`, `97 filtered`, `29 expect() calls`.
+- Management route: `1 pass`, `0 fail`, `24 filtered`, `14 expect() calls`.
+
+Affected-file regression:
+
+```powershell
+bun test packages/nine1bot/src/review/gitlab-controller.test.ts opencode/packages/opencode/test/server/webhooks-status.test.ts --timeout 30000
+```
+
+Result: exit `0`; `124 pass`, `0 fail`, `612 expect() calls`; 124 tests across 2 files in 5.68 seconds.
+
+Task 3 complete regression:
+
+```powershell
+bun test packages/platform-gitlab/test packages/nine1bot/src/review opencode/packages/opencode/test/server/webhooks-status.test.ts --timeout 30000
+```
+
+Result: exit `0`; `297 pass`, `0 fail`, `1286 expect() calls`; 297 tests across 5 files in 7.28 seconds.
+
+Typechecks:
+
+- `bun run --cwd packages/platform-gitlab typecheck`: `tsc --noEmit`, exit `0`.
+- `bun run --cwd packages/nine1bot typecheck`: `tsc --project tsconfig.check.json`, exit `0`.
+- `bun run --cwd opencode/packages/opencode typecheck`: `tsgo --noEmit`, exit `0`.
+
+Pre-stage checks:
+
+- `git diff --check`: exit `0`; only existing LF-to-CRLF working-copy warnings were emitted.
+- Tracked implementation diff: exactly two test files before this report update; no production files.
+- Credential signature scan: clean.
 
 ## TDD Evidence
 
@@ -176,7 +246,7 @@ Post-format required regression:
 bun test packages/platform-gitlab/test packages/nine1bot/src/review opencode/packages/opencode/test/server/webhooks-status.test.ts --timeout 30000
 ```
 
-Result: exit `0`; `294 pass`, `0 fail`, `1243 expect() calls`; 294 tests across 5 files in 11.75 seconds.
+Initial Task 3 commit result: exit `0`; `294 pass`, `0 fail`, `1243 expect() calls`; 294 tests across 5 files in 11.75 seconds. The current post-review result is recorded in Scoped Review Fix Round 1 above.
 
 Typechecks:
 

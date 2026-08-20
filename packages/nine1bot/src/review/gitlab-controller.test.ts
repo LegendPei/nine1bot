@@ -9,6 +9,7 @@ import {
   gitLabReviewFindingKey,
   gitLabReviewPublicationMarker,
   parseReviewStageResult,
+  prepareGitLabReviewPublicationPlan,
   renderReviewSummaryComment,
   type GitLabDiffManifest,
 } from '@nine1bot/platform-gitlab/review'
@@ -91,6 +92,19 @@ function publishingPlatforms() {
         ...platforms.gitlab.settings,
         'review.dryRun': false,
         'review.baseUrl': 'https://gitlab.example.com',
+      },
+    },
+  }
+}
+
+function summaryOnlyPublishingPlatforms() {
+  const publishing = publishingPlatforms()
+  return {
+    gitlab: {
+      ...publishing.gitlab,
+      settings: {
+        ...publishing.gitlab.settings,
+        'review.inlineComments': false,
       },
     },
   }
@@ -206,6 +220,83 @@ function rawValidAggregateOversizedStageResult(runId: string) {
     }
   })
   return { stage, status: 'ok' as const, summary: '', findings }
+}
+
+function encodedFormOversizedStageResult() {
+  return {
+    stage: 's',
+    status: 'ok' as const,
+    summary: '',
+    findings: Array.from({ length: 60 }, (_, index) => ({
+      title: 't',
+      body: 'b',
+      severity: 'info' as const,
+      file: `${index.toString().padStart(3, '0')}/${'\u00e9'.repeat(3_996)}`,
+    })),
+  }
+}
+
+function expectEncodedFormOnlyOverflow(input: {
+  runId: string
+  stageResult: ReturnType<typeof encodedFormOversizedStageResult>
+  manifest: GitLabDiffManifest
+}) {
+  const parsed = parseReviewStageResult(input.stageResult, { runId: input.runId })
+  const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
+  const rawStrings = [
+    input.runId,
+    parsed.stage,
+    parsed.summary,
+    ...parsed.findings.flatMap((finding) => [finding.title, finding.body, finding.file ?? '']),
+  ]
+  expect(rawStrings.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxTotalCodeUnits,
+  )
+  expect(rawStrings.reduce((total, value) => total + utf8Bytes(value), 0)).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxTotalUtf8Bytes,
+  )
+
+  const aggregated = aggregateReviewFindings(parsed.findings)
+  expect(Math.max(...aggregated.map((finding) => finding.body.length))).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxAggregateBodyCodeUnits,
+  )
+  expect(Math.max(...aggregated.map((finding) => utf8Bytes(finding.body)))).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxAggregateBodyUtf8Bytes,
+  )
+
+  const markers = [
+    gitLabReviewPublicationMarker({ runId: input.runId, kind: 'summary' }),
+    ...aggregated.map((finding) => gitLabReviewPublicationMarker({
+      runId: input.runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(finding),
+    })),
+  ]
+  const canonicalBody = renderReviewSummaryComment({
+    summary: parsed.summary,
+    findings: aggregated,
+    manifest: input.manifest,
+    warnings: parsed.nextActions,
+  })
+  const renderedBody = `${canonicalBody}\n\n${markers.join('\n')}`
+  expect(renderedBody.length).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxRenderedBodyCodeUnits,
+  )
+  expect(utf8Bytes(renderedBody)).toBeLessThanOrEqual(
+    gitLabReviewPublicationBudget.maxRenderedBodyUtf8Bytes,
+  )
+  expect(utf8Bytes(new URLSearchParams({ body: renderedBody }).toString())).toBeGreaterThan(
+    gitLabReviewPublicationBudget.maxOutboundFormBytes,
+  )
+  expect(() => prepareGitLabReviewPublicationPlan({
+    runId: input.runId,
+    objectType: 'mr',
+    manifest: input.manifest,
+    summary: parsed.summary,
+    findings: parsed.findings,
+    inlineComments: false,
+    warnings: parsed.nextActions,
+  })).toThrow('gitlab_review_publication_input_too_large')
 }
 
 function publicationPayloadHash(stageResult: unknown) {
@@ -4609,6 +4700,119 @@ describe('GitLab review controller', () => {
           return Response.json([])
         }) as typeof fetch,
         publisherOwnerId: 'resume-owner',
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_input_too_large',
+      })
+      expect(secretReads).toBe(0)
+      expect(gitLabRequests).toHaveLength(0)
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(ReviewRunStore.get(run.id)?.publication?.claimId).toBeUndefined()
+      expect(ReviewRunStore.get(run.id)?.publication).toEqual(publicationBefore)
+    } finally {
+      claimPublication.mockRestore()
+    }
+  }, 30_000)
+
+  test('rejects encoded form expansion before first publication claim or GitLab access', async () => {
+    const run = createPublishableReviewRun({ headSha: 'encoded-budget-first-head' })
+    const stageResult = encodedFormOversizedStageResult()
+    expectEncodedFormOnlyOverflow({
+      runId: run.id,
+      stageResult,
+      manifest: publicationManifest(run),
+    })
+
+    let secretReads = 0
+    const gitLabRequests: string[] = []
+    const claimPublication = spyOn(ReviewRunStore, 'claimPublication')
+    try {
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: summaryOnlyPublishingPlatforms(),
+        secrets: {
+          ...liveSecrets,
+          async get(ref) {
+            secretReads += 1
+            return await liveSecrets.get(ref)
+          },
+        },
+        fetch: (async (url) => {
+          gitLabRequests.push(String(url))
+          return Response.json({ diff_refs: { head_sha: 'encoded-budget-first-head' } })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_input_too_large',
+      })
+      expect(secretReads).toBe(0)
+      expect(gitLabRequests).toHaveLength(0)
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(ReviewRunStore.get(run.id)?.publication).toBeUndefined()
+    } finally {
+      claimPublication.mockRestore()
+    }
+  }, 30_000)
+
+  test('preserves an existing partial publication when encoded form expansion exceeds budget', async () => {
+    const run = createPublishableReviewRun({ headSha: 'encoded-budget-resume-head' })
+    const stageResult = encodedFormOversizedStageResult()
+    expectEncodedFormOnlyOverflow({
+      runId: run.id,
+      stageResult,
+      manifest: publicationManifest(run),
+    })
+    const payloadHash = publicationPayloadHash(stageResult)
+    const existingMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const seedClaim = ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'seed-encoded-owner',
+    })
+    if (!seedClaim.ok) throw new Error(`expected seed claim: ${seedClaim.error}`)
+    expect(ReviewRunStore.recordPublicationMarker({
+      runId: run.id,
+      claimId: seedClaim.claimId,
+      ownerId: 'seed-encoded-owner',
+      payloadHash,
+      marker: existingMarker,
+    })).toBe(true)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: seedClaim.claimId,
+      ownerId: 'seed-encoded-owner',
+      payloadHash,
+      error: 'seed_encoded_partial',
+    })).toBe(true)
+    const publicationBefore = ReviewRunStore.get(run.id)?.publication
+
+    let secretReads = 0
+    const gitLabRequests: string[] = []
+    const claimPublication = spyOn(ReviewRunStore, 'claimPublication')
+    try {
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: summaryOnlyPublishingPlatforms(),
+        secrets: {
+          ...liveSecrets,
+          async get(ref) {
+            secretReads += 1
+            return await liveSecrets.get(ref)
+          },
+        },
+        fetch: (async (url) => {
+          gitLabRequests.push(String(url))
+          return Response.json([])
+        }) as typeof fetch,
+        publisherOwnerId: 'resume-encoded-owner',
       })
 
       expect(result).toEqual({

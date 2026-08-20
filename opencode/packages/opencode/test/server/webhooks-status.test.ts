@@ -7,7 +7,16 @@ import {
   reportGitLabReviewRunFailure,
 } from "../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore } from "../../../../../packages/nine1bot/src/review/run-store"
-import { gitLabReviewPublicationBudget } from "../../../../../packages/platform-gitlab/src/review"
+import {
+  aggregateReviewFindings,
+  gitLabReviewFindingKey,
+  gitLabReviewPublicationBudget,
+  gitLabReviewPublicationMarker,
+  parseReviewStageResult,
+  prepareGitLabReviewPublicationPlan,
+  renderReviewSummaryComment,
+  type GitLabDiffManifest,
+} from "../../../../../packages/platform-gitlab/src/review"
 import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
@@ -411,6 +420,184 @@ describe("webhook status URL selection", () => {
           headers: {
             "content-type": "application/json",
             "content-length": String(new TextEncoder().encode(body).byteLength),
+          },
+          body,
+        },
+      )
+
+      expect(response.status).toBe(413)
+      await expect(response.json()).resolves.toEqual({
+        published: false,
+        runId: run.id,
+        error: "gitlab_review_publication_input_too_large",
+      })
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(gitLabRequests).toEqual([])
+      expect(ReviewRunStore.get(run.id)?.publication).toBeUndefined()
+    } finally {
+      claimPublication.mockRestore()
+      globalThis.fetch = previousFetch
+      if (previousConfigPath === undefined) delete process.env.NINE1BOT_CONFIG_PATH
+      else process.env.NINE1BOT_CONFIG_PATH = previousConfigPath
+      if (previousSecretsPath === undefined) delete process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+      else process.env.NINE1BOT_PLATFORM_SECRETS_PATH = previousSecretsPath
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test("returns domain 413 before downstream work when form encoding expands a valid publication", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-publication-encoded-budget-"))
+    const configPath = join(directory, "config.json")
+    const secretsPath = join(directory, "secrets.json")
+    const previousConfigPath = process.env.NINE1BOT_CONFIG_PATH
+    const previousSecretsPath = process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+    const previousFetch = globalThis.fetch
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const headSha = "management-encoded-budget-head"
+    const trigger = {
+      host: "gitlab.example.com",
+      projectId: 123,
+      objectType: "mr" as const,
+      objectIid: 10,
+      headSha,
+      mode: "webhook" as const,
+    }
+    const manifest: GitLabDiffManifest = {
+      files: [{
+        oldPath: "src/app.ts",
+        newPath: "src/app.ts",
+        diff: "@@ -1,2 +1,3 @@\n context\n+changed\n",
+        added: false,
+        renamed: false,
+        deleted: false,
+        generated: false,
+      }],
+      skipped: [],
+      blocked: false,
+      diffRefs: { baseSha: "base", startSha: "start", headSha },
+      stats: {
+        fileCount: 1,
+        includedFileCount: 1,
+        skippedFileCount: 0,
+        includedBytes: 42,
+        truncated: false,
+      },
+    }
+    const run = ReviewRunStore.create({
+      platform: "gitlab",
+      status: "running",
+      trigger,
+      context: {
+        trigger,
+        idempotencyKey: "management-encoded-budget",
+        diff: manifest,
+        contextBlocks: [],
+      },
+    })
+    const stageResult = {
+      stage: "s",
+      status: "ok" as const,
+      summary: "",
+      findings: Array.from({ length: 60 }, (_, index) => ({
+        title: "t",
+        body: "b",
+        severity: "info" as const,
+        file: `${index.toString().padStart(3, "0")}/${"\u00e9".repeat(3_996)}`,
+      })),
+    }
+    const parsed = parseReviewStageResult(stageResult, { runId: run.id })
+    const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
+    const rawStrings = [
+      run.id,
+      parsed.stage,
+      parsed.summary,
+      ...parsed.findings.flatMap((finding) => [finding.title, finding.body, finding.file ?? ""]),
+    ]
+    expect(rawStrings.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxTotalCodeUnits,
+    )
+    expect(rawStrings.reduce((total, value) => total + utf8Bytes(value), 0)).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxTotalUtf8Bytes,
+    )
+    const aggregated = aggregateReviewFindings(parsed.findings)
+    expect(Math.max(...aggregated.map((finding) => finding.body.length))).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxAggregateBodyCodeUnits,
+    )
+    expect(Math.max(...aggregated.map((finding) => utf8Bytes(finding.body)))).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxAggregateBodyUtf8Bytes,
+    )
+    const markers = [
+      gitLabReviewPublicationMarker({ runId: run.id, kind: "summary" }),
+      ...aggregated.map((finding) => gitLabReviewPublicationMarker({
+        runId: run.id,
+        kind: "fallback",
+        findingKey: gitLabReviewFindingKey(finding),
+      })),
+    ]
+    const canonicalBody = renderReviewSummaryComment({
+      summary: parsed.summary,
+      findings: aggregated,
+      manifest,
+      warnings: parsed.nextActions,
+    })
+    const renderedBody = `${canonicalBody}\n\n${markers.join("\n")}`
+    expect(renderedBody.length).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxRenderedBodyCodeUnits,
+    )
+    expect(utf8Bytes(renderedBody)).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxRenderedBodyUtf8Bytes,
+    )
+    expect(utf8Bytes(new URLSearchParams({ body: renderedBody }).toString())).toBeGreaterThan(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes,
+    )
+    expect(() => prepareGitLabReviewPublicationPlan({
+      runId: run.id,
+      objectType: "mr",
+      manifest,
+      summary: parsed.summary,
+      findings: parsed.findings,
+      inlineComments: false,
+      warnings: parsed.nextActions,
+    })).toThrow("gitlab_review_publication_input_too_large")
+
+    const body = JSON.stringify({ stageResult })
+    expect(utf8Bytes(body)).toBeLessThanOrEqual(gitLabReviewPublicationBudget.maxManagementRequestBytes)
+    await writeFile(configPath, JSON.stringify({
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            "review.enabled": true,
+            "review.dryRun": false,
+            "review.inlineComments": false,
+            "review.baseUrl": "https://gitlab.example.com",
+            "review.tokenSecretRef": { provider: "nine1bot-local", key: "gitlab-token" },
+          },
+        },
+      },
+    }))
+    await writeFile(secretsPath, JSON.stringify({
+      version: 1,
+      secrets: { "gitlab-token": "token" },
+    }))
+    process.env.NINE1BOT_CONFIG_PATH = configPath
+    process.env.NINE1BOT_PLATFORM_SECRETS_PATH = secretsPath
+    const gitLabRequests: string[] = []
+    globalThis.fetch = (async (url) => {
+      gitLabRequests.push(String(url))
+      return Response.json({ diff_refs: { head_sha: headSha } })
+    }) as typeof fetch
+    const claimPublication = spyOn(ReviewRunStore, "claimPublication")
+
+    try {
+      const response = await WebhookRoutes().request(
+        `http://localhost/gitlab/runs/${run.id}/publish`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(utf8Bytes(body)),
           },
           body,
         },
