@@ -168,6 +168,23 @@ function publicationStageResult(summary = 'Publication review complete.') {
   }
 }
 
+function publicationStageResultWithTwoInlineFindings(summary = 'Publication review complete.') {
+  const first = publicationStageResult(summary)
+  return {
+    ...first,
+    findings: [
+      first.findings[0]!,
+      {
+        title: 'Second changed line',
+        body: 'Second inline body',
+        severity: 'major' as const,
+        file: 'src/app.ts',
+        newLine: 2,
+      },
+    ],
+  }
+}
+
 function publicationPayloadHash(stageResult: unknown) {
   return createHash('sha256')
     .update(JSON.stringify(parseReviewStageResult(stageResult)))
@@ -2136,12 +2153,14 @@ describe('GitLab review controller', () => {
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
   })
 
   test('rejects a blocked MR when its HEAD changes before the blocked note with zero POSTs', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
+    let headGets = 0
     const result = await handleGitLabReviewWebhook({
       payload: {
         object_kind: 'merge_request',
@@ -2168,8 +2187,13 @@ describe('GitLab review controller', () => {
           })
         }
         if (value.endsWith('/merge_requests/10')) {
+          headGets += 1
           return Response.json({
-            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'blocked-new-head' },
+            diff_refs: {
+              base_sha: 'base',
+              start_sha: 'start',
+              head_sha: headGets === 1 ? 'blocked-frozen-head' : 'blocked-new-head',
+            },
           })
         }
         return Response.json({ id: 1 })
@@ -2185,6 +2209,7 @@ describe('GitLab review controller', () => {
     expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
     expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
       'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
     ])
     expect(result.accepted ? undefined : ReviewRunStore.get(result.runId!)).toMatchObject({
@@ -2674,6 +2699,218 @@ describe('GitLab review controller', () => {
       kind: 'inline',
       findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
     }))
+  })
+
+  test('stops before the first inline discussion when MR HEAD changes after the summary', async () => {
+    const headSha = 'summary-race-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = publicationStageResultWithTwoInlineFindings('Summary race review.')
+    let headGets = 0
+    let summaryPosts = 0
+    let discussionPosts = 0
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        const method = requestMethod(init)
+        if (value.endsWith('/merge_requests/10') && method === 'GET') {
+          headGets += 1
+          return Response.json({
+            diff_refs: {
+              base_sha: 'base',
+              start_sha: 'start',
+              head_sha: headGets <= 2 ? headSha : 'summary-race-new-head',
+            },
+          })
+        }
+        if (value.includes('/notes') && method === 'POST') {
+          summaryPosts += 1
+          return Response.json({ id: 1 })
+        }
+        if (value.includes('/discussions') && method === 'POST') {
+          discussionPosts += 1
+          return Response.json({ id: discussionPosts + 1 })
+        }
+        throw new Error(`unexpected summary race request: ${method} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      published: false,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(headGets).toBe(3)
+    expect(summaryPosts).toBe(1)
+    expect(discussionPosts).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      completedMarkers: [gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })],
+    })
+  })
+
+  test('keeps the first inline marker but stops before the second discussion when MR HEAD changes', async () => {
+    const headSha = 'second-inline-race-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = publicationStageResultWithTwoInlineFindings('Second inline race review.')
+    let headGets = 0
+    let summaryPosts = 0
+    let discussionPosts = 0
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        const method = requestMethod(init)
+        if (value.endsWith('/merge_requests/10') && method === 'GET') {
+          headGets += 1
+          return Response.json({
+            diff_refs: {
+              base_sha: 'base',
+              start_sha: 'start',
+              head_sha: headGets <= 3 ? headSha : 'second-inline-new-head',
+            },
+          })
+        }
+        if (value.includes('/notes') && method === 'POST') {
+          summaryPosts += 1
+          return Response.json({ id: 1 })
+        }
+        if (value.includes('/discussions') && method === 'POST') {
+          discussionPosts += 1
+          return Response.json({ id: discussionPosts + 1 })
+        }
+        throw new Error(`unexpected second inline race request: ${method} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      published: false,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(headGets).toBe(4)
+    expect(summaryPosts).toBe(1)
+    expect(discussionPosts).toBe(1)
+    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      completedMarkers: [
+        gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' }),
+        gitLabReviewPublicationMarker({
+          runId: run.id,
+          kind: 'inline',
+          findingKey: gitLabReviewFindingKey(stageResult.findings[0]!),
+        }),
+      ],
+    })
+  })
+
+  test('does not post an inline fallback when MR HEAD changes after the rejected discussion', async () => {
+    const headSha = 'fallback-race-head'
+    const run = createPublishableReviewRun({ headSha })
+    const stageResult = publicationStageResult('Fallback race review.')
+    let headGets = 0
+    let notePosts = 0
+    let discussionPosts = 0
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult,
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        const method = requestMethod(init)
+        if (value.endsWith('/merge_requests/10') && method === 'GET') {
+          headGets += 1
+          return Response.json({
+            diff_refs: {
+              base_sha: 'base',
+              start_sha: 'start',
+              head_sha: headGets <= 3 ? headSha : 'fallback-race-new-head',
+            },
+          })
+        }
+        if (value.includes('/notes') && method === 'POST') {
+          notePosts += 1
+          return Response.json({ id: notePosts })
+        }
+        if (value.includes('/discussions') && method === 'POST') {
+          discussionPosts += 1
+          return new Response(JSON.stringify({ message: 'invalid position' }), {
+            status: 400,
+            statusText: 'Bad Request',
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        throw new Error(`unexpected fallback race request: ${method} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      published: false,
+      error: 'gitlab_review_head_changed',
+    })
+    expect(headGets).toBe(4)
+    expect(notePosts).toBe(1)
+    expect(discussionPosts).toBe(1)
+    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      completedMarkers: [gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })],
+    })
+  })
+
+  test('returns an exact unverified error when write-adjacent MR metadata omits HEAD', async () => {
+    const headSha = 'write-unverified-head'
+    const run = createPublishableReviewRun({ headSha })
+    let headGets = 0
+    let posts = 0
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: { ...publicationStageResult('Unverified write review.'), findings: [] },
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      publisherOwnerId: 'publisher-a',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const value = String(url)
+        const method = requestMethod(init)
+        if (value.endsWith('/merge_requests/10') && method === 'GET') {
+          headGets += 1
+          return headGets === 1
+            ? Response.json({ diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha } })
+            : Response.json({ diff_refs: {} })
+        }
+        if (method === 'POST') {
+          posts += 1
+          return Response.json({ id: 1 })
+        }
+        throw new Error(`unexpected unverified write request: ${method} ${value}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'gitlab_review_diff_head_unverified',
+    })
+    expect(headGets).toBe(2)
+    expect(posts).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      completedMarkers: [],
+    })
   })
 
   test('rejects a different live owner without issuing any of its publication POSTs', async () => {
@@ -4776,7 +5013,9 @@ describe('GitLab review controller', () => {
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/changes',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/discussions',
     ])
   })
@@ -5329,9 +5568,10 @@ describe('GitLab review controller', () => {
     })
     expect(calls.map((call) => call.url)).toEqual([
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
+      'https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'https://gitlab.example.com/api/v4/projects/123/merge_requests/10/notes',
     ])
-    expect(String(calls[1]?.init?.body)).toContain('Nine1Bot+review+failed')
+    expect(String(calls[2]?.init?.body)).toContain('Nine1Bot+review+failed')
 
     await expect(reportGitLabReviewRunFailure({
       runId: run.id,
@@ -5344,7 +5584,7 @@ describe('GitLab review controller', () => {
       notified: false,
       error: 'review_run_failure_already_notified',
     })
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
   })
 
   test('rejects a failed MR when its HEAD changes before the failure note with zero POSTs', async () => {
@@ -5362,6 +5602,7 @@ describe('GitLab review controller', () => {
       },
     })
     const calls: Array<{ url: string; init?: RequestInit }> = []
+    let headGets = 0
 
     await expect(reportGitLabReviewRunFailure({
       runId: run.id,
@@ -5371,8 +5612,13 @@ describe('GitLab review controller', () => {
         const value = String(url)
         calls.push({ url: value, init })
         if (value.endsWith('/merge_requests/10')) {
+          headGets += 1
           return Response.json({
-            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'failure-new-head' },
+            diff_refs: {
+              base_sha: 'base',
+              start_sha: 'start',
+              head_sha: headGets === 1 ? 'failure-frozen-head' : 'failure-new-head',
+            },
           })
         }
         return Response.json({ id: 1 })
@@ -5386,6 +5632,7 @@ describe('GitLab review controller', () => {
     })
     expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
     expect(calls.map((call) => `${requestMethod(call.init)} ${call.url}`)).toEqual([
+      'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
       'GET https://gitlab.example.com/api/v4/projects/123/merge_requests/10',
     ])
     expect(ReviewRunStore.get(run.id)).toMatchObject({

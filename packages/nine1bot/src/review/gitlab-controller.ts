@@ -736,7 +736,16 @@ export async function publishGitLabReviewRunResult(input: {
   try {
     assertPublicationClaimCurrent(claimIdentity)
     published = await publishGitLabReviewResult({
-      client: guardedPublicationClient(client, claimIdentity),
+      client: headGuardedPublicationClient({
+        client,
+        trigger,
+        objectId,
+        identity,
+        assertCurrent() {
+          assertReviewRunIdentityCurrent(identity)
+          assertPublicationClaimCurrent(claimIdentity)
+        },
+      }),
       projectId: trigger.projectId,
       objectType: trigger.objectType,
       objectId,
@@ -856,17 +865,24 @@ async function maybeWriteFailureComment(input: {
     operation: 'failure_comment',
   })
   if (!guard.ok) return { notified: false, error: guard.error }
+  const client = headGuardedPublicationClient({
+    client: guard.client,
+    trigger: input.trigger,
+    objectId: guard.objectId,
+    identity: input.identity,
+    assertCurrent: () => assertReviewRunIdentityCurrent(input.identity),
+  })
   try {
-    assertReviewRunIdentityCurrent(input.identity)
-    await guard.client.createNote({
+    await client.createNote({
       projectId: input.trigger.projectId,
       resource: guard.resource,
       resourceId: guard.objectId,
       body: renderFailureComment(input.phase, input.error),
     })
-    assertReviewRunIdentityCurrent(input.identity)
     return { notified: true }
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (isGitLabReviewHeadPolicyError(message)) return { notified: false, error: message }
     return { notified: false }
   }
 }
@@ -1192,15 +1208,20 @@ async function maybeWriteBlockedComment(input: {
       ? { headError: guard.error }
       : { warning: guard.error }
   }
+  const client = headGuardedPublicationClient({
+    client: guard.client,
+    trigger: input.trigger,
+    objectId: guard.objectId,
+    identity: input.identity,
+    assertCurrent: () => assertReviewRunIdentityCurrent(input.identity),
+  })
   try {
-    assertReviewRunIdentityCurrent(input.identity)
-    await guard.client.createNote({
+    await client.createNote({
       projectId: input.trigger.projectId,
       resource: 'merge_requests',
       resourceId: input.trigger.objectIid,
       body: renderBlockedDiffComment(input.reason),
     })
-    assertReviewRunIdentityCurrent(input.identity)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return isGitLabReviewHeadPolicyError(message)
@@ -1236,25 +1257,62 @@ function assertPublicationClaimCurrent(identity: Parameters<typeof ReviewRunStor
   if (!ReviewRunStore.isPublicationClaimCurrent(identity)) throw new PublicationClaimLostError()
 }
 
-function guardedPublicationClient(
-  client: Pick<GitLabApiClient, 'createNote' | 'createDiscussion'>,
-  identity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0],
-) {
+async function assertGitLabReviewWriteHeadCurrent(input: {
+  client: Pick<GitLabApiClient, 'getMergeRequest'>
+  trigger: GitLabReviewTrigger
+  objectId: string | number
+  identity: ReviewRunIdentity
+  assertCurrent: () => void
+}) {
+  input.assertCurrent()
+  if (input.trigger.objectType !== 'mr') return
+
+  let mergeRequest: Awaited<ReturnType<typeof input.client.getMergeRequest>>
+  try {
+    mergeRequest = await input.client.getMergeRequest(input.trigger.projectId, input.objectId)
+  } catch (error) {
+    input.assertCurrent()
+    throw error
+  }
+  input.assertCurrent()
+
+  const headError = gitLabReviewChangesHeadError(input.trigger, mergeRequest)
+  if (headError) {
+    ReviewRunStore.updateIfCurrent(input.identity, {
+      status: 'rejected',
+      error: headError,
+      rejectionKind: 'policy',
+      recoverable: false,
+    })
+    input.assertCurrent()
+    throw new Error(headError)
+  }
+  input.assertCurrent()
+}
+
+function headGuardedPublicationClient(input: {
+  client: Pick<GitLabApiClient, 'getMergeRequest' | 'createNote' | 'createDiscussion'>
+  trigger: GitLabReviewTrigger
+  objectId: string | number
+  identity: ReviewRunIdentity
+  assertCurrent: () => void
+}) {
+  const assertHeadCurrent = () => assertGitLabReviewWriteHeadCurrent(input)
   return {
-    async createNote(input: Parameters<typeof client.createNote>[0]) {
-      assertPublicationClaimCurrent(identity)
+    async createNote(note: Parameters<typeof input.client.createNote>[0]) {
+      await assertHeadCurrent()
       try {
-        return await client.createNote(input)
+        return await input.client.createNote(note)
       } finally {
-        assertPublicationClaimCurrent(identity)
+        input.assertCurrent()
       }
     },
-    async createDiscussion(input: Parameters<typeof client.createDiscussion>[0]) {
-      assertPublicationClaimCurrent(identity)
+    async createDiscussion(discussion: Parameters<typeof input.client.createDiscussion>[0]) {
+      await assertHeadCurrent()
       try {
-        return await client.createDiscussion(input)
+        return await input.client.createDiscussion(discussion)
       } finally {
-        assertPublicationClaimCurrent(identity)
+        input.assertCurrent()
       }
     },
   }
@@ -1315,8 +1373,11 @@ async function reconcileGitLabReviewPublication(input: {
 }
 
 function publicationFailureMessage(operation: string, error: unknown) {
-  return error instanceof PublicationClaimLostError || error instanceof GitLabReviewPublicationCompatibilityError
-    ? error.message
+  const message = error instanceof Error ? error.message : String(error)
+  return error instanceof PublicationClaimLostError
+    || error instanceof GitLabReviewPublicationCompatibilityError
+    || isGitLabReviewHeadPolicyError(message)
+    ? message
     : gitLabApiFailureMessage(operation, error)
 }
 
