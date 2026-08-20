@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test"
+import fs from "fs/promises"
 import path from "path"
 import type { SessionProfileSnapshot } from "../../src/runtime/protocol/agent-run-spec"
 import { RuntimeResourceResolver } from "../../src/runtime/resource/resolver"
@@ -96,7 +97,23 @@ function toolContext(sessionID: string, agent: string): Tool.Context {
   }
 }
 
-function mockTaskPrompt() {
+async function createGlobalSkill(homeDir: string) {
+  const skillDir = path.join(homeDir, ".claude", "skills", "global-task-resource")
+  await fs.mkdir(skillDir, { recursive: true })
+  await Bun.write(
+    path.join(skillDir, "SKILL.md"),
+    `---
+name: global-task-resource
+description: A global resource used by the TaskTool regression test.
+---
+
+# Global Task Resource
+`,
+  )
+}
+
+function promptTaskWithoutReply() {
+  const originalPrompt = SessionPrompt.prompt
   const message = spyOn(MessageV2, "get").mockResolvedValue({
     info: {
       role: "assistant",
@@ -105,23 +122,38 @@ function mockTaskPrompt() {
     },
     parts: [],
   } as any)
-  const prompt = spyOn(SessionPrompt, "prompt").mockResolvedValue({
-    parts: [{ type: "text", text: "specialist result" }],
-  } as any)
+  const prompt = spyOn(SessionPrompt, "prompt").mockImplementation(
+    ((input: SessionPrompt.PromptInput) => originalPrompt({ ...input, noReply: true })) as typeof SessionPrompt.prompt,
+  )
   return () => {
     prompt.mockRestore()
     message.mockRestore()
   }
 }
 
-test("GitLab review TaskTool treats a foreign allow-all session ID only as a reference", async () => {
-  await using tmp = await tmpdir({ git: true })
+test("GitLab review TaskTool preserves an empty specialist resource snapshot through the real prompt path", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    config: {
+      mcp: {
+        "global-task-mcp": {
+          type: "local",
+          command: ["node", "server.js"],
+          enabled: true,
+        },
+      },
+    },
+    init: createGlobalSkill,
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
 
-  await Instance.provide({
-    directory: tmp.path,
-    fn: async () => {
-      registerGitLabReviewAgents()
-      const root = await Session.createNext({
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        registerGitLabReviewAgents()
+        const root = await Session.createNext({
         directory: tmp.path,
         runtimeProfile: runtimeProfile("platform.gitlab.pm-coordinator", "gitlab-review-root"),
         runtimeCurrentModel: SessionRuntimeProfile.currentModel({
@@ -155,66 +187,72 @@ test("GitLab review TaskTool treats a foreign allow-all session ID only as a ref
           mode: "generic-webhook",
         },
       })
-      const restorePrompt = mockTaskPrompt()
+        const restorePrompt = promptTaskWithoutReply()
 
-      try {
-        const task = await TaskTool.init()
-        const result = await task.execute({
+        try {
+          const task = await TaskTool.init()
+          const result = await task.execute({
           description: "Review runtime boundary",
           prompt: "Inspect the supplied review context.",
           subagent_type: "platform.gitlab.risk-qa",
           session_id: foreign.id,
         }, toolContext(root.id, "platform.gitlab.pm-coordinator"))
 
-        expect(result.metadata.sessionId).not.toBe(foreign.id)
-        const specialistSession = await Session.get(result.metadata.sessionId)
-        const specialistProfile = await SessionRuntimeProfile.read(specialistSession)
-        const specialist = await Agent.get("platform.gitlab.risk-qa", { includeDeclaredOnly: true })
+          expect(result.metadata.sessionId).not.toBe(foreign.id)
+          const specialistSession = await Session.get(result.metadata.sessionId)
+          const specialistProfile = await SessionRuntimeProfile.read(specialistSession)
+          const specialist = await Agent.get("platform.gitlab.risk-qa", { includeDeclaredOnly: true })
 
-        expect(specialistSession).toMatchObject({
+          expect(specialistSession).toMatchObject({
           parentID: root.id,
           projectID: root.projectID,
           directory: root.directory,
           client: root.client,
           runtime: { agent: "platform.gitlab.risk-qa" },
         })
-        expect(specialistProfile).toMatchObject({
-          sessionId: specialistSession.id,
-          agent: { name: "platform.gitlab.risk-qa" },
-          context: { blocks: [] },
-          resources: {
-            mcp: { servers: [] },
-            skills: { skills: [] },
-          },
-          permissions: { mergeMode: "strict" },
-          sessionPermissionGrants: [],
-        })
-        expect(specialistProfile?.sourceTemplateIds).toContain("gitlab-review-specialist")
-        expect(specialist).toBeDefined()
-        for (const permission of ["bash", "read", "webfetch", "browser_navigate", "mcp__foreign__read"]) {
-          expect(PermissionNext.evaluate(
-            permission,
-            "*",
-            specialist!.permission,
-            specialistSession.permission ?? [],
-          ).action).toBe("deny")
-        }
-        expect((await Session.get(foreign.id)).permission).toEqual([
-          { permission: "*", pattern: "*", action: "allow" },
-        ])
+          expect(specialistProfile?.sourceTemplateIds).toEqual([
+            "gitlab-review-specialist",
+            `gitlab-review-owner:${root.id}`,
+            RuntimeResourceResolver.resourceTemplateId(),
+          ])
+          expect(specialistProfile?.resources.mcp.servers).toEqual([])
+          expect(specialistProfile?.resources.skills.skills).toEqual([])
+          expect(specialistProfile?.context.blocks).toEqual([])
+          expect(specialistProfile?.sessionPermissionGrants).toEqual([])
+          expect(specialist).toBeDefined()
+          for (const permission of ["bash", "read", "webfetch", "browser_navigate", "mcp__foreign__read"]) {
+            expect(PermissionNext.evaluate(
+              permission,
+              "*",
+              specialist!.permission,
+              specialistSession.permission ?? [],
+            ).action).toBe("deny")
+          }
+          const unchangedForeign = await Session.get(foreign.id)
+          const unchangedForeignProfile = await SessionRuntimeProfile.read(unchangedForeign)
+          expect(unchangedForeign.permission).toEqual([
+            { permission: "*", pattern: "*", action: "allow" },
+          ])
+          expect(unchangedForeignProfile).toMatchObject({
+            context: { blocks: [{ id: "foreign-context", content: "foreign private history" }] },
+            resources: { mcp: { servers: ["foreign-network"] } },
+          })
 
-        const resumed = await task.execute({
+          const resumed = await task.execute({
           description: "Continue runtime review",
           prompt: "Continue the same focused review.",
           subagent_type: "platform.gitlab.risk-qa",
           session_id: specialistSession.id,
         }, toolContext(root.id, "platform.gitlab.pm-coordinator"))
-        expect(resumed.metadata.sessionId).toBe(specialistSession.id)
-      } finally {
-        restorePrompt()
-      }
-    },
-  })
+          expect(resumed.metadata.sessionId).toBe(specialistSession.id)
+        } finally {
+          restorePrompt()
+        }
+      },
+    })
+  } finally {
+    restoreEnv("OPENCODE_TEST_HOME", originalHome)
+  }
 })
 
 test("generic TaskTool callers retain legitimate child-session reuse", async () => {
@@ -232,7 +270,7 @@ test("generic TaskTool callers retain legitimate child-session reuse", async () 
         directory: tmp.path,
         runtimeProfile: runtimeProfile("general", "generic-task"),
       })
-      const restorePrompt = mockTaskPrompt()
+      const restorePrompt = promptTaskWithoutReply()
 
       try {
         const task = await TaskTool.init()

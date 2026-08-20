@@ -270,7 +270,7 @@ async function gitLabReviewSpecialistRuntime(input: {
     id: ulid(),
     createdAt: Date.now(),
     source: "new-session",
-    sourceTemplateIds: [GITLAB_REVIEW_SPECIALIST_TEMPLATE, ownerMarker],
+    sourceTemplateIds: gitLabReviewSpecialistTemplateIds(input.owner.id),
     agent: {
       name: input.agent.name,
       source: "internal-runtime",
@@ -322,7 +322,7 @@ async function isOwnedGitLabReviewSpecialistSession(input: {
     || profile.sessionId !== input.session.id
     || profile.agent.name !== input.agentName
     || profile.permissions.mergeMode !== "strict"
-    || !sameStrings(profile.sourceTemplateIds, [GITLAB_REVIEW_SPECIALIST_TEMPLATE, ownerMarker])
+    || !sameStrings(profile.sourceTemplateIds, gitLabReviewSpecialistTemplateIds(input.owner.id))
     || !sameStrings(profile.permissions.source, [GITLAB_REVIEW_SPECIALIST_TEMPLATE, ownerMarker])
     || !sameRules(profile.permissions.rules.specialist, input.permission)
     || profile.context.blocks.length !== 0
@@ -338,6 +338,14 @@ async function isOwnedGitLabReviewSpecialistSession(input: {
 
 function gitLabReviewSpecialistOwnerMarker(sessionID: string) {
   return `gitlab-review-owner:${sessionID}`
+}
+
+function gitLabReviewSpecialistTemplateIds(ownerSessionID: string) {
+  return [
+    GITLAB_REVIEW_SPECIALIST_TEMPLATE,
+    gitLabReviewSpecialistOwnerMarker(ownerSessionID),
+    RuntimeResourceResolver.resourceTemplateId(),
+  ]
 }
 
 function sameClient(left: Session.Client | undefined, right: Session.Client | undefined) {
