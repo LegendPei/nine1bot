@@ -215,6 +215,7 @@ test("GitLab review TaskTool preserves an empty specialist resource snapshot thr
             `gitlab-review-owner:${root.id}`,
             RuntimeResourceResolver.resourceTemplateId(),
           ])
+          expect(specialistProfile?.resources.builtinTools).toEqual({})
           expect(specialistProfile?.resources.mcp.servers).toEqual([])
           expect(specialistProfile?.resources.skills.skills).toEqual([])
           expect(specialistProfile?.context.blocks).toEqual([])
