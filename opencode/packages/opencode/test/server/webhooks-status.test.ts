@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -301,6 +301,140 @@ describe("webhook status URL selection", () => {
       error: "gitlab_review_publication_input_too_large",
     })
   })
+
+  test("returns domain 413 before claim or GitLab access when a valid request expands during aggregation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-publication-domain-budget-"))
+    const configPath = join(directory, "config.json")
+    const secretsPath = join(directory, "secrets.json")
+    const previousConfigPath = process.env.NINE1BOT_CONFIG_PATH
+    const previousSecretsPath = process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+    const previousFetch = globalThis.fetch
+    ReviewRunStore.setPathForTesting(join(directory, "review-runs.json"))
+    ReviewRunStore.clearForTesting()
+    const headSha = "management-domain-budget-head"
+    const trigger = {
+      host: "gitlab.example.com",
+      projectId: 123,
+      objectType: "mr" as const,
+      objectIid: 10,
+      headSha,
+      mode: "webhook" as const,
+    }
+    const run = ReviewRunStore.create({
+      platform: "gitlab",
+      status: "running",
+      trigger,
+      context: {
+        trigger,
+        idempotencyKey: "management-domain-budget",
+        diff: {
+          files: [{
+            oldPath: "src/app.ts",
+            newPath: "src/app.ts",
+            diff: "@@ -1,2 +1,3 @@\n context\n+changed\n",
+            added: false,
+            renamed: false,
+            deleted: false,
+            generated: false,
+          }],
+          skipped: [],
+          blocked: false,
+          diffRefs: { baseSha: "base", startSha: "start", headSha },
+          stats: {
+            fileCount: 1,
+            includedFileCount: 1,
+            skippedFileCount: 0,
+            includedBytes: 42,
+            truncated: false,
+          },
+        },
+        contextBlocks: [],
+      },
+    })
+    const findingCount = gitLabReviewPublicationBudget.maxFindings
+    const totalBodyCodeUnits = gitLabReviewPublicationBudget.maxTotalCodeUnits
+      - run.id.length
+      - "s".length
+      - findingCount
+    const baseBodyCodeUnits = Math.floor(totalBodyCodeUnits / findingCount)
+    const longerBodyCount = totalBodyCodeUnits % findingCount
+    const stageResult = {
+      stage: "s",
+      status: "ok",
+      summary: "",
+      findings: Array.from({ length: findingCount }, (_, index) => {
+        const bodyCodeUnits = baseBodyCodeUnits + (index < longerBodyCount ? 1 : 0)
+        const label = index.toString().padStart(3, "0")
+        return {
+          title: "t",
+          body: `${label}${"x".repeat(bodyCodeUnits - label.length)}`,
+          severity: "info",
+        }
+      }),
+    }
+    const body = JSON.stringify({ stageResult })
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(
+      gitLabReviewPublicationBudget.maxManagementRequestBytes,
+    )
+    await writeFile(configPath, JSON.stringify({
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            "review.enabled": true,
+            "review.dryRun": false,
+            "review.inlineComments": true,
+            "review.baseUrl": "https://gitlab.example.com",
+            "review.tokenSecretRef": { provider: "nine1bot-local", key: "gitlab-token" },
+          },
+        },
+      },
+    }))
+    await writeFile(secretsPath, JSON.stringify({
+      version: 1,
+      secrets: { "gitlab-token": "token" },
+    }))
+    process.env.NINE1BOT_CONFIG_PATH = configPath
+    process.env.NINE1BOT_PLATFORM_SECRETS_PATH = secretsPath
+    const gitLabRequests: string[] = []
+    globalThis.fetch = (async (url) => {
+      gitLabRequests.push(String(url))
+      return Response.json({ diff_refs: { head_sha: headSha } })
+    }) as typeof fetch
+    const claimPublication = spyOn(ReviewRunStore, "claimPublication")
+
+    try {
+      const response = await WebhookRoutes().request(
+        `http://localhost/gitlab/runs/${run.id}/publish`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(new TextEncoder().encode(body).byteLength),
+          },
+          body,
+        },
+      )
+
+      expect(response.status).toBe(413)
+      await expect(response.json()).resolves.toEqual({
+        published: false,
+        runId: run.id,
+        error: "gitlab_review_publication_input_too_large",
+      })
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(gitLabRequests).toEqual([])
+      expect(ReviewRunStore.get(run.id)?.publication).toBeUndefined()
+    } finally {
+      claimPublication.mockRestore()
+      globalThis.fetch = previousFetch
+      if (previousConfigPath === undefined) delete process.env.NINE1BOT_CONFIG_PATH
+      else process.env.NINE1BOT_CONFIG_PATH = previousConfigPath
+      if (previousSecretsPath === undefined) delete process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+      else process.env.NINE1BOT_PLATFORM_SECRETS_PATH = previousSecretsPath
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 30_000)
 
   test("records a nonblocking diagnostic when runtime finishes without querying CI", () => {
     const patch = gitLabReviewCiNotQueriedPatch({

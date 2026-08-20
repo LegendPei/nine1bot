@@ -2,12 +2,16 @@ import { renderReviewFindingItem, renderReviewSummaryComment } from './comment-r
 import type { GitLabPublishedComment } from './api-client'
 import { validateGitLabInlinePosition } from './inline-position'
 import { gitLabReviewPublicationMarker } from './publication-markers'
-import { buildGitLabReviewPublicationPlan } from './publisher'
+import {
+  buildGitLabReviewPublicationPlan,
+  type GitLabReviewPreparedPublicationPlan,
+} from './publisher'
 import {
   GitLabReviewPublicationBudgetError,
   snapshotGitLabReviewPublicationContent,
 } from './publication-budget'
 import type {
+  AggregatedReviewFinding,
   GitLabDiffManifest,
   GitLabReviewObjectType,
   ReviewFinding,
@@ -36,17 +40,24 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
   warnings?: string[]
   notes: GitLabPublishedComment[]
   discussions: GitLabPublishedComment[]
+  plan?: GitLabReviewPreparedPublicationPlan
 }) {
   const snapshot = snapshotReconciliationInput(input)
-  const plan = buildGitLabReviewPublicationPlan({ runId: snapshot.runId, findings: snapshot.findings })
-  const summaryMarker = requiredMarker(plan.summaryMarker)
-  const layout = buildLegacyPublicationLayout(snapshot, plan.findings)
-  const markerCatalog = buildMarkerCatalog({
-    runId: snapshot.runId,
-    summaryMarker,
-    findings: plan.findings,
-    summaryFindings: layout.summaryFindings,
-  })
+  const publicationPlan = input.plan
+    ? publicationPlanFromPrepared(input.plan)
+    : buildGitLabReviewPublicationPlan({ runId: snapshot.runId, findings: snapshot.findings })
+  const summaryMarker = requiredMarker(publicationPlan.summaryMarker)
+  const layout = input.plan
+    ? buildPreparedPublicationLayout(input.plan, publicationPlan.findings)
+    : buildLegacyPublicationLayout(snapshot, publicationPlan.findings)
+  const markerCatalog = input.plan
+    ? buildMarkerCatalogFromPrepared(snapshot.runId, input.plan)
+    : buildMarkerCatalog({
+        runId: snapshot.runId,
+        summaryMarker,
+        findings: publicationPlan.findings,
+        summaryFindings: layout.summaryFindings,
+      })
   const scanCache = new Map<string, ExtractedMarkerBody>()
   const notes = scanUniqueComments(snapshot.notes, 'note', markerCatalog, scanCache)
   const discussions = scanUniqueComments(snapshot.discussions, 'discussion', markerCatalog, scanCache)
@@ -104,10 +115,10 @@ export function reconcileGitLabReviewPublicationMarkers(input: {
 
   return [
     ...(completed.has(summaryMarker) ? [summaryMarker] : []),
-    ...plan.findings.flatMap(({ markers }) => {
+    ...publicationPlan.findings.flatMap(({ markers }) => {
       return markers && completed.has(markers.fallbackMarker) ? [markers.fallbackMarker] : []
     }),
-    ...plan.findings.flatMap(({ markers }) => {
+    ...publicationPlan.findings.flatMap(({ markers }) => {
       return markers && completed.has(markers.inlineMarker) ? [markers.inlineMarker] : []
     }),
   ]
@@ -117,18 +128,27 @@ function snapshotReconciliationInput(
   input: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0],
 ): Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0] {
   let publicationInput: ReturnType<typeof snapshotGitLabReviewPublicationContent>
-  try {
-    publicationInput = snapshotGitLabReviewPublicationContent({
+  if (input.plan) {
+    publicationInput = {
       runId: input.runId,
-      summary: input.summary,
-      findings: input.findings,
-      warnings: input.warnings,
-    })
-  } catch (error) {
-    if (error instanceof GitLabReviewPublicationBudgetError) {
-      throw new GitLabReviewPublicationCompatibilityError()
+      summary: input.plan.summaryText,
+      findings: input.plan.findings.map(({ finding }) => finding as ReviewFinding),
+      warnings: [...input.plan.baseWarnings],
     }
-    throw error
+  } else {
+    try {
+      publicationInput = snapshotGitLabReviewPublicationContent({
+        runId: input.runId,
+        summary: input.summary,
+        findings: input.findings,
+        warnings: input.warnings,
+      })
+    } catch (error) {
+      if (error instanceof GitLabReviewPublicationBudgetError) {
+        throw new GitLabReviewPublicationCompatibilityError()
+      }
+      throw error
+    }
   }
 
   const commentBodies = new Set<string>()
@@ -161,6 +181,7 @@ function snapshotReconciliationInput(
     warnings: publicationInput.warnings,
     notes,
     discussions,
+    plan: input.plan,
   }
 }
 
@@ -176,6 +197,48 @@ function addReconciliationInputCodeUnits(current: number, amount: number, budget
 }
 
 type PublicationFinding = ReturnType<typeof buildGitLabReviewPublicationPlan>['findings'][number]
+
+function publicationPlanFromPrepared(plan: GitLabReviewPreparedPublicationPlan): {
+  summaryMarker?: string
+  findings: PublicationFinding[]
+} {
+  return {
+    summaryMarker: plan.markerCatalog.summaryMarker,
+    findings: plan.findings.map(({ finding, markers }) => ({
+      finding: finding as AggregatedReviewFinding,
+      markers: markers ? { ...markers } : undefined,
+    })),
+  }
+}
+
+function buildPreparedPublicationLayout(
+  plan: GitLabReviewPreparedPublicationPlan,
+  findings: PublicationFinding[],
+) {
+  const preparedByFinding = new Map(plan.findings.map(({ finding }, index) => (
+    [finding, findings[index]!] as const
+  )))
+  const summaryWarnings = new Map<PublicationFinding, string>()
+  const summaryFindings = plan.summaryFallbacks.map((fallback) => {
+    const finding = requiredPreparedFinding(preparedByFinding.get(fallback.finding))
+    if (fallback.warning) summaryWarnings.set(finding, fallback.warning)
+    return finding
+  })
+  const inlineFindings = plan.inline.map(({ finding }) => (
+    requiredPreparedFinding(preparedByFinding.get(finding))
+  ))
+  return {
+    warnings: [...plan.baseWarnings],
+    summaryWarnings,
+    summaryFindings,
+    inlineFindings,
+  }
+}
+
+function requiredPreparedFinding(finding: PublicationFinding | undefined) {
+  if (!finding) throw new GitLabReviewPublicationCompatibilityError()
+  return finding
+}
 
 function buildLegacyPublicationLayout(
   input: {
@@ -242,6 +305,23 @@ function buildMarkerCatalog(input: {
       ...fallbackMarkers,
       ...inlineMarkers,
     ]),
+  }
+}
+
+function buildMarkerCatalogFromPrepared(
+  runId: string,
+  plan: GitLabReviewPreparedPublicationPlan,
+) {
+  const summaryMarker = requiredMarker(plan.markerCatalog.summaryMarker)
+  const legacyFallbackMarker = requiredMarker(plan.markerCatalog.legacyFallbackMarker)
+  return {
+    encodedRunId: encodeURIComponent(runId),
+    summaryMarker,
+    legacyFallbackMarker,
+    fallbackMarkers: new Set(plan.markerCatalog.fallbackMarkers),
+    inlineMarkers: new Set(plan.markerCatalog.inlineMarkers),
+    summaryFallbackMarkers: [...plan.markerCatalog.summaryFallbackMarkers],
+    expectedMarkers: new Set(plan.markerCatalog.expectedMarkers),
   }
 }
 

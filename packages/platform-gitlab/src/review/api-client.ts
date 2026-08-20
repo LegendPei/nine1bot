@@ -1,4 +1,5 @@
 import type { GitLabRawChangesResponse } from './types'
+import { encodeGitLabReviewPublicationForm } from './publication-budget'
 
 const GITLAB_PAGE_SIZE = 100
 const MAX_PAGINATED_PAGES = 5
@@ -398,9 +399,11 @@ export class GitLabApiClient {
     const notePath = input.resource === 'repository/commits'
       ? `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/repository/commits/${encodeURIComponent(String(input.resourceId))}/comments`
       : `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/merge_requests/${encodeURIComponent(String(input.resourceId))}/notes`
-    const body = input.resource === 'repository/commits'
-      ? new URLSearchParams({ note: input.body })
-      : new URLSearchParams({ body: input.body })
+    const body = encodeGitLabReviewPublicationForm({
+      type: 'note',
+      resource: input.resource,
+      body: input.body,
+    }).form
     return await this.request(notePath, {
       method: 'POST',
       body,
@@ -408,8 +411,11 @@ export class GitLabApiClient {
   }
 
   async createDiscussion(input: GitLabCreateDiscussionInput): Promise<unknown> {
-    const body = new URLSearchParams({ body: input.body })
-    if (input.position) appendNestedFormFields(body, 'position', input.position)
+    const body = encodeGitLabReviewPublicationForm({
+      type: 'discussion',
+      body: input.body,
+      position: input.position,
+    }).form
     return await this.request(`/api/v4/projects/${encodeURIComponent(String(input.projectId))}/${input.resource}/${encodeURIComponent(String(input.resourceId))}/discussions`, {
       method: 'POST',
       body,
@@ -856,11 +862,4 @@ function groupHookBody(input: GitLabGroupHookInput) {
     enable_ssl_verification: String(input.enableSslVerification ?? true),
   })
   return body
-}
-
-function appendNestedFormFields(body: URLSearchParams, prefix: string, value: Record<string, unknown>) {
-  for (const [key, nestedValue] of Object.entries(value)) {
-    if (nestedValue === undefined || nestedValue === null) continue
-    body.set(`${prefix}[${key}]`, String(nestedValue))
-  }
 }

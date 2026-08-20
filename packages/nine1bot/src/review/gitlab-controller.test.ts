@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   aggregateReviewFindings,
+  gitLabReviewPublicationBudget,
   gitLabReviewFindingKey,
   gitLabReviewPublicationMarker,
   parseReviewStageResult,
@@ -183,6 +184,28 @@ function publicationStageResultWithTwoInlineFindings(summary = 'Publication revi
       },
     ],
   }
+}
+
+function rawValidAggregateOversizedStageResult(runId: string) {
+  const findingCount = gitLabReviewPublicationBudget.maxFindings
+  const stage = 's'
+  const title = 't'
+  const totalBodyCodeUnits = gitLabReviewPublicationBudget.maxTotalCodeUnits
+    - runId.length
+    - stage.length
+    - (title.length * findingCount)
+  const baseBodyCodeUnits = Math.floor(totalBodyCodeUnits / findingCount)
+  const longerBodyCount = totalBodyCodeUnits % findingCount
+  const findings = Array.from({ length: findingCount }, (_, index) => {
+    const bodyCodeUnits = baseBodyCodeUnits + (index < longerBodyCount ? 1 : 0)
+    const label = index.toString().padStart(3, '0')
+    return {
+      title,
+      body: `${label}${'x'.repeat(bodyCodeUnits - label.length)}`,
+      severity: 'info' as const,
+    }
+  })
+  return { stage, status: 'ok' as const, summary: '', findings }
 }
 
 function publicationPayloadHash(stageResult: unknown) {
@@ -4492,6 +4515,115 @@ describe('GitLab review controller', () => {
       state: 'partial',
       completedMarkers: [],
     })
+  }, 30_000)
+
+  test('rejects raw-valid aggregate expansion before first publication claim or GitLab access', async () => {
+    const run = createPublishableReviewRun({ headSha: 'aggregate-budget-first-head' })
+    const stageResult = rawValidAggregateOversizedStageResult(run.id)
+    const parsed = parseReviewStageResult(stageResult, { runId: run.id })
+    expect(parsed.findings).toHaveLength(gitLabReviewPublicationBudget.maxFindings)
+    expect(() => aggregateReviewFindings(parsed.findings)).toThrow(
+      'gitlab_review_publication_input_too_large',
+    )
+
+    let secretReads = 0
+    const gitLabRequests: string[] = []
+    const claimPublication = spyOn(ReviewRunStore, 'claimPublication')
+    try {
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: publishingPlatforms(),
+        secrets: {
+          ...liveSecrets,
+          async get(ref) {
+            secretReads += 1
+            return await liveSecrets.get(ref)
+          },
+        },
+        fetch: (async (url) => {
+          gitLabRequests.push(String(url))
+          return Response.json({ diff_refs: { head_sha: 'aggregate-budget-first-head' } })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_input_too_large',
+      })
+      expect(secretReads).toBe(0)
+      expect(gitLabRequests).toHaveLength(0)
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(ReviewRunStore.get(run.id)?.publication?.claimId).toBeUndefined()
+      expect(ReviewRunStore.get(run.id)?.publication).toBeUndefined()
+    } finally {
+      claimPublication.mockRestore()
+    }
+  }, 30_000)
+
+  test('preserves an existing partial publication when raw-valid aggregation exceeds budget', async () => {
+    const run = createPublishableReviewRun({ headSha: 'aggregate-budget-resume-head' })
+    const stageResult = rawValidAggregateOversizedStageResult(run.id)
+    const payloadHash = publicationPayloadHash(stageResult)
+    const existingMarker = gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })
+    const seedClaim = ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'seed-owner',
+    })
+    if (!seedClaim.ok) throw new Error(`expected seed claim: ${seedClaim.error}`)
+    expect(ReviewRunStore.recordPublicationMarker({
+      runId: run.id,
+      claimId: seedClaim.claimId,
+      ownerId: 'seed-owner',
+      payloadHash,
+      marker: existingMarker,
+    })).toBe(true)
+    expect(ReviewRunStore.failPublication({
+      runId: run.id,
+      claimId: seedClaim.claimId,
+      ownerId: 'seed-owner',
+      payloadHash,
+      error: 'seed_partial',
+    })).toBe(true)
+    const publicationBefore = ReviewRunStore.get(run.id)?.publication
+
+    let secretReads = 0
+    const gitLabRequests: string[] = []
+    const claimPublication = spyOn(ReviewRunStore, 'claimPublication')
+    try {
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: publishingPlatforms(),
+        secrets: {
+          ...liveSecrets,
+          async get(ref) {
+            secretReads += 1
+            return await liveSecrets.get(ref)
+          },
+        },
+        fetch: (async (url) => {
+          gitLabRequests.push(String(url))
+          return Response.json([])
+        }) as typeof fetch,
+        publisherOwnerId: 'resume-owner',
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: 'gitlab_review_publication_input_too_large',
+      })
+      expect(secretReads).toBe(0)
+      expect(gitLabRequests).toHaveLength(0)
+      expect(claimPublication).toHaveBeenCalledTimes(0)
+      expect(ReviewRunStore.get(run.id)?.publication?.claimId).toBeUndefined()
+      expect(ReviewRunStore.get(run.id)?.publication).toEqual(publicationBefore)
+    } finally {
+      claimPublication.mockRestore()
+    }
   }, 30_000)
 
   test('keeps a resumed 501-finding publication partial without changing its checkpoint or posting', async () => {

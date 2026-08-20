@@ -13,6 +13,7 @@ export const gitLabReviewPublicationBudget = Object.freeze({
   maxAggregateBodyUtf8Bytes: 512_000,
   maxRenderedBodyCodeUnits: 512_000,
   maxRenderedBodyUtf8Bytes: 1_024_000,
+  maxOutboundFormBytes: 2_000_000,
   maxManagementRequestBytes: 2_000_000,
 })
 
@@ -118,6 +119,42 @@ export function assertGitLabReviewRenderedBodyBudget(body: string) {
     gitLabReviewPublicationBudget.maxRenderedBodyCodeUnits,
     gitLabReviewPublicationBudget.maxRenderedBodyUtf8Bytes,
   )
+}
+
+export type GitLabReviewPublicationFormInput =
+  | {
+      type: 'note'
+      resource: 'merge_requests' | 'repository/commits'
+      body: string
+    }
+  | {
+      type: 'discussion'
+      body: string
+      position?: Readonly<Record<string, unknown>>
+    }
+
+export type GitLabReviewEncodedPublicationForm = Readonly<{
+  form: URLSearchParams
+  encodedBytes: number
+}>
+
+export function encodeGitLabReviewPublicationForm(
+  input: GitLabReviewPublicationFormInput,
+): GitLabReviewEncodedPublicationForm {
+  const form = input.type === 'note' && input.resource === 'repository/commits'
+    ? new URLSearchParams({ note: input.body })
+    : new URLSearchParams({ body: input.body })
+  if (input.type === 'discussion' && input.position) {
+    for (const [key, value] of Object.entries(input.position)) {
+      if (value === undefined || value === null) continue
+      form.set(`position[${key}]`, String(value))
+    }
+  }
+  const encodedBytes = utf8Length(form.toString())
+  if (encodedBytes > gitLabReviewPublicationBudget.maxOutboundFormBytes) {
+    throw new GitLabReviewPublicationBudgetError()
+  }
+  return Object.freeze({ form, encodedBytes })
 }
 
 function publicationTextBudget() {

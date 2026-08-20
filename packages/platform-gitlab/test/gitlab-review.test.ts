@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import * as gitLabReview from '../src'
 import {
   aggregateReviewFindings,
+  assertGitLabReviewRenderedBodyBudget,
   buildGitLabDiffManifest,
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
@@ -8,9 +10,11 @@ import {
   compileSubagentStageResults,
   defaultGitLabReviewSettings,
   gitLabReviewFindingKey,
+  gitLabReviewPublicationBudget,
   gitLabReviewPublicationMarker,
   GitLabApiError,
   GitLabApiClient,
+  GitLabReviewPublicationBudgetError,
   inspectGitLabCi,
   isGitLabReviewPublicationComplete,
   minimumGitLabReviewDiffEvidenceBytes,
@@ -439,6 +443,216 @@ describe('GitLab review foundation', () => {
       body: `${exactUtf8Body}y`,
       severity: 'info',
     }])).toThrow('gitlab_review_publication_input_too_large')
+  })
+
+  test('prepares a deeply frozen aggregate finding snapshot', () => {
+    const manifest = buildGitLabDiffManifest({ changes: [] })
+    const findings: ReviewFinding[] = [{
+      title: 'Shared finding',
+      body: 'Primary body',
+      severity: 'major',
+      suggestion: { replacement: 'primary()', confidence: 'high' },
+      source: 'primary',
+    }, {
+      title: 'Shared finding',
+      body: 'Secondary body',
+      severity: 'critical',
+      suggestion: { replacement: 'secondary()', confidence: 'medium' },
+      source: 'secondary',
+    }]
+
+    const prepare = (gitLabReview as typeof gitLabReview & {
+      prepareGitLabReviewPublicationPlan?: (input: Record<string, unknown>) => any
+    }).prepareGitLabReviewPublicationPlan
+    expect(prepare).toBeTypeOf('function')
+    if (!prepare) return
+    const plan = prepare({
+      runId: 'run-frozen-plan',
+      objectType: 'commit',
+      manifest,
+      summary: 'Frozen plan.',
+      findings,
+      inlineComments: false,
+      warnings: ['stable warning'],
+    })
+    findings[0]!.body = 'mutated after preparation'
+    findings[1]!.suggestion!.replacement = 'mutated()'
+
+    expect(plan.findings).toHaveLength(1)
+    expect(plan.findings[0]?.finding).toMatchObject({
+      body: 'Primary body\n\nSecondary body',
+      severity: 'critical',
+      sources: ['primary', 'secondary'],
+    })
+    expect(plan.findings[0]?.finding.duplicates[0]?.suggestion?.replacement).toBe('secondary()')
+    expect(Object.isFrozen(plan)).toBe(true)
+    expect(Object.isFrozen(plan.findings)).toBe(true)
+    expect(Object.isFrozen(plan.findings[0])).toBe(true)
+    expect(Object.isFrozen(plan.findings[0]?.finding)).toBe(true)
+    expect(Object.isFrozen(plan.findings[0]?.finding.sources)).toBe(true)
+    expect(Object.isFrozen(plan.findings[0]?.finding.duplicates)).toBe(true)
+    expect(Object.isFrozen(plan.findings[0]?.finding.duplicates[0])).toBe(true)
+    expect(Object.isFrozen(plan.findings[0]?.finding.duplicates[0]?.suggestion)).toBe(true)
+  })
+
+  test('accepts exact rendered limits and rejects one code unit or UTF-8 byte more', () => {
+    expect(() => assertGitLabReviewRenderedBodyBudget('x'.repeat(
+      gitLabReviewPublicationBudget.maxRenderedBodyCodeUnits,
+    ))).not.toThrow()
+    expect(() => assertGitLabReviewRenderedBodyBudget('x'.repeat(
+      gitLabReviewPublicationBudget.maxRenderedBodyCodeUnits + 1,
+    ))).toThrow('gitlab_review_publication_input_too_large')
+
+    const exactUtf8 = `${'你'.repeat(341_333)}x`
+    expect(new TextEncoder().encode(exactUtf8)).toHaveLength(
+      gitLabReviewPublicationBudget.maxRenderedBodyUtf8Bytes,
+    )
+    expect(() => assertGitLabReviewRenderedBodyBudget(exactUtf8)).not.toThrow()
+    expect(() => assertGitLabReviewRenderedBodyBudget(`${exactUtf8}y`)).toThrow(
+      'gitlab_review_publication_input_too_large',
+    )
+  })
+
+  test('counts exact URLSearchParams bytes for notes, discussions, Unicode, newlines, and positions', () => {
+    const encode = (gitLabReview as typeof gitLabReview & {
+      encodeGitLabReviewPublicationForm?: (input: Record<string, unknown>) => any
+    }).encodeGitLabReviewPublicationForm
+    expect(encode).toBeTypeOf('function')
+    if (!encode) return
+
+    const exactNoteBody = 'x'.repeat(gitLabReviewPublicationBudget.maxOutboundFormBytes - 'body='.length)
+    expect(encode({ type: 'note', resource: 'merge_requests', body: exactNoteBody }).encodedBytes).toBe(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes,
+    )
+    expect(() => encode({
+      type: 'note',
+      resource: 'merge_requests',
+      body: `${exactNoteBody}x`,
+    })).toThrow('gitlab_review_publication_input_too_large')
+
+    const position = {
+      position_type: 'text',
+      base_sha: 'base',
+      start_sha: 'start',
+      head_sha: 'head',
+      old_path: 'src/旧 file.ts',
+      new_path: 'src/新 😀.ts',
+      old_line: 3,
+      new_line: 4,
+    }
+    const manual = new URLSearchParams({ body: '' })
+    for (const [key, value] of Object.entries(position)) manual.set(`position[${key}]`, String(value))
+    const positionOverhead = new TextEncoder().encode(manual.toString()).byteLength
+    const exactDiscussionBody = 'x'.repeat(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes - positionOverhead,
+    )
+    expect(encode({ type: 'discussion', body: exactDiscussionBody, position }).encodedBytes).toBe(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes,
+    )
+    expect(() => encode({
+      type: 'discussion',
+      body: `${exactDiscussionBody}x`,
+      position,
+    })).toThrow('gitlab_review_publication_input_too_large')
+
+    const mixedBody = 'ASCII 中文 😀\nnext line'
+    const mixed = encode({ type: 'discussion', body: mixedBody, position })
+    manual.set('body', mixedBody)
+    expect(mixed.form.toString()).toBe(manual.toString())
+    expect(mixed.encodedBytes).toBe(new TextEncoder().encode(manual.toString()).byteLength)
+    expect(encode({ type: 'note', resource: 'repository/commits', body: mixedBody }).form.get('note'))
+      .toBe(mixedBody)
+  })
+
+  test('prepares and freezes every canonical publication operation with encoded sizes', () => {
+    const encode = (gitLabReview as typeof gitLabReview & {
+      encodeGitLabReviewPublicationForm?: (input: Record<string, unknown>) => any
+    }).encodeGitLabReviewPublicationForm
+    expect(encode).toBeTypeOf('function')
+    if (!encode) return
+    const prepare = gitLabReview.prepareGitLabReviewPublicationPlan
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const findings: ReviewFinding[] = [{
+      title: 'Inline finding',
+      body: 'Inline body 中文 😀.',
+      severity: 'major',
+      file: 'src/app.ts',
+      newLine: 2,
+    }, {
+      title: 'Summary fallback finding',
+      body: 'Outside the hunk.',
+      severity: 'critical',
+      file: 'src/app.ts',
+      newLine: 99,
+    }]
+    const runId = 'run-complete-plan'
+    const plan = prepare({
+      runId,
+      objectType: 'mr',
+      manifest,
+      summary: 'Review complete.\n多行',
+      findings,
+      inlineComments: true,
+      warnings: ['prepared warning'],
+    }) as any
+    const summaryMarker = gitLabReviewPublicationMarker({ runId, kind: 'summary' })
+    const inlineMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'inline',
+      findingKey: gitLabReviewFindingKey(findings[0]!),
+    })
+    const summaryFallbackMarker = gitLabReviewPublicationMarker({
+      runId,
+      kind: 'fallback',
+      findingKey: gitLabReviewFindingKey(findings[1]!),
+    })
+
+    expect(plan.summary.body).toContain(summaryMarker)
+    expect(plan.summary.body).toContain(summaryFallbackMarker)
+    expect(plan.summary.encodedBytes).toBe(encode({
+      type: 'note',
+      resource: 'merge_requests',
+      body: plan.summary.body,
+    }).encodedBytes)
+    expect(plan.inline).toHaveLength(1)
+    expect(plan.inline[0].body).toContain(inlineMarker)
+    expect(plan.inline[0].encodedBytes).toBe(encode({
+      type: 'discussion',
+      body: plan.inline[0].body,
+      position: plan.inline[0].position,
+    }).encodedBytes)
+    expect(plan.inline[0].fallback.body).toContain(plan.inline[0].fallback.marker)
+    expect(plan.inline[0].fallback.body).toContain('Nine1bot Inline Publish Fallback')
+    expect(plan.inline[0].fallback.encodedBytes).toBe(encode({
+      type: 'note',
+      resource: 'merge_requests',
+      body: plan.inline[0].fallback.body,
+    }).encodedBytes)
+    expect(plan.summaryFallbacks).toHaveLength(1)
+    expect(plan.summaryFallbacks[0].marker).toBe(summaryFallbackMarker)
+    expect(plan.summaryFallbacks[0].encodedBytes).toBe(encode({
+      type: 'note',
+      resource: 'merge_requests',
+      body: plan.summaryFallbacks[0].body,
+    }).encodedBytes)
+    expect(plan.warnings).toEqual([
+      'prepared warning',
+      'Inline fallback for src/app.ts: Line 99 is not inside the diff hunk.',
+    ])
+    expect(Object.isFrozen(plan.summary)).toBe(true)
+    expect(Object.isFrozen(plan.inline)).toBe(true)
+    expect(Object.isFrozen(plan.inline[0])).toBe(true)
+    expect(Object.isFrozen(plan.inline[0].position)).toBe(true)
+    expect(Object.isFrozen(plan.inline[0].fallback)).toBe(true)
+    expect(Object.isFrozen(plan.summaryFallbacks)).toBe(true)
+    expect(Object.isFrozen(plan.warnings)).toBe(true)
   })
 
   test('extracts subagent review JSON from task output and aggregates findings deterministically', () => {
@@ -1718,6 +1932,67 @@ describe('GitLab review foundation', () => {
     expect(capturedBody).not.toContain('position=%7B')
   })
 
+  test('rejects an oversized direct createNote before fetch', async () => {
+    const fetches: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        fetches.push(String(url))
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+    })
+    const oversizedBody = 'x'.repeat(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes - 'body='.length + 1,
+    )
+
+    await expect(client.createNote({
+      projectId: 123,
+      resource: 'merge_requests',
+      resourceId: 10,
+      body: oversizedBody,
+    })).rejects.toBeInstanceOf(GitLabReviewPublicationBudgetError)
+    expect(fetches).toEqual([])
+  })
+
+  test('rejects an oversized direct createDiscussion with position before fetch', async () => {
+    const fetches: string[] = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async (url) => {
+        fetches.push(String(url))
+        return Response.json({ id: 1 })
+      }) as typeof fetch,
+    })
+    const position = {
+      position_type: 'text',
+      base_sha: 'base',
+      start_sha: 'start',
+      head_sha: 'head',
+      old_path: 'src/旧.ts',
+      new_path: 'src/新 😀.ts',
+      new_line: 7,
+    }
+    const emptyForm = new URLSearchParams({ body: '' })
+    for (const [key, value] of Object.entries(position)) {
+      emptyForm.set(`position[${key}]`, String(value))
+    }
+    const overhead = new TextEncoder().encode(emptyForm.toString()).byteLength
+    const oversizedBody = 'x'.repeat(
+      gitLabReviewPublicationBudget.maxOutboundFormBytes - overhead + 1,
+    )
+
+    await expect(client.createDiscussion({
+      projectId: 123,
+      resource: 'merge_requests',
+      resourceId: 10,
+      body: oversizedBody,
+      position,
+    })).rejects.toBeInstanceOf(GitLabReviewPublicationBudgetError)
+    expect(fetches).toEqual([])
+  })
+
   test('loads merge request pipeline evidence through read-only GitLab endpoints', async () => {
     const urls: string[] = []
     const client = new GitLabApiClient({
@@ -2745,6 +3020,7 @@ describe('GitLab review foundation', () => {
     expect(notes[0]).toContain('### Inline Comments')
     expect(notes[1]).toContain('Nine1bot Inline Publish Fallback')
     expect(notes[1]).toContain('Inline body')
+    expect(notes[1]).not.toContain('position is invalid')
     expect(notes[1]).not.toContain('Evidence:')
     expect(notes[1]).not.toContain('```diff')
   })
@@ -2875,6 +3151,62 @@ describe('GitLab review foundation', () => {
       runId,
       findings,
       completedMarkers: new Set([summaryMarker, inlineA, fallbackB]),
+    })).toBe(true)
+  })
+
+  test('reconciles current markers from a prepared plan without reading raw publication fields', () => {
+    const runId = 'run-prepared-reconciliation'
+    const manifest = buildGitLabDiffManifest({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'head' },
+      changes: [{
+        old_path: 'src/app.ts',
+        new_path: 'src/app.ts',
+        diff: '@@ -1,2 +1,3 @@\n context\n+changed\n',
+      }],
+    })
+    const plan = gitLabReview.prepareGitLabReviewPublicationPlan({
+      runId,
+      objectType: 'mr',
+      manifest,
+      summary: 'Prepared reconciliation.',
+      findings: [{
+        title: 'Prepared inline',
+        body: 'Prepared body.',
+        severity: 'major',
+        file: 'src/app.ts',
+        newLine: 2,
+      }],
+      inlineComments: true,
+      warnings: ['prepared warning'],
+    })
+    const rawReads: string[] = []
+    const input: Record<string, unknown> = {
+      runId,
+      objectType: 'mr',
+      inlineComments: true,
+      manifest,
+      plan,
+      notes: [{ id: 1, body: plan.summary.body }],
+      discussions: [{ id: 2, body: plan.inline[0]!.body }],
+    }
+    for (const field of ['summary', 'findings', 'warnings']) {
+      Object.defineProperty(input, field, {
+        enumerable: true,
+        get() {
+          rawReads.push(field)
+          throw new Error(`prepared reconciliation read ${field}`)
+        },
+      })
+    }
+
+    expect(reconcileGitLabReviewPublicationMarkers(input as any)).toEqual([
+      plan.summary.marker!,
+      plan.inline[0]!.inlineMarker!,
+    ])
+    expect(rawReads).toEqual([])
+    expect(isGitLabReviewPublicationComplete({
+      plan,
+      completedMarkers: new Set([plan.summary.marker!, plan.inline[0]!.inlineMarker!]),
     })).toBe(true)
   })
 

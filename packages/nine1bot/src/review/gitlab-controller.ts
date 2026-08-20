@@ -8,6 +8,7 @@ import {
   buildGitLabReviewContext,
   buildGitLabReviewIdempotencyKey,
   parseReviewStageResult,
+  prepareGitLabReviewPublicationPlan,
   publishGitLabReviewResult,
   reconcileGitLabReviewPublicationMarkers,
   renderBlockedDiffComment,
@@ -689,6 +690,30 @@ export async function publishGitLabReviewRunResult(input: {
     return { published: false, runId: input.runId, error: message }
   }
 
+  let publicationPlan: ReturnType<typeof prepareGitLabReviewPublicationPlan>
+  try {
+    publicationPlan = prepareGitLabReviewPublicationPlan({
+      runId: input.runId,
+      objectType: trigger.objectType,
+      manifest: context.diff,
+      summary: parsed.summary,
+      findings: parsed.findings,
+      inlineComments: settings.inlineComments,
+      warnings: parsed.nextActions,
+    })
+  } catch (error) {
+    if (!(error instanceof GitLabReviewPublicationBudgetError)) throw error
+    ReviewRunStore.updateIfCurrent(identity, {
+      status: 'failed',
+      error: GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
+    })
+    return {
+      published: false,
+      runId: input.runId,
+      error: GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
+    }
+  }
+
   const publicationGuard = await prepareGitLabReviewPublication({
     identity,
     trigger,
@@ -728,6 +753,7 @@ export async function publishGitLabReviewRunResult(input: {
         parsed,
         manifest: context.diff,
         inlineComments: settings.inlineComments,
+        plan: publicationPlan,
         claimIdentity,
         completedMarkers,
       })
@@ -759,6 +785,7 @@ export async function publishGitLabReviewRunResult(input: {
       findings: parsed.findings,
       inlineComments: settings.inlineComments,
       warnings: parsed.nextActions,
+      plan: publicationPlan,
       publication: {
         runId: input.runId,
         completedMarkers,
@@ -772,8 +799,7 @@ export async function publishGitLabReviewRunResult(input: {
     })
     assertPublicationClaimCurrent(claimIdentity)
     if (!isGitLabReviewPublicationComplete({
-      runId: input.runId,
-      findings: parsed.findings,
+      plan: publicationPlan,
       completedMarkers,
     })) {
       throw new Error('review_run_publication_incomplete')
@@ -1339,6 +1365,7 @@ async function reconcileGitLabReviewPublication(input: {
   parsed: ReturnType<typeof parseReviewStageResult>
   manifest: Parameters<typeof reconcileGitLabReviewPublicationMarkers>[0]['manifest']
   inlineComments: boolean
+  plan: ReturnType<typeof prepareGitLabReviewPublicationPlan>
   claimIdentity: Parameters<typeof ReviewRunStore.isPublicationClaimCurrent>[0]
   completedMarkers: Set<string>
 }) {
@@ -1376,6 +1403,7 @@ async function reconcileGitLabReviewPublication(input: {
     warnings: input.parsed.nextActions,
     notes,
     discussions,
+    plan: input.plan,
   })
   if (!ReviewRunStore.replacePublicationMarkers({ ...input.claimIdentity, markers: completedMarkers })) {
     throw new PublicationClaimLostError()
