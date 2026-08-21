@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
@@ -289,6 +289,231 @@ describe("webhook status URL selection", () => {
     expect(gitLabReviewPublishStatus("invalid_stage_result")).toBe(400)
     expect(gitLabReviewPublishStatus("gitlab_review_publication_input_too_large")).toBe(413)
   })
+
+  test("keeps GitLab API error bodies out of publication persistence and management responses", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nine1bot-publication-api-error-redaction-"))
+    const configPath = join(directory, "config.json")
+    const secretsPath = join(directory, "secrets.json")
+    const runStorePath = join(directory, "review-runs.json")
+    const previousConfigPath = process.env.NINE1BOT_CONFIG_PATH
+    const previousSecretsPath = process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+    const previousFetch = globalThis.fetch
+    ReviewRunStore.setPathForTesting(runStorePath)
+    ReviewRunStore.clearForTesting()
+    const privateBody = [
+      "Authorization: Bearer management-bearer-secret",
+      "PRIVATE-TOKEN: glpat-management-private-token",
+      "https://management-user:management-password@gitlab.internal/path?access_token=management-query-secret",
+      "-----BEGIN PRIVATE KEY-----",
+      "management-pem-secret",
+      "-----END PRIVATE KEY-----",
+      "DATABASE_URL=postgres://service:management-database-secret@db.internal/app",
+      "internal-management-detail",
+    ].join("\n")
+    const createRun = (objectIid: number, headSha: string) => {
+      const trigger = {
+        host: "gitlab.example.com",
+        projectId: 123,
+        objectType: "mr" as const,
+        objectIid,
+        headSha,
+        mode: "webhook" as const,
+      }
+      const diff = {
+        files: [{
+          oldPath: "src/app.ts",
+          newPath: "src/app.ts",
+          diff: "@@ -1,2 +1,3 @@\n context\n+changed\n",
+          added: false,
+          renamed: false,
+          deleted: false,
+          generated: false,
+        }],
+        skipped: [],
+        blocked: false,
+        diffRefs: { baseSha: "base", startSha: "start", headSha },
+        stats: {
+          fileCount: 1,
+          includedFileCount: 1,
+          skippedFileCount: 0,
+          includedBytes: 42,
+          truncated: false,
+        },
+      }
+      return ReviewRunStore.create({
+        platform: "gitlab",
+        status: "running",
+        trigger,
+        context: {
+          trigger,
+          idempotencyKey: `management-api-error-${objectIid}`,
+          diff,
+          contextBlocks: [],
+        },
+      })
+    }
+    const fallbackRun = createRun(10, "management-fallback-head")
+    const failedRun = createRun(11, "management-failed-head")
+    const fallbackStageResult = {
+      stage: "pm",
+      status: "ok" as const,
+      summary: "Review complete.",
+      findings: [{
+        title: "Changed line",
+        body: "Inline body",
+        severity: "major" as const,
+        file: "src/app.ts",
+        newLine: 2,
+      }],
+    }
+    const failedStageResult = {
+      ...fallbackStageResult,
+      summary: "This publication will fail.",
+    }
+    const fallbackNoteBodies: string[] = []
+
+    try {
+      await writeFile(configPath, JSON.stringify({
+        platforms: {
+          gitlab: {
+            enabled: true,
+            settings: {
+              "review.enabled": true,
+              "review.dryRun": false,
+              "review.inlineComments": true,
+              "review.baseUrl": "https://gitlab.example.com",
+              "review.tokenSecretRef": { provider: "nine1bot-local", key: "gitlab-token" },
+            },
+          },
+        },
+      }))
+      await writeFile(secretsPath, JSON.stringify({
+        version: 1,
+        secrets: { "gitlab-token": "token" },
+      }))
+      process.env.NINE1BOT_CONFIG_PATH = configPath
+      process.env.NINE1BOT_PLATFORM_SECRETS_PATH = secretsPath
+      globalThis.fetch = (async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+        const method = init?.method ?? "GET"
+        if (method === "GET" && url.endsWith("/api/v4/projects/123/merge_requests/10")) {
+          return Response.json({
+            diff_refs: { base_sha: "base", start_sha: "start", head_sha: "management-fallback-head" },
+          })
+        }
+        if (method === "GET" && url.endsWith("/api/v4/projects/123/merge_requests/11")) {
+          return Response.json({
+            diff_refs: { base_sha: "base", start_sha: "start", head_sha: "management-failed-head" },
+          })
+        }
+        if (method === "POST" && url.endsWith("/merge_requests/10/discussions")) {
+          return new Response(JSON.stringify({ error: "position is invalid", detail: privateBody }), {
+            status: 400,
+            statusText: "Bad Request",
+          })
+        }
+        if (method === "POST" && url.endsWith("/merge_requests/10/notes")) {
+          if (init?.body instanceof URLSearchParams) fallbackNoteBodies.push(init.body.get("body") ?? "")
+          return Response.json({ id: fallbackNoteBodies.length })
+        }
+        if (method === "POST" && url.endsWith("/merge_requests/11/notes")) {
+          return new Response(privateBody, { status: 503, statusText: "Service Unavailable" })
+        }
+        throw new Error(`unexpected GitLab request: ${method} ${url}`)
+      }) as typeof fetch
+
+      const publish = async (runId: string, stageResult: unknown) => {
+        const body = JSON.stringify({ stageResult })
+        return await WebhookRoutes().request(`http://localhost/gitlab/runs/${runId}/publish`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(new TextEncoder().encode(body).byteLength),
+          },
+          body,
+        })
+      }
+      const fallbackResponse = await publish(fallbackRun.id, fallbackStageResult)
+      const failedResponse = await publish(failedRun.id, failedStageResult)
+      const fallbackManagementResponse = await WebhookRoutes().request(
+        `http://localhost/gitlab/runs/${fallbackRun.id}`,
+      )
+      const failedManagementResponse = await WebhookRoutes().request(
+        `http://localhost/gitlab/runs/${failedRun.id}`,
+      )
+      const fallbackResult = await fallbackResponse.json()
+      const failedResult = await failedResponse.json()
+      const fallbackManagement = await fallbackManagementResponse.json()
+      const failedManagement = await failedManagementResponse.json()
+      const persisted = await readFile(runStorePath, "utf8")
+
+      expect(fallbackResponse.status).toBe(200)
+      expect(fallbackResult).toMatchObject({
+        published: true,
+        runId: fallbackRun.id,
+        inlinePosted: 0,
+        fallbackPosted: 1,
+        warnings: ["Inline fallback for src/app.ts: GitLab API returned 400: position is invalid."],
+      })
+      expect(ReviewRunStore.get(fallbackRun.id)).toMatchObject({
+        status: "succeeded",
+        warnings: ["Inline fallback for src/app.ts: GitLab API returned 400: position is invalid."],
+      })
+      expect(failedResponse.status).toBe(502)
+      expect(failedResult).toEqual({
+        published: false,
+        runId: failedRun.id,
+        error: "gitlab_api_publish_result_failed:503:Service Unavailable",
+      })
+      expect(ReviewRunStore.get(failedRun.id)).toMatchObject({
+        status: "failed",
+        error: "gitlab_api_publish_result_failed:503:Service Unavailable",
+      })
+
+      const parsedFallback = parseReviewStageResult(fallbackStageResult, { runId: fallbackRun.id })
+      const expectedPlan = prepareGitLabReviewPublicationPlan({
+        runId: fallbackRun.id,
+        objectType: "mr",
+        manifest: (fallbackRun.context as any).diff,
+        summary: parsedFallback.summary,
+        findings: parsedFallback.findings,
+        inlineComments: true,
+        warnings: parsedFallback.nextActions,
+      })
+      expect(fallbackNoteBodies).toEqual([
+        expectedPlan.summary.body,
+        expectedPlan.inline[0]?.fallback.body,
+      ])
+      expect(fallbackNoteBodies[1]).not.toContain("position is invalid")
+
+      const exposed = JSON.stringify({
+        fallbackResult,
+        failedResult,
+        fallbackManagement,
+        failedManagement,
+        persisted,
+      })
+      for (const secret of [
+        "management-bearer-secret",
+        "glpat-management-private-token",
+        "management-user",
+        "management-password",
+        "management-query-secret",
+        "management-pem-secret",
+        "management-database-secret",
+        "internal-management-detail",
+      ]) {
+        expect(exposed).not.toContain(secret)
+      }
+    } finally {
+      globalThis.fetch = previousFetch
+      if (previousConfigPath === undefined) delete process.env.NINE1BOT_CONFIG_PATH
+      else process.env.NINE1BOT_CONFIG_PATH = previousConfigPath
+      if (previousSecretsPath === undefined) delete process.env.NINE1BOT_PLATFORM_SECRETS_PATH
+      else process.env.NINE1BOT_PLATFORM_SECRETS_PATH = previousSecretsPath
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 30_000)
 
   test("rejects an oversized GitLab publication request before JSON validation", async () => {
     const response = await WebhookRoutes().request(

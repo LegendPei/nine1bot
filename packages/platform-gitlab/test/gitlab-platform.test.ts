@@ -604,6 +604,72 @@ describe('GitLab platform adapter package', () => {
     }
   })
 
+  test('redacts GitLab API response bodies from project, group, and hook action results', async () => {
+    const originalFetch = globalThis.fetch
+    const privateBody = [
+      'Authorization: Bearer runtime-bearer-secret',
+      'PRIVATE-TOKEN: glpat-runtime-private-token',
+      'https://runtime-user:runtime-password@gitlab.internal/path?access_token=runtime-query-secret',
+      '-----BEGIN PRIVATE KEY-----',
+      'runtime-pem-secret',
+      '-----END PRIVATE KEY-----',
+      'DATABASE_URL=postgres://service:runtime-database-secret@db.internal/app',
+      'internal-runtime-detail',
+    ].join('\n')
+    globalThis.fetch = (async () => new Response(privateBody, {
+      status: 500,
+      statusText: 'Internal Server Error',
+    })) as unknown as typeof fetch
+    const context = {
+      platformId: 'gitlab',
+      enabled: true,
+      settings: {
+        'review.enabled': true,
+        'review.baseUrl': 'https://gitlab.example.com',
+        'review.tokenSecretRef': 'token-value',
+        'review.webhookSecretRef': 'sec_test',
+        'review.allowedProjectIds': ['3'],
+        'review.hookGroups': [{ id: 9, fullPath: 'root' }],
+      },
+      features: {},
+      packageResources: packageResources(),
+      env: {
+        NINE1BOT_LOCAL_URL: 'http://192.168.53.6:4096',
+        NINE1BOT_REFRESH_LOCAL_URL: 'false',
+      },
+      secrets: secretAccess(),
+      audit: { write() {} },
+    }
+
+    try {
+      for (const [action, input] of [
+        ['projects.search', { query: 'project' }],
+        ['groups.search', { query: 'group' }],
+        ['webhook.sync-current-url', undefined],
+        ['group-hooks.sync-current-url', undefined],
+      ] as const) {
+        const result = await gitlabPlatformContribution.handleAction?.(action, input, context)
+        expect(result?.status).toBe('failed')
+        const exposed = JSON.stringify(result)
+        expect(exposed).toContain('500 Internal Server Error')
+        for (const secret of [
+          'runtime-bearer-secret',
+          'glpat-runtime-private-token',
+          'runtime-user',
+          'runtime-password',
+          'runtime-query-secret',
+          'runtime-pem-secret',
+          'runtime-database-secret',
+          'internal-runtime-detail',
+        ]) {
+          expect(exposed).not.toContain(secret)
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('syncs GitLab group hooks to the current dedicated webhook URL', async () => {
     const originalFetch = globalThis.fetch
     const calls: Array<{ url: string; method: string; body?: string }> = []

@@ -7,7 +7,12 @@ import {
 } from './shared'
 import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
-import { GitLabApiClient, GitLabApiError, type GitLabReviewSecretRef } from './review'
+import {
+  GitLabApiClient,
+  GitLabApiError,
+  sanitizeGitLabSecrets,
+  type GitLabReviewSecretRef,
+} from './review'
 import {
   gitLabReviewProjectIdsForHookSync,
   hasUsableGitLabReviewProjectProfile,
@@ -501,10 +506,21 @@ async function testGitLabConnection(
     }
     return {
       status: 'failed',
-      message: `GitLab API token check failed: ${error instanceof Error ? error.message : String(error)}.`,
+      message: `GitLab API token check failed: ${gitLabActionErrorText(error)}.`,
       updatedStatus: status,
     }
   }
+}
+
+function gitLabActionErrorText(error: unknown) {
+  if (error instanceof GitLabApiError) return error.message
+  const message = error instanceof Error ? error.message : String(error)
+  return sanitizeGitLabSecrets(message, {
+    maxInputCodeUnits: 4_096,
+    maxInputUtf8Bytes: 4_096,
+    maxOutputCodeUnits: 512,
+    maxOutputUtf8Bytes: 512,
+  }).trim() || 'Unknown GitLab error'
 }
 
 async function searchGitLabProjects(
@@ -539,7 +555,7 @@ async function searchGitLabProjects(
   } catch (error) {
     return {
       status: 'failed',
-      message: `GitLab project search failed: ${error instanceof Error ? error.message : String(error)}.`,
+      message: `GitLab project search failed: ${gitLabActionErrorText(error)}.`,
       updatedStatus: status,
     }
   }
@@ -577,7 +593,7 @@ async function searchGitLabGroups(
   } catch (error) {
     return {
       status: 'failed',
-      message: `GitLab group search failed: ${error instanceof Error ? error.message : String(error)}.`,
+      message: `GitLab group search failed: ${gitLabActionErrorText(error)}.`,
       updatedStatus: status,
     }
   }
@@ -612,7 +628,7 @@ async function syncGitLabProjectHooks(
         await prepared.client.testProjectHook(projectId, hook.id, 'note_events')
       } catch (error) {
         testStatus = 'failed'
-        testMessage = error instanceof Error ? error.message : String(error)
+        testMessage = gitLabActionErrorText(error)
       }
       results.push({
         projectId: String(projectId),
@@ -628,7 +644,7 @@ async function syncGitLabProjectHooks(
         projectId: String(projectId),
         action: 'failed',
         url: prepared.webhookUrl,
-        error: error instanceof Error ? error.message : String(error),
+        error: gitLabActionErrorText(error),
       })
     }
   }
@@ -676,7 +692,7 @@ async function syncGitLabGroupHooks(
         await prepared.client.testGroupHook(group.id, hook.id, 'note_events')
       } catch (error) {
         testStatus = 'failed'
-        testMessage = error instanceof Error ? error.message : String(error)
+        testMessage = gitLabActionErrorText(error)
       }
       results.push({
         groupId: String(group.id),
@@ -694,7 +710,7 @@ async function syncGitLabGroupHooks(
         groupPath: group.fullPath,
         action: 'failed',
         url: prepared.webhookUrl,
-        error: error instanceof Error ? error.message : String(error),
+        error: gitLabActionErrorText(error),
       })
     }
   }
@@ -760,7 +776,7 @@ async function testGitLabGroupHooks(
         groupId: String(group.id),
         groupPath: group.fullPath,
         action: 'failed',
-        error: error instanceof Error ? error.message : String(error),
+        error: gitLabActionErrorText(error),
       })
     }
   }
@@ -825,7 +841,7 @@ async function testGitLabProjectHooks(
       results.push({
         projectId: String(projectId),
         action: 'failed',
-        error: error instanceof Error ? error.message : String(error),
+        error: gitLabActionErrorText(error),
       })
     }
   }

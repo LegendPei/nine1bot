@@ -455,9 +455,7 @@ async function completeMarker(publication: GitLabReviewPublicationContext | unde
 }
 
 function summarizeGitLabApiError(error: GitLabApiError) {
-  const body = error.responseBody?.trim()
-  if (!body) return undefined
-  return body.length > 240 ? `${body.slice(0, 237)}...` : body
+  return error.sanitizedDetail
 }
 
 function freezeAggregatedFinding(finding: AggregatedReviewFinding): GitLabReviewPreparedAggregatedFinding {

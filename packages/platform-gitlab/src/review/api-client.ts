@@ -1,5 +1,6 @@
 import type { GitLabRawChangesResponse } from './types'
 import { encodeGitLabReviewPublicationForm } from './publication-budget'
+import { sanitizeGitLabApiErrorDetail } from './sanitizer'
 
 const GITLAB_PAGE_SIZE = 100
 const MAX_PAGINATED_PAGES = 5
@@ -160,13 +161,16 @@ export type GitLabGroupHookInput = {
 export type GitLabHookTestTrigger = 'push_events' | 'merge_requests_events' | 'note_events'
 
 export class GitLabApiError extends Error {
+  readonly sanitizedDetail?: string
+
   constructor(
     readonly status: number,
     readonly statusText: string,
-    readonly responseBody?: string,
+    responseBody?: string,
   ) {
-    super(responseBody ? `GitLab API request failed: ${status} ${statusText}: ${responseBody}` : `GitLab API request failed: ${status} ${statusText}`)
+    super(`GitLab API request failed: ${status} ${statusText}`)
     this.name = 'GitLabApiError'
+    this.sanitizedDetail = sanitizeGitLabApiErrorDetail(responseBody)
   }
 }
 

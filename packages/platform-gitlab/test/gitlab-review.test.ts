@@ -35,6 +35,7 @@ import {
   readGitLabCiJobLog,
   resolveGitLabApiBaseUrl,
   sanitizeGitLabCiTrace,
+  sanitizeGitLabSecrets,
   selectTrustedGitLabCiPipeline,
   validateGitLabInlinePosition,
   validateGitLabWebhookToken,
@@ -2803,6 +2804,53 @@ describe('GitLab review foundation', () => {
     ].join('\n'))
   })
 
+  test('bounds the shared GitLab sanitizer while redacting API credential forms', () => {
+    const output = sanitizeGitLabSecrets([
+      'Authorization: Bearer shared-bearer-secret',
+      'PRIVATE-TOKEN: glpat-shared-private-token',
+      '{"Authorization":"Bearer json-bearer-secret","PRIVATE-TOKEN":"glpat-json-private-token"}',
+      'https://shared-user:shared-password@gitlab.internal/path?access_token=shared-query-secret',
+      '-----BEGIN PRIVATE KEY-----',
+      'shared-pem-secret',
+      '-----END PRIVATE KEY-----',
+      'PASSWORD=shared-password-value',
+      'DATABASE_URL=postgres://service:shared-database-secret@db.internal/app',
+      'ordinary position diagnostic',
+    ].join('\n'), {
+      maxInputCodeUnits: 2_048,
+      maxInputUtf8Bytes: 2_048,
+      maxOutputCodeUnits: 1_024,
+      maxOutputUtf8Bytes: 1_024,
+    })
+
+    for (const secret of [
+      'shared-bearer-secret',
+      'glpat-shared-private-token',
+      'json-bearer-secret',
+      'glpat-json-private-token',
+      'shared-user',
+      'shared-password',
+      'shared-query-secret',
+      'shared-pem-secret',
+      'shared-password-value',
+      'shared-database-secret',
+    ]) {
+      expect(output).not.toContain(secret)
+    }
+    expect(output).toContain('ordinary position diagnostic')
+    expect(output.length).toBeLessThanOrEqual(1_024)
+    expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(1_024)
+
+    const utf8Bounded = sanitizeGitLabSecrets('你'.repeat(100), {
+      maxInputCodeUnits: 1_000,
+      maxInputUtf8Bytes: 1_000,
+      maxOutputCodeUnits: 100,
+      maxOutputUtf8Bytes: 31,
+    })
+    expect(new TextEncoder().encode(utf8Bounded).byteLength).toBeLessThanOrEqual(31)
+    expect(utf8Bounded).not.toContain('\uFFFD')
+  })
+
   test('rejects cross-authority redirects without forwarding the GitLab token', async () => {
     const redirectedHeaders: Array<string | null> = []
     using redirected = Bun.serve({
@@ -3038,6 +3086,73 @@ describe('GitLab review foundation', () => {
     expect(trace).toBe('12345')
   })
 
+  test('keeps GitLab API error messages stable without retaining raw response bodies', async () => {
+    const secretValues = [
+      'bearer-secret',
+      'glpat-0123456789abcdef',
+      'url-user',
+      'url-password',
+      'query-secret',
+      'pem-secret-material',
+      'database-password',
+      'client-secret-value',
+      'internal-only-detail',
+    ]
+    const privateDetail = [
+      'Authorization: Bearer bearer-secret',
+      'PRIVATE-TOKEN: glpat-0123456789abcdef',
+      'https://url-user:url-password@gitlab.internal/project?access_token=query-secret',
+      '-----BEGIN PRIVATE KEY-----',
+      'pem-secret-material',
+      '-----END PRIVATE KEY-----',
+      'DATABASE_URL=postgres://service:database-password@db.internal/app',
+      'client_secret=client-secret-value',
+      'internal-only-detail',
+    ].join('\n')
+    const scenarios = [
+      {
+        status: 400,
+        statusText: 'Bad Request',
+        body: JSON.stringify({ error: 'position is invalid', detail: privateDetail }),
+        sanitizedDetail: 'position is invalid',
+      },
+      {
+        status: 503,
+        statusText: 'Service Unavailable',
+        body: privateDetail,
+        sanitizedDetail: undefined,
+      },
+    ]
+
+    for (const scenario of scenarios) {
+      const client = new GitLabApiClient({
+        baseUrl: 'https://gitlab.example.com',
+        token: 'token',
+        fetch: (async () => new Response(scenario.body, {
+          status: scenario.status,
+          statusText: scenario.statusText,
+        })) as unknown as typeof fetch,
+      })
+
+      try {
+        await client.getMergeRequestPipelines(3, 2)
+        throw new Error('expected GitLab API error')
+      } catch (error) {
+        expect(error).toBeInstanceOf(GitLabApiError)
+        const apiError = error as GitLabApiError & { sanitizedDetail?: string }
+        expect(apiError.status).toBe(scenario.status)
+        expect(apiError.statusText).toBe(scenario.statusText)
+        expect(apiError.message).toBe(
+          `GitLab API request failed: ${scenario.status} ${scenario.statusText}`,
+        )
+        expect(apiError.sanitizedDetail).toBe(scenario.sanitizedDetail)
+        expect('responseBody' in apiError).toBe(false)
+        const exposed = `${apiError.message}\n${apiError.sanitizedDetail ?? ''}\n${JSON.stringify(apiError)}`
+        for (const secret of secretValues) expect(exposed).not.toContain(secret)
+      }
+    }
+  })
+
   test('bounds GitLab JSON and error response bodies', async () => {
     const oversizedJson = new GitLabApiClient({
       baseUrl: 'https://gitlab.example.com',
@@ -3058,7 +3173,12 @@ describe('GitLab review foundation', () => {
       throw new Error('expected GitLab API error')
     } catch (error) {
       expect(error).toBeInstanceOf(GitLabApiError)
-      expect((error as GitLabApiError).responseBody).toBe('sensi')
+      const apiError = error as GitLabApiError & { sanitizedDetail?: string }
+      expect(apiError.status).toBe(500)
+      expect(apiError.statusText).toBe('failed')
+      expect(apiError.message).toBe('GitLab API request failed: 500 failed')
+      expect(apiError.sanitizedDetail).toBeUndefined()
+      expect('responseBody' in apiError).toBe(false)
     }
   })
 
@@ -3283,7 +3403,15 @@ describe('GitLab review foundation', () => {
       client: {
         async createDiscussion() {
           calls.push('discussion')
-          throw new GitLabApiError(400, 'Bad Request', '{"error":"position is invalid"}')
+          throw new GitLabApiError(400, 'Bad Request', JSON.stringify({
+            error: 'position is invalid',
+            detail: [
+              'Authorization: Bearer publisher-secret',
+              'PRIVATE-TOKEN: glpat-publisher-secret',
+              'https://user:password@gitlab.internal/path?private_token=query-secret',
+              'internal-only-detail',
+            ].join('\n'),
+          }))
         },
         async createNote(input) {
           calls.push('note')
@@ -3307,13 +3435,21 @@ describe('GitLab review foundation', () => {
     })
 
     expect(result).toMatchObject({ inlinePosted: 0, fallbackPosted: 1 })
-    expect(result.warnings[0]).toContain('GitLab API returned 400')
-    expect(result.warnings[0]).toContain('position is invalid')
+    expect(result.warnings).toEqual([
+      'Inline fallback for src/app.ts: GitLab API returned 400: position is invalid.',
+    ])
     expect(calls).toEqual(['note', 'discussion', 'note'])
     expect(notes[0]).toContain('### Inline Comments')
     expect(notes[1]).toContain('Nine1bot Inline Publish Fallback')
     expect(notes[1]).toContain('Inline body')
     expect(notes[1]).not.toContain('position is invalid')
+    for (const exposed of [...result.warnings, ...notes]) {
+      expect(exposed).not.toContain('publisher-secret')
+      expect(exposed).not.toContain('glpat-')
+      expect(exposed).not.toContain('user:password')
+      expect(exposed).not.toContain('query-secret')
+      expect(exposed).not.toContain('internal-only-detail')
+    }
     expect(notes[1]).not.toContain('Evidence:')
     expect(notes[1]).not.toContain('```diff')
   })
