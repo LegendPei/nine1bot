@@ -1,4 +1,4 @@
-import { sanitizeGitLabCiTrace } from './ci-inspector'
+import { redactGitLabSecrets } from './secret-redaction'
 
 const DEFAULT_INPUT_CODE_UNITS = 16_000
 const DEFAULT_INPUT_UTF8_BYTES = 16_000
@@ -20,9 +20,9 @@ export function sanitizeGitLabSecrets(input: string, limits: GitLabSanitizerLimi
     limits.maxInputCodeUnits ?? DEFAULT_INPUT_CODE_UNITS,
     limits.maxInputUtf8Bytes ?? DEFAULT_INPUT_UTF8_BYTES,
   )
-  const sanitized = sanitizeGitLabCiTrace(boundedInput)
+  const sanitized = redactGitLabSecrets(boundedInput)
     .replace(
-      /(["']?(?:authorization|private[-_ ]?token|password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|database[_-]?url|db[_-]?url|redis[_-]?url)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,}\r\n\s]+)/gi,
+      /(["']?(?:authorization|private[-_ ]?token|password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|database[_-]?url|db[_-]?url|redis[_-]?url)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^,}\r\n\s]+)/gi,
       '$1***',
     )
     .replace(/\bglpat-[A-Za-z0-9._-]*/gi, '***')

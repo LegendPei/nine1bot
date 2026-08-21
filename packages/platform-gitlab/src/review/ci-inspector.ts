@@ -1,4 +1,5 @@
 import type { GitLabApiClient, GitLabPipelineJob, GitLabPipelineSummary } from './api-client'
+import { redactGitLabSecrets } from './secret-redaction'
 
 export const MAX_GITLAB_CI_PIPELINE_CANDIDATES = 50
 export const MAX_GITLAB_CI_JOBS = 100
@@ -217,24 +218,7 @@ export async function readGitLabCiJobLog(input: {
 }
 
 export function sanitizeGitLabCiTrace(trace: string) {
-  return trace
-    .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, '')
-    .replace(
-      /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/gi,
-      '[REDACTED_KEY_BLOCK]',
-    )
-    .replace(
-      /([?&#](?:[^?&#\s=]*(?:token|password|secret|api[_-]?key|access[_-]?key|client[_-]?secret)[^?&#\s=]*)=)[^&#\s"']*/gi,
-      '$1***',
-    )
-    .replace(/\b(authorization\s*:\s*)(?:bearer|basic)\s+[^\r\n]+/gi, '$1***')
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi, '$1***:***@')
-    .replace(
-      /(^|[\t ;])([A-Z0-9_.-]*(?:token|password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|database[_-]?url|db[_-]?url|redis[_-]?url)[A-Z0-9_.-]*)(\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]*)/gim,
-      (_match, prefix: string, key: string, separator: string) => `${prefix}${key}${separator.includes(':') ? ':' : '='}***`,
-    )
-    .replace(/\b(?:glpat-[A-Za-z0-9._-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, '***')
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, '***')
+  return redactGitLabSecrets(trace)
 }
 
 function boundCiList(
@@ -388,11 +372,24 @@ function byteLength(value: string) {
 
 function truncateUtf8(value: string, maxBytes: number) {
   if (maxBytes <= 0) return ''
-  const encoder = new TextEncoder()
-  if (encoder.encode(value).length <= maxBytes) return value
-  const codePoints = Array.from(value)
-  while (codePoints.length > 0 && encoder.encode(codePoints.join('')).length > maxBytes) codePoints.pop()
-  return codePoints.join('')
+  let bytes = 0
+  let end = 0
+  for (let index = 0; index < value.length;) {
+    const codePoint = value.codePointAt(index)!
+    const codeUnits = codePoint > 0xFFFF ? 2 : 1
+    const codePointBytes = codePoint <= 0x7F
+      ? 1
+      : codePoint <= 0x7FF
+        ? 2
+        : codePoint <= 0xFFFF
+          ? 3
+          : 4
+    if (bytes + codePointBytes > maxBytes) break
+    bytes += codePointBytes
+    index += codeUnits
+    end = index
+  }
+  return end === value.length ? value : value.slice(0, end)
 }
 
 function boundedString(value: string | undefined, maxLength: number) {

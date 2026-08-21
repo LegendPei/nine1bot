@@ -6722,6 +6722,52 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('does not follow a redirected summary POST after the MR HEAD guards pass', async () => {
+    const run = createPublishableReviewRun({ headSha: 'write-redirect-head' })
+    const requests: Array<{ method: string; pathname: string }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const request = {
+        method: init?.method ?? 'GET',
+        pathname: new URL(String(url)).pathname,
+      }
+      requests.push(request)
+      if (request.method === 'POST') {
+        return new Response(null, {
+          status: 307,
+          headers: { location: '/redirected-write' },
+        })
+      }
+      return Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'write-redirect-head' },
+      })
+    }) as typeof fetch
+
+    await expect(publishGitLabReviewRunResult({
+      runId: run.id,
+      platforms: summaryOnlyPublishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      stageResult: publicationStageResult('Redirected summary.'),
+    })).resolves.toMatchObject({
+      published: false,
+      error: 'gitlab_api_publish_result_failed:gitlab_redirect_write_rejected',
+    })
+
+    expect(requests.filter((request) => request.method === 'POST')).toEqual([{
+      method: 'POST',
+      pathname: '/api/v4/projects/123/merge_requests/10/notes',
+    }])
+    expect(requests.some((request) => request.pathname === '/redirected-write')).toBe(false)
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_api_publish_result_failed:gitlab_redirect_write_rejected',
+      publication: {
+        state: 'partial',
+        completedMarkers: [],
+      },
+    })
+  })
+
   test('marks review run failed when GitLab rejects summary publishing', async () => {
     const fetchMock = (async (url: string | URL | Request) => {
       if (String(url).includes('/changes')) {

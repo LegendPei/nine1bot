@@ -37,6 +37,7 @@ export type GitLabApiRedirectErrorCode =
   | 'gitlab_redirect_invalid'
   | 'gitlab_redirect_cross_authority'
   | 'gitlab_redirect_limit_exceeded'
+  | 'gitlab_redirect_write_rejected'
 
 export type GitLabApiClientOptions = {
   baseUrl: string
@@ -621,6 +622,12 @@ export class GitLabApiClient {
       }
       if (!REDIRECT_STATUSES.has(response.status)) return response
 
+      const method = (currentInit.method ?? 'GET').toUpperCase()
+      if (method !== 'GET' && method !== 'HEAD') {
+        await disposeResponse(response, requestGuard)
+        throw new GitLabApiRedirectError('gitlab_redirect_write_rejected')
+      }
+
       if (redirects >= MAX_REDIRECTS) {
         await disposeResponse(response, requestGuard)
         throw new GitLabApiRedirectError('gitlab_redirect_limit_exceeded')
@@ -814,7 +821,9 @@ function compactObject(input: Record<string, unknown>) {
 
 function redirectedRequestInit(init: RequestInit, status: number): RequestInit {
   const method = (init.method ?? 'GET').toUpperCase()
-  if (status !== 303 && !((status === 301 || status === 302) && method === 'POST')) return init
+  const switchToGet = (status === 303 && method !== 'GET' && method !== 'HEAD')
+    || ((status === 301 || status === 302) && method === 'POST')
+  if (!switchToGet) return init
   const headers = new Headers(init.headers)
   headers.delete('content-length')
   headers.delete('content-type')

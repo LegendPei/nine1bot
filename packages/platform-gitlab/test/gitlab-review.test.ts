@@ -2775,6 +2775,280 @@ describe('GitLab review foundation', () => {
     expect(sanitized).toContain('DATABASE_URL=***')
   })
 
+  test('sanitizes quoted and nested JSON secrets from GitLab CI traces', () => {
+    const output = sanitizeGitLabCiTrace([
+      '{"password":"prod-secret","nested":{"token":"nested-secret"},"safe":"kept"}',
+      "{'client_secret': 'single-secret', 'api_key': 'api-secret', 'safe': 'still-kept'}",
+      '{"runner_access_token":"comma-secret","next":"preserved"}',
+      '{"password":"prefix-secret\\"suffix-secret","safe":"escaped-kept"}',
+    ].join('\n'))
+
+    for (const secret of [
+      'prod-secret',
+      'nested-secret',
+      'single-secret',
+      'api-secret',
+      'comma-secret',
+      'prefix-secret',
+      'suffix-secret',
+    ]) {
+      expect(output).not.toContain(secret)
+    }
+    expect(output).toContain('"password":"***"')
+    expect(output).toContain('"token":"***"')
+    expect(output).toContain("'client_secret': '***'")
+    expect(output).toContain('"safe":"kept"')
+    expect(output).toContain("'safe': 'still-kept'")
+    expect(output).toContain('"next":"preserved"')
+    expect(output).toContain('"safe":"escaped-kept"')
+  })
+
+  test('sanitizes structured collections and truncated sensitive values', () => {
+    const output = sanitizeGitLabCiTrace([
+      '{"password":{"primary":"FIRST","secondary":"OBJECT_LEAK"},"safe":"object-kept"}',
+      '{"tokens":["FIRST","ARRAY_LEAK"],"safe":"array-kept"}',
+      '{"password":"prefix,UNTERMINATED_LEAK',
+      'PASSWORD=***MARKER_PREFIX_LEAK',
+    ].join('\n'))
+
+    for (const secret of [
+      'FIRST',
+      'OBJECT_LEAK',
+      'ARRAY_LEAK',
+      'prefix',
+      'UNTERMINATED_LEAK',
+      'MARKER_PREFIX_LEAK',
+    ]) {
+      expect(output).not.toContain(secret)
+    }
+    expect(output).toContain('"safe":"object-kept"')
+    expect(output).toContain('"safe":"array-kept"')
+
+    const source = '{"password":"prefix,TRUNCATION_LEAK"}'
+    const inputLimit = source.length - 2
+    const truncated = sanitizeGitLabSecrets(source, {
+      maxInputCodeUnits: inputLimit,
+      maxInputUtf8Bytes: inputLimit,
+      maxOutputCodeUnits: 1_024,
+      maxOutputUtf8Bytes: 1_024,
+    })
+    expect(truncated).not.toContain('prefix')
+    expect(truncated).not.toContain('TRUNCATION_LEAK')
+  })
+
+  test('sanitizes quoted headers, shell assignments, and YAML quoted values', () => {
+    const output = sanitizeGitLabCiTrace([
+      'curl -H "JOB-TOKEN: QUOTED_HEADER_LEAK" https://ci.example/run',
+      'echo "PASSWORD=QUOTED_ENV_LEAK"',
+      'SAFE=ok,PASSWORD=COMMA_ENV_LEAK',
+      "PASSWORD='FIRST'\\''SHELL_SUFFIX_LEAK'",
+      "password: 'FIRST''YAML_SUFFIX_LEAK'",
+      'ordinary build output',
+    ].join('\n'))
+
+    for (const secret of [
+      'QUOTED_HEADER_LEAK',
+      'QUOTED_ENV_LEAK',
+      'COMMA_ENV_LEAK',
+      'FIRST',
+      'SHELL_SUFFIX_LEAK',
+      'YAML_SUFFIX_LEAK',
+    ]) {
+      expect(output).not.toContain(secret)
+    }
+    expect(output).toContain('ordinary build output')
+    expect(output).toContain('https://ci.example/run')
+  })
+
+  test('sanitizes YAML blocks, shell continuations, and folded credential headers', () => {
+    const output = sanitizeGitLabCiTrace([
+      'password: |',
+      '  YAML_BLOCK_LEAK',
+      'after yaml block',
+      'PASSWORD=FIRST\\',
+      'CONTINUATION_LEAK',
+      'after shell continuation',
+      'JOB-TOKEN: FIRST',
+      ' HEADER_FOLD_LEAK',
+      'after folded header',
+    ].join('\n'))
+
+    for (const secret of ['YAML_BLOCK_LEAK', 'FIRST', 'CONTINUATION_LEAK', 'HEADER_FOLD_LEAK']) {
+      expect(output).not.toContain(secret)
+    }
+    expect(output).toContain('after yaml block')
+    expect(output).toContain('after shell continuation')
+    expect(output).toContain('after folded header')
+  })
+
+  test('keeps ANSI escapes from fusing or splitting sensitive key boundaries', () => {
+    const output = sanitizeGitLabCiTrace([
+      `INFO\u001B[31mPASSWORD=ANSI_BOUNDARY_LEAK`,
+      `PASS\u001B[32mWORD=ANSI_SPLIT_LEAK`,
+      'ordinary ANSI-adjacent output',
+    ].join('\n'))
+
+    expect(output).not.toContain('ANSI_BOUNDARY_LEAK')
+    expect(output).not.toContain('ANSI_SPLIT_LEAK')
+    expect(output).toContain('ordinary ANSI-adjacent output')
+  })
+
+  test('sanitizes ANSI and NUL inside quoted keys and standalone GitLab tokens', () => {
+    const tokenSuffix = 'SPLIT_TOKEN_LEAK'.repeat(3)
+    const output = sanitizeGitLabCiTrace([
+      `{"pass\u001B[31mword":"ANSI_QUOTED_KEY_LEAK"}`,
+      `{"pass\u0000word":"NUL_QUOTED_KEY_LEAK"}`,
+      `glp\u001B[32mat-${tokenSuffix}`,
+      `glp\u0000at-${tokenSuffix}`,
+      `_glpat-${tokenSuffix}`,
+      `xglpat-${tokenSuffix}`,
+    ].join('\n'))
+
+    for (const secret of ['ANSI_QUOTED_KEY_LEAK', 'NUL_QUOTED_KEY_LEAK', tokenSuffix]) {
+      expect(output).not.toContain(secret)
+    }
+  })
+
+  test('sanitizes ANSI and NUL between quoted keys and separators', () => {
+    const output = sanitizeGitLabCiTrace([
+      `{"password"\u001B[31m:"ANSI_SEPARATOR_LEAK"}`,
+      `{"token"\u0000:"NUL_SEPARATOR_LEAK"}`,
+    ].join('\n'))
+
+    expect(output).not.toContain('ANSI_SEPARATOR_LEAK')
+    expect(output).not.toContain('NUL_SEPARATOR_LEAK')
+  })
+
+  test('sanitizes ANSI and NUL split PEM blocks and URL credentials', () => {
+    const output = sanitizeGitLabCiTrace([
+      '-----BEGIN\u001B[31m PRIVATE KEY-----',
+      'ANSI_PEM_LEAK',
+      '-----END PRIVATE KEY-----',
+      'https:\u001B[32m//user:ANSI_URL_PASSWORD_LEAK@example.test/path',
+      'https:\u0000//user:NUL_URL_PASSWORD_LEAK@example.test/path',
+    ].join('\n'))
+
+    for (const secret of ['ANSI_PEM_LEAK', 'ANSI_URL_PASSWORD_LEAK', 'NUL_URL_PASSWORD_LEAK']) {
+      expect(output).not.toContain(secret)
+    }
+  })
+
+  test('sanitizes ANSI-prefixed CRLF continuation indentation', () => {
+    const output = sanitizeGitLabCiTrace([
+      'JOB-TOKEN: FIRST\r',
+      '\u001B[31m FOLDED_ANSI_LEAK',
+      'after folded ANSI header\r',
+      'password: |\r',
+      '\u001B[32m  YAML_ANSI_LEAK',
+      'after ANSI YAML block',
+      'JOB-TOKEN: FIRST\r\u001B[33m',
+      ' CRLF_SPLIT_ANSI_LEAK',
+      'after split CRLF header',
+    ].join('\n'))
+
+    expect(output).not.toContain('FOLDED_ANSI_LEAK')
+    expect(output).not.toContain('YAML_ANSI_LEAK')
+    expect(output).not.toContain('CRLF_SPLIT_ANSI_LEAK')
+    expect(output).toContain('after folded ANSI header')
+    expect(output).toContain('after ANSI YAML block')
+    expect(output).toContain('after split CRLF header')
+  })
+
+  test('treats ANSI and NUL-only YAML block lines as empty', () => {
+    const output = sanitizeGitLabCiTrace([
+      'password: |',
+      '  FIRST',
+      '\u001B[31m',
+      '  YAML_AFTER_ANSI_BLANK_LEAK',
+      '\u0000',
+      '  YAML_AFTER_NUL_BLANK_LEAK',
+      'after YAML block',
+    ].join('\n'))
+
+    expect(output).not.toContain('YAML_AFTER_ANSI_BLANK_LEAK')
+    expect(output).not.toContain('YAML_AFTER_NUL_BLANK_LEAK')
+    expect(output).toContain('after YAML block')
+  })
+
+  test('preserves one outer quote around empty quoted assignments', () => {
+    expect(sanitizeGitLabCiTrace('"PASSWORD="')).toBe('"PASSWORD=***"')
+    expect(sanitizeGitLabCiTrace("'TOKEN='")).toBe("'TOKEN=***'")
+  })
+
+  test('sanitizes official GitLab token prefixes and exact auth fields', () => {
+    const prefixes = [
+      'glpat',
+      'gloas',
+      'gldt',
+      'glrt',
+      'glrtr',
+      'glcbt',
+      'glptt',
+      'glft',
+      'glimt',
+      'glagent',
+      'glwt',
+      'glsoat',
+      'glffct',
+    ]
+    const tokens = prefixes.map((prefix) => `${prefix}-${'TOKEN_LEAK'.repeat(3)}`)
+    const output = sanitizeGitLabCiTrace([
+      ...tokens,
+      '{"auth":"DOCKER_AUTH_LEAK","author":"AUTHOR_KEEP"}',
+      '_gitlab_session=SESSION_COOKIE_LEAK',
+    ].join('\n'))
+
+    for (const token of tokens) expect(output).not.toContain(token)
+    expect(output).not.toContain('DOCKER_AUTH_LEAK')
+    expect(output).not.toContain('SESSION_COOKIE_LEAK')
+    expect(output).toContain('AUTHOR_KEEP')
+  })
+
+  test('normalizes encoded sensitive keys without redacting ordinary field names', () => {
+    const output = sanitizeGitLabCiTrace([
+      '{"pass\\u0077ord":"ESCAPED_KEY_LEAK"}',
+      '{"private token":"SPACE_KEY_LEAK"}',
+      '{"api key":"API_SPACE_LEAK"}',
+      'https://ci.example/run?access_%74oken=ENCODED_KEY_LEAK&mode=test',
+      '{"tokenizer":"TOKENIZER_KEEP","passwordless":"PASSWORDLESS_KEEP","secretary":"SECRETARY_KEEP"}',
+    ].join('\n'))
+
+    for (const secret of ['ESCAPED_KEY_LEAK', 'SPACE_KEY_LEAK', 'API_SPACE_LEAK', 'ENCODED_KEY_LEAK']) {
+      expect(output).not.toContain(secret)
+    }
+    for (const ordinary of ['TOKENIZER_KEEP', 'PASSWORDLESS_KEEP', 'SECRETARY_KEEP']) {
+      expect(output).toContain(ordinary)
+    }
+    expect(output).toContain('?access_%74oken=***&mode=test')
+  })
+
+  test('truncates expanded sanitized CI traces with a constant number of UTF-8 encodes', async () => {
+    const rawTrace = '{"token":""}\n'.repeat(1_200)
+    const encode = spyOn(TextEncoder.prototype, 'encode')
+    try {
+      const result = await readGitLabCiJobLog({
+        client: {
+          async getPipelineJobs() {
+            return [{ id: 7, name: 'test', status: 'success' }]
+          },
+          async getJobTrace() {
+            return rawTrace
+          },
+        },
+        projectId: 3,
+        pipelineId: 11,
+        jobId: 7,
+        maxBytes: 16 * 1_024,
+      })
+
+      expect(result.truncated).toBe(true)
+      expect(result.bytes).toBeLessThanOrEqual(16 * 1_024)
+      expect(encode.mock.calls.length).toBeLessThanOrEqual(4)
+    } finally {
+      encode.mockRestore()
+    }
+  })
+
   test('sanitizes query and truncated PEM secrets from GitLab CI traces', () => {
     const output = sanitizeGitLabCiTrace([
       'curl https://ci.example/run?access_token=query-secret&mode=test',
@@ -2914,6 +3188,117 @@ describe('GitLab review foundation', () => {
     })
     expect(seen).toHaveLength(4)
     expect(seen.every((request) => request.token === 'same-authority-secret')).toBe(true)
+  })
+
+  test('rejects every redirect status for GitLab POST and PUT requests without a second request', async () => {
+    const cases: Array<{
+      method: 'POST' | 'PUT'
+      pathname: string
+      run: (client: GitLabApiClient) => Promise<unknown>
+    }> = [
+      {
+        method: 'POST',
+        pathname: '/api/v4/projects/3/merge_requests/2/notes',
+        run: (client) => client.createNote({
+          projectId: 3,
+          resource: 'merge_requests',
+          resourceId: 2,
+          body: 'summary',
+        }),
+      },
+      {
+        method: 'POST',
+        pathname: '/api/v4/projects/3/merge_requests/2/discussions',
+        run: (client) => client.createDiscussion({
+          projectId: 3,
+          resource: 'merge_requests',
+          resourceId: 2,
+          body: 'inline',
+          position: { position_type: 'text', new_path: 'src/app.ts', new_line: 1 },
+        }),
+      },
+      {
+        method: 'PUT',
+        pathname: '/api/v4/projects/3/hooks/9',
+        run: (client) => client.updateProjectHook({
+          projectId: 3,
+          hookId: 9,
+          url: 'https://listener.example.com/webhooks/gitlab',
+        }),
+      },
+    ]
+
+    for (const scenario of cases) {
+      for (const status of [301, 302, 303, 307, 308]) {
+        const requests: Array<{ method: string; pathname: string; token: string | null }> = []
+        let cancellations = 0
+        const client = new GitLabApiClient({
+          baseUrl: 'https://gitlab.example.com',
+          token: 'write-redirect-secret',
+          fetch: (async (url, init) => {
+            requests.push({
+              method: init?.method ?? 'GET',
+              pathname: new URL(String(url)).pathname,
+              token: new Headers(init?.headers).get('private-token'),
+            })
+            return new Response(new ReadableStream<Uint8Array>({
+              cancel() {
+                cancellations += 1
+              },
+            }), {
+              status,
+              headers: { location: '/redirected-write' },
+            })
+          }) as typeof fetch,
+        })
+
+        await expect(scenario.run(client)).rejects.toMatchObject({
+          code: 'gitlab_redirect_write_rejected',
+        })
+        expect(requests).toEqual([{
+          method: scenario.method,
+          pathname: scenario.pathname,
+          token: 'write-redirect-secret',
+        }])
+        expect(cancellations).toBe(1)
+      }
+    }
+  })
+
+  test('preserves HEAD across a same-authority 303 redirect', async () => {
+    const requests: Array<{ method: string; token: string | null }> = []
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'head-redirect-secret',
+      fetch: (async (_url, init) => {
+        requests.push({
+          method: init?.method ?? 'GET',
+          token: new Headers(init?.headers).get('private-token'),
+        })
+        return requests.length === 1
+          ? new Response(null, { status: 303, headers: { location: '/head-target' } })
+          : new Response(null, { status: 204 })
+      }) as typeof fetch,
+    })
+    const internalClient = client as unknown as {
+      fetchWithSafeRedirects: (
+        url: string,
+        init: RequestInit,
+        signal: AbortSignal,
+      ) => Promise<Response>
+    }
+
+    const response = await internalClient.fetchWithSafeRedirects(
+      'https://gitlab.example.com/head-source',
+      { method: 'HEAD' },
+      new AbortController().signal,
+    )
+
+    expect(response.status).toBe(204)
+    expect(requests).toEqual([
+      { method: 'HEAD', token: 'head-redirect-secret' },
+      { method: 'HEAD', token: 'head-redirect-secret' },
+    ])
   })
 
   test('propagates an upstream AbortSignal through GitLab reads', async () => {
