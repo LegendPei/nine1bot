@@ -512,7 +512,7 @@ bun run build:web
 git diff --check
 git status --short
 git diff --name-only origin/main...HEAD
-rg -n "glpat-|PRIVATE-TOKEN|topview624" packages opencode web -g '!*.test.ts' -g '!docs/**'
+rg -n "glpat-|PRIVATE-TOKEN|Authorization:\\s*Bearer|password\\s*[:=]" packages opencode web -g '!*.test.ts' -g '!docs/**'
 ```
 
 扫描只允许字段名和稳定示例，不允许真实凭证。

@@ -566,7 +566,9 @@ test("GitLab automated review agents expose only their frozen tool boundary", as
       })
       const tools = await ToolRegistry.tools({ providerID: "test", modelID: "test" })
       const pm = await Agent.get("platform.gitlab.pm-coordinator", { includeDeclaredOnly: true })
+      const assistant = await Agent.get("platform.gitlab.assistant", { includeDeclaredOnly: true })
       expect(pm).toBeDefined()
+      expect(assistant).toBeDefined()
 
       const visible = (agent: NonNullable<typeof pm>, requested: Record<string, boolean> | undefined) => {
         const disabled = PermissionNext.disabled(tools.map((tool) => tool.id), agent.permission)
@@ -581,6 +583,29 @@ test("GitLab automated review agents expose only their frozen tool boundary", as
         "task",
       ])
       expect(visible(pm!, { "*": false, task: true, gitlab_ci_inspect: false })).toEqual(["task"])
+      expect(PermissionNext.evaluate("gitlab_cli_mr_diff", "gitlab:root/project!42", pm!.permission).action).toBe("deny")
+
+      expect(PermissionNext.evaluate(
+        "gitlab_cli_mr_diff",
+        "gitlab:root/project!42",
+        assistant!.permission,
+      ).action).toBe("allow")
+      expect(PermissionNext.evaluate(
+        "gitlab_cli_read",
+        "gitlab:root/project!42",
+        assistant!.permission,
+      ).action).toBe("ask")
+      expect(PermissionNext.evaluate(
+        "gitlab_cli_preview",
+        "gitlab:root/project!42",
+        assistant!.permission,
+      ).action).toBe("allow")
+      expect(PermissionNext.evaluate(
+        "gitlab_cli_publish_review_note",
+        "gitlab:root/project!42",
+        assistant!.permission,
+      ).action).toBe("ask")
+      expect(PermissionNext.evaluate("bash", "*", assistant!.permission).action).toBe("deny")
 
       expect(
         PermissionNext.evaluateWithSessionGrants("task", "platform.gitlab.risk-qa", pm!.permission, []).action,

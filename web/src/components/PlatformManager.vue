@@ -39,6 +39,7 @@ import {
   isOperationalGitLabReviewRun,
   reviewRunStatusLabel,
 } from '../lib/gitlab-review-runs'
+import { gitLabCliGuide } from '../lib/gitlab-cli-guide'
 
 const props = defineProps<{
   platforms: PlatformSummary[]
@@ -110,8 +111,8 @@ const configFormSections = computed(() => {
     },
     {
       id: 'gitlab-page-context',
-      title: '页面上下文',
-      description: '控制浏览器插件采集 GitLab 页面上下文时允许的实例和补充信息。',
+      title: '页面与 CLI 访问',
+      description: '控制浏览器插件页面上下文和 CLI wrapper 允许访问的 GitLab 实例。',
       keys: ['allowedHosts', 'apiEnrichment'],
     },
   ].map((group) => {
@@ -199,6 +200,9 @@ const gitLabReviewWebhookUrl = computed(() => {
   const secret = textValue(gitLabWebhookSecretFieldKey).trim() || '{webhookSecret}'
   return `${baseUrl}/webhooks/gitlab/${encodeURIComponent(secret)}`
 })
+const gitLabCliGuideState = computed(() => gitLabCliGuide(
+  props.selectedPlatform?.runtimeStatus.cards?.find((card) => card.id === 'cli'),
+))
 
 watch(
   () => props.selectedPlatform,
@@ -1067,6 +1071,11 @@ function actionResultDetails(result: PlatformActionResult) {
             <div class="gitlab-mvp-callout">
               <strong>最小运行路径</strong>
               <span>填 GitLab base URL 和 API token，复制下方 webhook URL 到 GitLab Project/Group Hook，只勾选 Comments / Note events，然后在 MR 评论 `@Nine1bot review`。</span>
+            </div>
+            <div class="gitlab-mvp-callout" :class="`tone-${gitLabCliGuideState.tone}`">
+              <strong>{{ gitLabCliGuideState.title }}</strong>
+              <span>{{ gitLabCliGuideState.text }}</span>
+              <span>CLI 交互使用受控 wrapper tools，不要求开启 webhook Review，也不会向模型暴露 token 或任意 CLI 命令。</span>
             </div>
             <div class="gitlab-webhook-url-box">
               <span class="gitlab-guide-label">专用 Webhook URL</span>

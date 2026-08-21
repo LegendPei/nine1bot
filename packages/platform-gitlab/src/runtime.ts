@@ -7,6 +7,7 @@ import {
 } from './shared'
 import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
+import { createGitLabCliPlatformTools, getGitLabCliStatus, gitLabCliToolIds, type GitLabCliStatus } from './cli'
 import {
   GitLabApiClient,
   GitLabApiError,
@@ -23,6 +24,7 @@ import type {
   PlatformAdapterContext,
   PlatformAdapterContribution,
   PlatformDescriptor,
+  PlatformResourceContributionInput,
   PlatformRuntimeAdapter,
   PlatformRuntimeStatus,
   PlatformSecretAccess,
@@ -38,7 +40,7 @@ export type GitLabPlatformAdapter = PlatformRuntimeAdapter & {
   blocksFromPage: (page: PageContextPayload, observedAt: number) => PlatformContextBlock[] | undefined
   inferTemplateIds: (input: { entry?: { platform?: string }; page?: PageContextPayload }) => string[]
   templateContextBlocks: (input: { templateIds: string[]; page?: PageContextPayload }) => PlatformContextBlock[]
-  resourceContributions: (input: { templateIds: string[] }) => PlatformResourceContribution | undefined
+  resourceContributions: (input: PlatformResourceContributionInput) => PlatformResourceContribution | undefined
 }
 
 export const gitlabPlatformDescriptor = {
@@ -49,7 +51,7 @@ export const gitlabPlatformDescriptor = {
   defaultEnabled: true,
   capabilities: {
     pageContext: true,
-    templates: ['browser-gitlab', 'gitlab-repo', 'gitlab-file', 'gitlab-mr', 'gitlab-issue'],
+    templates: ['browser-gitlab', 'gitlab-repo', 'gitlab-file', 'gitlab-mr', 'gitlab-commit', 'gitlab-issue'],
     resources: true,
     browserExtension: true,
     auth: 'token',
@@ -66,7 +68,7 @@ export const gitlabPlatformDescriptor = {
             key: 'allowedHosts',
             type: 'string-list',
             label: 'Allowed GitLab hosts',
-            description: 'GitLab hosts that can contribute page context.',
+            description: 'GitLab hosts allowed to contribute page context and receive CLI wrapper access.',
           },
           {
             key: 'apiEnrichment',
@@ -288,6 +290,9 @@ export const gitlabPlatformContribution = {
         },
       ],
     }),
+    tools: (ctx: PlatformAdapterContext) => createGitLabCliPlatformTools({
+      allowedHosts: normalizeGitLabReviewSettings(ctx.settings).allowedHosts,
+    }),
   },
   getStatus: getGitLabPlatformStatus,
   validateConfig: validateGitLabPlatformConfig,
@@ -312,10 +317,16 @@ export function createGitLabPlatformAdapter(): GitLabPlatformAdapter {
       if (!input.templateIds.some((templateId) => templateId === 'browser-gitlab' || templateId.startsWith('gitlab-'))) {
         return undefined
       }
-      return emptyResources(['gitlab-context'])
+      if (input.agentName !== 'platform.gitlab.assistant') {
+        return emptyResources(['gitlab-context'])
+      }
+      return gitLabResourcesForTemplates(input.templateIds)
     },
     recommendedAgent(input) {
-      return input.templateIds.includes('gitlab-mr') ? 'platform.gitlab.pm-coordinator' : input.fallback
+      if (input.fallback === 'platform.gitlab.pm-coordinator') return input.fallback
+      return input.templateIds.some((templateId) => templateId === 'browser-gitlab' || templateId.startsWith('gitlab-'))
+        ? 'platform.gitlab.assistant'
+        : input.fallback
     },
   }
 }
@@ -324,8 +335,19 @@ export { gitLabTemplateIdsForPage, normalizeGitLabPagePayload, parseGitLabUrl }
 
 async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<PlatformRuntimeStatus> {
   const settings = normalizeGitLabReviewSettings(ctx.settings)
+  const cliStatus = await cachedGitLabCliStatus()
   const cards: PlatformRuntimeStatus['cards'] = [
     { id: 'context', label: 'Page context', value: 'enabled', tone: 'success' },
+    {
+      id: 'cli',
+      label: 'GitLab CLI',
+      value: cliStatus.available
+        ? cliStatus.authenticated
+          ? `authenticated${cliStatus.host ? `: ${cliStatus.host}` : ''}`
+          : 'not authenticated'
+        : 'missing',
+      tone: cliStatus.available && cliStatus.authenticated ? 'success' : cliStatus.available ? 'warning' : 'neutral',
+    },
     { id: 'review', label: 'Code review', value: settings.enabled ? 'enabled' : 'disabled', tone: settings.enabled ? 'success' : 'neutral' },
     { id: 'mode', label: 'Review publish', value: settings.dryRun ? 'dry-run' : 'publish', tone: settings.dryRun ? 'warning' : 'success' },
     { id: 'model', label: 'Review model', value: settings.modelProviderId && settings.modelId ? `${settings.modelProviderId}/${settings.modelId}` : 'default', tone: 'neutral' },
@@ -1161,7 +1183,7 @@ function buildGitLabTemplateContextBlocks(templateIds: string[], page?: PageCont
         id: 'template:browser-gitlab',
         layer: 'platform',
         source: 'template.browser-gitlab',
-        content: 'This session can use GitLab browser context. Treat GitLab repository, file, merge request, and issue page events as active work context.',
+        content: 'This session can use GitLab browser context. Treat GitLab repository, file, merge request, commit, and issue page events as active work context.',
         lifecycle: 'session',
         visibility: 'developer-toggle',
         enabled: true,
@@ -1215,6 +1237,7 @@ function renderPage(page: PageContextPayload, gitlab?: Record<string, unknown>) 
     page.objectKey ? `Object key: ${page.objectKey}` : undefined,
     stringValue(gitlab?.route) ? `GitLab route: ${gitlab?.route}` : undefined,
     stringValue(gitlab?.iid) ? `IID: ${gitlab?.iid}` : undefined,
+    stringValue(gitlab?.sha) ? `Commit SHA: ${gitlab?.sha}` : undefined,
     stringValue(gitlab?.ref) ? `Ref: ${gitlab?.ref}` : undefined,
     stringValue(gitlab?.filePath) ? `File path: ${gitlab?.filePath}` : undefined,
     stringValue(gitlab?.treePath) ? `Tree path: ${gitlab?.treePath}` : undefined,
@@ -1223,10 +1246,53 @@ function renderPage(page: PageContextPayload, gitlab?: Record<string, unknown>) 
     .join('\n')
 }
 
-function emptyResources(enabledGroups: string[]): PlatformResourceContribution {
+function gitLabResourcesForTemplates(templateIds: string[]): PlatformResourceContribution {
+  const skills = new Set<string>()
+  const tools = new Set<string>()
+  const isGitLabTemplate = templateIds.some((templateId) => (
+    templateId === 'browser-gitlab' || templateId.startsWith('gitlab-')
+  ))
+
+  if (isGitLabTemplate) {
+    skills.add('platform.gitlab.gitlab-assisted-workflow')
+    skills.add('platform.gitlab.gitlab-cli-command-policy')
+    tools.add(gitLabCliToolIds.status)
+    tools.add(gitLabCliToolIds.resolveTarget)
+  }
+  if (templateIds.includes('gitlab-repo') || templateIds.includes('gitlab-file')) {
+    skills.add('platform.gitlab.gitlab-repository-health-workflow')
+    tools.add(gitLabCliToolIds.projectSnapshot)
+    tools.add(gitLabCliToolIds.repositoryHealthContext)
+  }
+  if (templateIds.includes('gitlab-mr')) {
+    skills.add('platform.gitlab.gitlab-cli-mr-review-workflow')
+    tools.add(gitLabCliToolIds.mrSnapshot)
+    tools.add(gitLabCliToolIds.mrDiff)
+    tools.add(gitLabCliToolIds.publishReviewNote)
+    tools.add(gitLabCliToolIds.publishReviewDiscussion)
+  }
+  if (templateIds.includes('gitlab-commit')) {
+    skills.add('platform.gitlab.gitlab-cli-commit-review-workflow')
+    tools.add(gitLabCliToolIds.commitDiff)
+    tools.add(gitLabCliToolIds.publishReviewNote)
+  }
+
+  return emptyResources(['gitlab-context'], [...skills], [...tools])
+}
+
+function emptyResources(
+  enabledGroups: string[],
+  skills: string[] = [],
+  registeredTools: string[] = [],
+): PlatformResourceContribution {
   return {
     builtinTools: {
       enabledGroups,
+    },
+    registeredTools: {
+      tools: registeredTools,
+      lifecycle: 'session',
+      mergeMode: 'additive-only',
     },
     mcp: {
       servers: [],
@@ -1234,11 +1300,30 @@ function emptyResources(enabledGroups: string[]): PlatformResourceContribution {
       mergeMode: 'additive-only',
     },
     skills: {
-      skills: [],
+      skills,
       lifecycle: 'session',
       mergeMode: 'additive-only',
     },
   }
+}
+
+let cliStatusCache: { status: GitLabCliStatus; expiresAt: number } | undefined
+let cliStatusPending: Promise<GitLabCliStatus> | undefined
+
+async function cachedGitLabCliStatus() {
+  const now = Date.now()
+  if (cliStatusCache && cliStatusCache.expiresAt > now) return cliStatusCache.status
+  if (cliStatusPending) return await cliStatusPending
+
+  cliStatusPending = getGitLabCliStatus({ timeoutMs: 3_000 })
+    .then((status) => {
+      cliStatusCache = { status, expiresAt: Date.now() + 10_000 }
+      return status
+    })
+    .finally(() => {
+      cliStatusPending = undefined
+    })
+  return await cliStatusPending
 }
 
 function pageKeyFor(page: PageContextPayload) {

@@ -1,19 +1,19 @@
 # GitLab Review 实施文档索引
 
-本目录保存 GitLab review 能力建设过程中的设计、阶段产出和后续计划。旧的顶层文档已经迁移到本目录：
+本目录保存 GitLab review 能力建设过程中的阶段产出和后续计划。两份初始总览仍保留在包根目录：
 
-- `GITLAB_CODE_REVIEW_PLUGIN_DESIGN.md`
-- `GITLAB_REVIEW_ENGINEERING_SUMMARY.md`
+- [GITLAB_CODE_REVIEW_PLUGIN_DESIGN.md](../../GITLAB_CODE_REVIEW_PLUGIN_DESIGN.md)
+- [GITLAB_REVIEW_ENGINEERING_SUMMARY.md](../../GITLAB_REVIEW_ENGINEERING_SUMMARY.md)
 
-后续不要再在 `packages/platform-gitlab/` 根目录新增阶段性设计文档，根目录只保留包入口、源码、测试和 README。这样可以避免实现文件和施工记录混在一起。
+除上述历史总览外，后续不要再在 `packages/platform-gitlab/` 根目录新增阶段性设计文档。新增施工记录统一放在本目录，避免实现文件和阶段文档继续混在一起。
 
 ## 当前架构约束
 
 - GitLab 专属能力放在 `packages/platform-gitlab`。
-- GitLab review agents、skills、tools 通过 `PlatformAdapterContribution.runtime.sources` 暴露给 Platform Adapter Manager。
-- Web 对话栏通过 page context 和 project profile 选择仓库；自动 Review 通过冻结的 ReviewRun/attempt 关联项目、MR、源码版本和上下文。
-- 模型只能调用显式白名单中的 wrapper tool。当前 CI 按需查询由 `gitlab_ci_inspect` 通过受限 GitLab REST API v4 完成，不向模型暴露 token、CLI、`curl`、`webfetch`、shell 或通用网络能力。
-- GitLab CLI 仅供管理员配置、诊断和手工联调，不是自动 Review 的模型工具，也不进入提示词。
+- GitLab agents、skills 通过 `PlatformAdapterContribution.runtime.sources` 暴露，wrapper tools 通过 `runtime.tools` 注册到 Platform Adapter Manager。
+- Web 对话栏的交互任务通过 page context 或显式 URL 选择目标；自动 Review 通过 project profile 和冻结的 ReviewRun/attempt 关联项目、MR、源码版本和上下文。
+- 模型只能调用显式注册且由页面模板声明的 wrapper tool，不向模型暴露 token、任意 `glab` 命令、`curl`、`webfetch`、shell 或通用网络能力。
+- 交互式 GitLab 页面会话可使用 `runtime.tools` 注册的受控 CLI wrapper；自动 webhook Review 不声明、不注入这些工具，仍只通过 `gitlab_ci_inspect` 和原有发布链路访问 GitLab。
 - skill 固定审查步骤，wrapper tool 固定能力边界，context pipeline 负责冻结、切片和按预算注入上下文。
 - MCP 暂不作为本项目内部 GitLab 能力提供方式。
 
@@ -65,19 +65,30 @@
    - 发布对账的前置输入预算、线性 marker 扫描、独立复审与 Task 6 CPU blocker 解除记录。
 23. [23-final-review-residual-hardening-implementation-plan.md](./23-final-review-residual-hardening-implementation-plan.md)
    - 最终复审遗留的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整发布预算和项目档案逐表示无损校验实施与收口记录。
+24. [24-gitlab-cli-platform-tools-migration.md](./24-gitlab-cli-platform-tools-migration.md)
+   - 基于平台注册机制选择性迁移 GitLab CLI wrapper、引导 skill、页面映射、权限边界、稳定性措施和后续真实联调计划。
 
 ## 当前交付目标
 
-当前交付收敛为本项目内部的受限 REST wrapper 路线：
+当前交付包含两条隔离的内部 wrapper 路线：
 
 ```text
-webhook / browser page context
+交互式 GitLab 页面
+  -> page context + GitLab template
+  -> registeredTools + guided skills
+  -> platform.gitlab.assistant
+  -> bounded CLI wrappers
+  -> glab api
+
+自动 webhook Review
   -> GitLab project profile
   -> frozen ReviewRun attempt + context pipeline
   -> allowlisted review agents and skill workflow
   -> bounded gitlab_ci_inspect REST wrapper (on demand)
   -> optional review publish
 ```
+
+两条路线不共享模型工具权限：CLI wrapper 只进入交互式 GitLab 页面会话；自动 Review 的 PM 和 specialist agents 明确拒绝 CLI wrapper。两条路线都不采用 MCP，也不允许模型裸跑 CLI。
 
 大 diff 由 context pipeline 按文件、风险和预算切片，Review finding 只能引用冻结 diff。CI 只作为补充上下文：仅接受与当前 MR/source HEAD 可证明关联的 source、detached、merged-result、merge-train 或 integrated pipeline；找不到可信 CI 时返回稳定诊断并继续 Review，绝不退化到项目最新流水线。CI list 最终成功 DTO 的严格序列化合同为 `< 32 KiB`。
 

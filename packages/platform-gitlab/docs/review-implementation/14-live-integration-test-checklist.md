@@ -37,7 +37,7 @@ $env:NINE1BOT_PLATFORM_SECRETS_PATH = '<ABSOLUTE_SECRET_STORE_PATH>'
 bun run packages/nine1bot/src/index.ts start
 ```
 
-GitLab CLI 仅供管理员配置和排查。模型侧没有 CLI、shell、`curl`、`webfetch` 或通用网络工具，CI 只能通过受限的 `gitlab_ci_inspect` REST wrapper 按需读取。
+自动 webhook Review 模型没有 CLI、shell、`curl`、`webfetch` 或通用网络工具，CI 只能通过受限的 `gitlab_ci_inspect` REST wrapper 按需读取。交互式 GitLab 页面会话可使用独立的受控 CLI wrapper，但该能力不进入 ReviewRun，也不能替代本清单中的 webhook、项目档案和可信 CI 联调。
 
 ## 2. 配置前置检查
 

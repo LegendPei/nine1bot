@@ -254,7 +254,7 @@ bun run --cwd opencode/packages/opencode typecheck
 ```powershell
 git diff --check
 git status --short
-rg -n "glpat-|PRIVATE-TOKEN|topview624" packages opencode web -g "!*.test.ts" -g "!docs/**"
+rg -n "glpat-|PRIVATE-TOKEN|Authorization:\\s*Bearer|password\\s*[:=]" packages opencode web -g "!*.test.ts" -g "!docs/**"
 ```
 
 扫描结果只允许稳定字段名或脱敏示例，不允许真实凭证、远端正文或测试密码进入提交。

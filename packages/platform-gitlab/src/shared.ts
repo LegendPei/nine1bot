@@ -12,7 +12,12 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
 
   if (!isLikelyGitLabHost(url.hostname)) return undefined
 
-  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+  let parts: string[]
+  try {
+    parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+  } catch {
+    return undefined
+  }
   if (parts.length === 0) return undefined
 
   const dashIndex = parts.indexOf('-')
@@ -22,10 +27,10 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
 
   if (dashIndex === -1) {
     return {
-      host: url.hostname,
+      host: url.host,
       projectPath,
       pageType: 'gitlab-repo',
-      objectKey: objectKey(url.hostname, projectPath, 'repo'),
+      objectKey: objectKey(url.host, projectPath, 'repo'),
       route: 'repo',
     }
   }
@@ -35,10 +40,10 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
 
   if (route === 'merge_requests' && rest[0]) {
     return {
-      host: url.hostname,
+      host: url.host,
       projectPath,
       pageType: 'gitlab-mr',
-      objectKey: objectKey(url.hostname, projectPath, 'merge_request', rest[0]),
+      objectKey: objectKey(url.host, projectPath, 'merge_request', rest[0]),
       route: 'merge_request',
       iid: rest[0],
     }
@@ -46,12 +51,23 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
 
   if (route === 'issues' && rest[0]) {
     return {
-      host: url.hostname,
+      host: url.host,
       projectPath,
       pageType: 'gitlab-issue',
-      objectKey: objectKey(url.hostname, projectPath, 'issue', rest[0]),
+      objectKey: objectKey(url.host, projectPath, 'issue', rest[0]),
       route: 'issue',
       iid: rest[0],
+    }
+  }
+
+  if (route === 'commit' && rest[0]) {
+    return {
+      host: url.host,
+      projectPath,
+      pageType: 'gitlab-commit',
+      objectKey: objectKey(url.host, projectPath, 'commit', rest[0]),
+      route: 'commit',
+      sha: rest[0],
     }
   }
 
@@ -59,10 +75,10 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
     const ref = rest[0]
     const filePath = rest.slice(1).join('/')
     return {
-      host: url.hostname,
+      host: url.host,
       projectPath,
       pageType: 'gitlab-file',
-      objectKey: objectKey(url.hostname, projectPath, 'file', ref, filePath),
+      objectKey: objectKey(url.host, projectPath, 'file', ref, filePath),
       route: 'blob',
       ref,
       filePath,
@@ -73,10 +89,10 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
     const ref = rest[0]
     const treePath = rest.slice(1).join('/')
     return {
-      host: url.hostname,
+      host: url.host,
       projectPath,
       pageType: 'gitlab-repo',
-      objectKey: objectKey(url.hostname, projectPath, 'tree', ref, treePath),
+      objectKey: objectKey(url.host, projectPath, 'tree', ref, treePath),
       route: 'tree',
       ref,
       treePath,
@@ -84,10 +100,10 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
   }
 
   return {
-    host: url.hostname,
+    host: url.host,
     projectPath,
     pageType: 'gitlab-repo',
-    objectKey: objectKey(url.hostname, projectPath, 'repo'),
+    objectKey: objectKey(url.host, projectPath, 'repo'),
     route: 'repo',
   }
 }
@@ -130,6 +146,7 @@ export function buildGitLabPageContextPayload(input: {
         filePath: gitlab.filePath,
         treePath: gitlab.treePath,
         iid: gitlab.iid,
+        sha: gitlab.sha,
       },
     },
   }
@@ -157,6 +174,7 @@ export function normalizeGitLabPagePayload(page: PageContextPayload): PageContex
         filePath: gitlab.filePath,
         treePath: gitlab.treePath,
         iid: gitlab.iid,
+        sha: gitlab.sha,
       },
     },
   }
@@ -206,20 +224,23 @@ function gitLabInfoFromRaw(page: PageContextPayload): GitLabUrlInfo | undefined 
       ? 'gitlab-mr'
       : route === 'issue'
         ? 'gitlab-issue'
-        : route === 'blob'
-          ? 'gitlab-file'
-          : 'gitlab-repo'
+        : route === 'commit'
+          ? 'gitlab-commit'
+          : route === 'blob'
+            ? 'gitlab-file'
+            : 'gitlab-repo'
 
   return {
     host,
     projectPath,
     pageType,
-    objectKey: page.objectKey || objectKey(host, projectPath, route || 'repo', stringValue(raw?.iid)),
-    route: route === 'merge_request' || route === 'issue' || route === 'blob' || route === 'tree' ? route : 'repo',
+    objectKey: page.objectKey || objectKey(host, projectPath, route || 'repo', stringValue(raw?.iid) ?? stringValue(raw?.sha)),
+    route: route === 'merge_request' || route === 'issue' || route === 'commit' || route === 'blob' || route === 'tree' ? route : 'repo',
     ref: stringValue(raw?.ref),
     filePath: stringValue(raw?.filePath),
     treePath: stringValue(raw?.treePath),
     iid: stringValue(raw?.iid),
+    sha: stringValue(raw?.sha),
   }
 }
 
