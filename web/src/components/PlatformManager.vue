@@ -24,13 +24,14 @@ import {
 } from '../lib/gitlab-project-profiles'
 import {
   appendGitLabProjectProfileDocument,
+  gitLabProjectProfileDiagnosticKey,
+  gitLabProjectProfileDiagnosticLabel,
   parseGitLabProjectProfileDocument,
   removeGitLabProjectProfileDocument,
   renderGitLabProjectProfileDocument,
   serializeGitLabProjectProfileDocument,
   updateGitLabProjectProfileDocument,
   validateGitLabProjectProfileDocument,
-  type GitLabProjectProfileDiagnostic,
 } from '../lib/gitlab-project-profile-document'
 import {
   canRetryGitLabReviewRun as canRetryGitLabReviewRunPolicy,
@@ -515,12 +516,6 @@ function removeGitLabProjectProfile(profile: GitLabProjectProfile) {
   const entry = document.editable.find((candidate) => candidate.profile === profile)
   if (!entry) return
   setGitLabProjectProfileDocument(removeGitLabProjectProfileDocument(document, entry.index))
-}
-
-function gitLabProjectProfileDiagnosticLabel(diagnostic: GitLabProjectProfileDiagnostic) {
-  const entry = diagnostic.index === undefined ? '配置' : `条目 ${diagnostic.index + 1}`
-  const profile = diagnostic.profileId ? `（${diagnostic.profileId}）` : ''
-  return `${entry}${profile}：${diagnostic.message}`
 }
 
 function hasNine1BotProject(projectID: string) {
@@ -1303,7 +1298,7 @@ function actionResultDetails(result: PlatformActionResult) {
               <div v-if="gitLabProjectProfileDiagnostics.length" class="platform-alert error">
                 <div
                   v-for="diagnostic in gitLabProjectProfileDiagnostics"
-                  :key="`${diagnostic.code}:${diagnostic.index ?? 'root'}:${diagnostic.profileId ?? ''}`"
+                  :key="gitLabProjectProfileDiagnosticKey(diagnostic)"
                 >
                   {{ gitLabProjectProfileDiagnosticLabel(diagnostic) }}
                 </div>

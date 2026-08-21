@@ -6,6 +6,8 @@ import {
   validateGitLabProjectBindings,
 } from '../src/lib/gitlab-project-profiles'
 import {
+  gitLabProjectProfileDiagnosticKey,
+  gitLabProjectProfileDiagnosticLabel,
   parseGitLabProjectProfileDocument,
   renderGitLabProjectProfileDocument,
   serializeGitLabProjectProfileDocument,
@@ -14,6 +16,35 @@ import {
 } from '../src/lib/gitlab-project-profile-document'
 
 describe('GitLab project profiles', () => {
+  test('renders distinct field-aware diagnostics for colliding CI aliases', () => {
+    const document = parseGitLabProjectProfileDocument([{
+      id: 'ci-alias-diagnostics',
+      host: 'gitlab.example.com',
+      projectId: 3,
+      nine1botProjectID: 'project-uf',
+      ci: {
+        maxJobLogs: 4,
+        max_job_logs: 0,
+        maxFailedJobs: 'four',
+        max_failed_jobs: null,
+        maxJobLogBytes: 8_000,
+      },
+    }])
+    const diagnostics = validateGitLabProjectProfileDocument(document)
+      .filter((diagnostic) => diagnostic.code === 'profile_ci_max_job_logs_invalid')
+
+    expect(diagnostics.map((diagnostic) => diagnostic.field)).toEqual([
+      'max_job_logs',
+      'maxFailedJobs',
+      'max_failed_jobs',
+    ])
+    const keys = diagnostics.map(gitLabProjectProfileDiagnosticKey)
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const diagnostic of diagnostics) {
+      expect(gitLabProjectProfileDiagnosticLabel(diagnostic)).toContain(`字段：${diagnostic.field}`)
+    }
+  })
+
   test('round-trips every canonical review overlay and CI limit', () => {
     const original = createGitLabProjectProfile({
       id: 3,

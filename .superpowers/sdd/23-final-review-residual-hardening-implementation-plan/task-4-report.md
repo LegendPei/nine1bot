@@ -142,3 +142,23 @@ Repository checks:
 - The truncation loop is forward-only and its complexity assertions do not depend on machine speed.
 - No known correctness blocker remains.
 - Vite still reports its existing warning for a minified chunk larger than 500 kB. The build succeeds, and Task 4 does not alter chunking policy.
+
+## Scoped Review Fix Round 1
+
+The independent scoped review found no Critical issue, one Important test-evidence gap, and one Minor UI diagnostic issue.
+
+- Important: the multibyte fixture did not require an emoji to survive truncation, so it could not kill a `codeUnits = 1` surrogate-splitting mutant.
+- Minor: multiple invalid aliases shared the same Vue key and the visible diagnostic omitted `sourceKey`.
+
+The fix adds an exact `markerBytes + 4` emoji boundary. A controlled `codeUnits = 1` mutant failed with `0 pass / 1 fail / 16 assertions`; the restored production algorithm passed with `1 pass / 0 fail / 25 assertions`. The assertion requires a complete emoji, rejects isolated high and low surrogates and replacement characters, and verifies a fatal UTF-8 round trip.
+
+GitLab profile diagnostic keys and labels now come from the same exported Web document helpers used by `PlatformManager.vue`. A real three-alias CI validation fixture proves unique keys and visible `max_job_logs`, `maxFailedJobs`, and `max_failed_jobs` source fields without adding a DOM-only test dependency.
+
+Post-fix verification:
+
+- Task 4 focused matrix: `152 pass / 0 fail / 724 assertions`.
+- Platform GitLab plus Web test suites: `258 pass / 0 fail / 1054 assertions`.
+- Platform GitLab typecheck: exit 0.
+- Web typecheck: exit 0.
+- Web production build: exit 0; 1,866 modules transformed.
+- `git diff --check`: exit 0.

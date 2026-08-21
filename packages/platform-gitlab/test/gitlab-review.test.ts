@@ -1271,6 +1271,23 @@ describe('GitLab review foundation', () => {
     )).toBe(multibyteResult.rendered)
     expect(new TextEncoder().encode(multibyteResult.rendered).byteLength).toBeLessThanOrEqual(31)
 
+    const markerText = `\n${marker}`
+    const markerBytes = new TextEncoder().encode(markerText).byteLength
+    const emojiBoundary = `😀${'x'.repeat(50_000)}`
+    const emojiBudget = markerBytes + 4
+    const emojiResult = measure(emojiBoundary, emojiBudget)
+    expect(emojiResult.encodeCalls).toBeLessThanOrEqual(2)
+    expect(emojiResult.scannedCodePoints).toBeGreaterThan(0)
+    expect(emojiResult.scannedCodePoints).toBeLessThanOrEqual(emojiBoundary.length + 1)
+    expect(emojiResult.rendered).toBe(`😀${markerText}`)
+    expect(emojiResult.rendered).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
+    expect(emojiResult.rendered).not.toMatch(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/)
+    expect(emojiResult.rendered).not.toContain('\uFFFD')
+    expect(new TextDecoder('utf-8', { fatal: true }).decode(
+      new TextEncoder().encode(emojiResult.rendered),
+    )).toBe(emojiResult.rendered)
+    expect(new TextEncoder().encode(emojiResult.rendered).byteLength).toBeLessThanOrEqual(emojiBudget)
+
     const tinyBudget = measure(multibyte, 5)
     expect(tinyBudget.encodeCalls).toBeLessThanOrEqual(2)
     expect(tinyBudget.scannedCodePoints).toBeLessThanOrEqual(multibyte.length + marker.length + 1)

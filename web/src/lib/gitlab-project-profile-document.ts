@@ -36,6 +36,22 @@ export type GitLabProjectProfileDocumentSerialization =
   | { ok: true; value: string }
   | { ok: false; diagnostics: GitLabProjectProfileDiagnostic[] }
 
+export function gitLabProjectProfileDiagnosticKey(diagnostic: GitLabProjectProfileDiagnostic) {
+  return [
+    diagnostic.code,
+    diagnostic.index ?? 'root',
+    diagnostic.profileId ?? '',
+    diagnostic.field ?? '',
+  ].join(':')
+}
+
+export function gitLabProjectProfileDiagnosticLabel(diagnostic: GitLabProjectProfileDiagnostic) {
+  const entry = diagnostic.index === undefined ? '配置' : `条目 ${diagnostic.index + 1}`
+  const profile = diagnostic.profileId ? `（${diagnostic.profileId}）` : ''
+  const field = diagnostic.field ? `（字段：${diagnostic.field}）` : ''
+  return `${entry}${profile}${field}：${diagnostic.message}`
+}
+
 export function parseGitLabProjectProfileDocument(input: string | unknown): GitLabProjectProfileDocument {
   let root: unknown = input
   const sourceText = typeof input === 'string' ? input : undefined
