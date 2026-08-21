@@ -483,7 +483,7 @@ repair 只改 `rootRunId` 与 `retryOf`；ID、`triggerKey`、attempt number、�
 
 ---
 
-### Task 9: 全量验证、文档收口与推送（初始提交/推送已完成；Fix Round 1 待独立复审）
+### Task 9: 全量验证、文档收口与推送（已完成并由 Plan 23 继续收口）
 
 **Files:**
 - Modify: `packages/platform-gitlab/docs/review-implementation/14-live-integration-test-checklist.md`
@@ -533,7 +533,7 @@ git commit -m "docs(gitlab): record follow-up hardening verification"
 git push origin HEAD:feat/gitlab-review-workflow-v2
 ```
 
-`cf86409` 是上述初始验证文档 commit，并已通过普通 fast-forward push 到 `origin/feat/gitlab-review-workflow-v2`。本 follow-up 提交修复随后独立 Task 9 review 的三项 Important finding；在本修复提交编写时，Fix Round 1 的独立复审与 controller 最终 whole-branch review 仍 pending，不能记为已完成或已批准。
+`cf86409` 是上述初始验证文档 commit，并已通过普通 fast-forward push 到 `origin/feat/gitlab-review-workflow-v2`。随后由 `6dc1c7d`、`1c291de`、`ca7c3ff`、`509eb44` 关闭独立 Task 9 review 的问题，完成复审并普通推送；后续新发现的架构性遗留转由 Plan 23 继续收口。
 
 ---
 
@@ -555,4 +555,4 @@ git push origin HEAD:feat/gitlab-review-workflow-v2
 
 外部 self-managed GitLab 的 webhook、CI、Notes/Discussions 真实发布与恢复动作本批次均为 **待人工联调**；自动化测试不构成 live-integration 证据。
 
-`cf86409` 已完成初始文档提交与非强制推送。其独立 Task 9 review 产生的三项 Important finding 由本 follow-up 文档修复处理；本修复尚待 Fix Round 1 独立复审，controller 最终 whole-branch review 也仍待执行。
+`cf86409` 已完成初始文档提交与非强制推送。其独立 Task 9 review 产生的问题由 `6dc1c7d`、`1c291de`、`ca7c3ff`、`509eb44` 修复、复审并推送；更晚发现的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整预算和 profile 逐表示校验问题统一转入 Plan 23，并在那里记录最终验证结果。

@@ -60,11 +60,11 @@
 20. [20-review-follow-up-hardening-design.md](./20-review-follow-up-hardening-design.md)
    - 分支二次审查后的权限、脱敏、HEAD 一致性、绑定恢复、发布幂等、资源限制和 attempt 链完整性设计。
 21. [21-review-follow-up-hardening-implementation-plan.md](./21-review-follow-up-hardening-implementation-plan.md)
-   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--8 已完成，Task 9 的初始验证文档提交/推送已完成，follow-up 独立复审仍 pending。
+   - 二次审查加固的 TDD 实施任务、接口、回归命令和提交边界；Task 1--9 及 follow-up 修复均已完成，后续遗留由 Plan 23 收口。
 22. [22-publication-reconciliation-cpu-hardening-implementation-plan.md](./22-publication-reconciliation-cpu-hardening-implementation-plan.md)
    - 发布对账的前置输入预算、线性 marker 扫描、独立复审与 Task 6 CPU blocker 解除记录。
 23. [23-final-review-residual-hardening-implementation-plan.md](./23-final-review-residual-hardening-implementation-plan.md)
-   - 最终复审遗留的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整发布预算和项目档案逐表示无损校验计划。
+   - 最终复审遗留的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整发布预算和项目档案逐表示无损校验实施与收口记录。
 
 ## 当前交付目标
 
