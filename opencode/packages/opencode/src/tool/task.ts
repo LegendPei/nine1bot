@@ -17,6 +17,14 @@ import { SessionRuntimeProfile } from "@/runtime/session/profile"
 import { ulid } from "ulid"
 
 const GITLAB_REVIEW_SPECIALIST_TEMPLATE = "gitlab-review-specialist"
+const GITLAB_REVIEW_SPECIALISTS = new Set([
+  "platform.gitlab.developer",
+  "platform.gitlab.frontend-designer",
+  "platform.gitlab.risk-qa",
+  "platform.gitlab.security-agent",
+  "platform.gitlab.spec-writer",
+  "platform.gitlab.tech-architect",
+])
 
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
@@ -47,6 +55,23 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
 
+      const agent = await Agent.get(params.subagent_type, { includeDeclaredOnly: true, includeRecommendable: true })
+      if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
+
+      const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
+      const callerSession = await Session.get(ctx.sessionID).catch(() => undefined)
+      const gitLabReviewRoot = Boolean(
+        callerSession
+        && ctx.agent === "platform.gitlab.pm-coordinator"
+        && callerSession.client?.source === "webhook"
+        && callerSession.client.platform === "gitlab"
+        && callerSession.client.mode === "gitlab-code-review"
+        && callerSession.runtime?.agent === "platform.gitlab.pm-coordinator",
+      )
+      if (gitLabReviewRoot && (!GITLAB_REVIEW_SPECIALISTS.has(agent.name) || agent.mode === "primary")) {
+        throw new Error("gitlab_review_task_specialist_not_allowed")
+      }
+
       // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
         await ctx.ask({
@@ -60,20 +85,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
       }
 
-      const agent = await Agent.get(params.subagent_type, { includeDeclaredOnly: true, includeRecommendable: true })
-      if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
-
-      const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
-      const callerSession = await Session.get(ctx.sessionID).catch(() => undefined)
-      const gitLabReviewBoundary = Boolean(
-        callerSession
-        && ctx.agent === "platform.gitlab.pm-coordinator"
-        && agent.name.startsWith("platform.gitlab.")
-        && callerSession.client?.source === "webhook"
-        && callerSession.client.platform === "gitlab"
-        && callerSession.client.mode === "gitlab-code-review"
-        && callerSession.runtime?.agent === "platform.gitlab.pm-coordinator",
-      )
+      const gitLabReviewBoundary = gitLabReviewRoot
       const permission = taskSessionPermission({
         agentPermission: agent.permission,
         hasTaskPermission,

@@ -56,6 +56,44 @@ function registerGitLabReviewAgents() {
   })
 }
 
+async function registerGitLabReviewAgent(input: {
+  directory: string
+  name: string
+  mode: "primary" | "subagent"
+}) {
+  const agents = path.join(input.directory, "agents")
+  await fs.mkdir(agents, { recursive: true })
+  await Bun.write(
+    path.join(agents, "test.agent.md"),
+    `---
+name: ${input.name}
+description: Test-only GitLab review agent.
+mode: ${input.mode}
+permission:
+  "*": deny
+---
+
+# Test Agent
+`,
+  )
+  RuntimeSourceRegistry.registerOwner({
+    owner: {
+      id: "gitlab",
+      kind: "platform",
+      enabled: true,
+    },
+    sources: {
+      agents: [{
+        id: "gitlab-review-test-agent",
+        directory: agents,
+        namespace: "gitlab",
+        visibility: "declared-only",
+        lifecycle: "platform-enabled",
+      }],
+    },
+  })
+}
+
 function runtimeProfile(agent: string, template: string): SessionProfileSnapshot {
   return {
     id: crypto.randomUUID(),
@@ -97,6 +135,57 @@ function toolContext(sessionID: string, agent: string): Tool.Context {
   }
 }
 
+async function createGitLabReviewRoot(directory: string) {
+  return Session.createNext({
+    directory,
+    runtimeProfile: runtimeProfile("platform.gitlab.pm-coordinator", "gitlab-review-root"),
+    runtimeCurrentModel: SessionRuntimeProfile.currentModel({
+      providerID: "test-provider",
+      modelID: "test-model",
+    }, "session-choice"),
+    client: {
+      source: "webhook",
+      platform: "gitlab",
+      mode: "gitlab-code-review",
+    },
+  })
+}
+
+async function expectGitLabReviewTargetRejectedBeforeSideEffects(input: {
+  root: Session.Info
+  subagentType: string
+}) {
+  const create = spyOn(Session, "create")
+  const createNext = spyOn(Session, "createNext")
+  const prompt = spyOn(SessionPrompt, "prompt")
+  let askCalls = 0
+  const ctx = toolContext(input.root.id, "platform.gitlab.pm-coordinator")
+  ctx.extra = {}
+  ctx.ask = async () => {
+    askCalls++
+  }
+
+  try {
+    const task = await TaskTool.init()
+    await expect(task.execute({
+      description: "Reject review target",
+      prompt: "Do not run this target.",
+      subagent_type: input.subagentType,
+    }, ctx)).rejects.toThrow(
+      "gitlab_review_task_specialist_not_allowed",
+    )
+
+    expect(askCalls).toBe(0)
+    expect(create).not.toHaveBeenCalled()
+    expect(createNext).not.toHaveBeenCalled()
+    expect(prompt).not.toHaveBeenCalled()
+  } finally {
+    prompt.mockRestore()
+    createNext.mockRestore()
+    create.mockRestore()
+  }
+}
+
 async function createGlobalSkill(homeDir: string) {
   const skillDir = path.join(homeDir, ".claude", "skills", "global-task-resource")
   await fs.mkdir(skillDir, { recursive: true })
@@ -131,6 +220,65 @@ function promptTaskWithoutReply() {
   }
 }
 
+test("GitLab review TaskTool rejects coordinator recursion before creating or prompting a child", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      registerGitLabReviewAgents()
+      const root = await createGitLabReviewRoot(tmp.path)
+
+      await expectGitLabReviewTargetRejectedBeforeSideEffects({
+        root,
+        subagentType: "platform.gitlab.pm-coordinator",
+      })
+    },
+  })
+})
+
+test("GitLab review TaskTool rejects an allowlisted agent registered as primary before side effects", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      await registerGitLabReviewAgent({
+        directory: tmp.path,
+        name: "platform.gitlab.risk-qa",
+        mode: "primary",
+      })
+      const root = await createGitLabReviewRoot(tmp.path)
+
+      await expectGitLabReviewTargetRejectedBeforeSideEffects({
+        root,
+        subagentType: "platform.gitlab.risk-qa",
+      })
+    },
+  })
+})
+
+test("GitLab review TaskTool rejects unknown platform agents before side effects", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      await registerGitLabReviewAgent({
+        directory: tmp.path,
+        name: "platform.gitlab.future-reviewer",
+        mode: "subagent",
+      })
+      const root = await createGitLabReviewRoot(tmp.path)
+
+      await expectGitLabReviewTargetRejectedBeforeSideEffects({
+        root,
+        subagentType: "platform.gitlab.future-reviewer",
+      })
+    },
+  })
+})
+
 test("GitLab review TaskTool preserves an empty specialist resource snapshot through the real prompt path", async () => {
   await using tmp = await tmpdir({
     git: true,
@@ -153,19 +301,7 @@ test("GitLab review TaskTool preserves an empty specialist resource snapshot thr
       directory: tmp.path,
       fn: async () => {
         registerGitLabReviewAgents()
-        const root = await Session.createNext({
-        directory: tmp.path,
-        runtimeProfile: runtimeProfile("platform.gitlab.pm-coordinator", "gitlab-review-root"),
-        runtimeCurrentModel: SessionRuntimeProfile.currentModel({
-          providerID: "test-provider",
-          modelID: "test-model",
-        }, "session-choice"),
-        client: {
-          source: "webhook",
-          platform: "gitlab",
-          mode: "gitlab-code-review",
-        },
-      })
+        const root = await createGitLabReviewRoot(tmp.path)
       const foreignProfile = runtimeProfile("general", "generic-webhook")
       foreignProfile.context.blocks.push({
         id: "foreign-context",
