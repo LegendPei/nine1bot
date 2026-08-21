@@ -81,6 +81,67 @@ const gitLabReviewPublishBodyLimit = bodyLimit({
   },
 })
 
+export async function gitLabReviewWebhookBodyLimit(c: any, next: () => Promise<void>) {
+  const maxBytes = gitLabReviewPublicationBudget.maxManagementRequestBytes
+  const declaredBytes = Number.parseInt(c.req.raw.headers.get("content-length") ?? "", 10)
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    await cancelGitLabWebhookBody(c.req.raw)
+    return gitLabWebhookPayloadTooLarge(c)
+  }
+
+  let body: ArrayBuffer | undefined
+  try {
+    body = await readBoundedGitLabWebhookBody(c.req.raw, maxBytes)
+  } catch {
+    return c.json({ accepted: false, error: "invalid_json_body" }, 400)
+  }
+  if (!body) return gitLabWebhookPayloadTooLarge(c)
+  if (c.req.raw.body) c.req.raw = new Request(c.req.raw, { body })
+  await next()
+}
+
+async function cancelGitLabWebhookBody(request: Request) {
+  if (!request.body || request.body.locked) return
+  await request.body.cancel().catch(() => undefined)
+}
+
+async function readBoundedGitLabWebhookBody(request: Request, maxBytes: number) {
+  if (!request.body) return new ArrayBuffer(0)
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        return undefined
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const buffer = new ArrayBuffer(size)
+  const body = new Uint8Array(buffer)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return buffer
+}
+
+function gitLabWebhookPayloadTooLarge(c: any) {
+  return c.json({
+    accepted: false,
+    error: "gitlab_webhook_payload_too_large",
+  }, 413)
+}
+
 const RUN_MONITOR_TIMEOUT_MS = 30 * 60 * 1000
 const PROMPT_PREVIEW_LIMIT = 4000
 const FULL_PERMISSION_RULES: PermissionNext.Ruleset = [
@@ -849,9 +910,10 @@ function uniqueStrings(items: string[]) {
 
 export const WebhookPublicRoutes = lazy(() =>
   new Hono()
-    .post("/gitlab", triggerGitLabReviewWebhook)
+    .post("/gitlab", gitLabReviewWebhookBodyLimit, triggerGitLabReviewWebhook)
     .post(
       "/gitlab/:secret",
+      gitLabReviewWebhookBodyLimit,
       validator("param", z.object({ secret: z.string() })),
       triggerGitLabReviewWebhook,
     )

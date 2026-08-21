@@ -30,6 +30,7 @@ type GitLabCiTarget = {
 }
 
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024
+const MAX_GITLAB_CI_LIST_QUERIES = 1
 
 export type GitLabCiToolOutput =
   | {
@@ -97,6 +98,11 @@ export async function inspectGitLabCiForSession(input: {
   })
   if (!resolvedBaseUrl.ok) return failure(input.request.action, resolvedBaseUrl.reason)
 
+  if (input.request.action === 'list') {
+    const reservationFailure = reserveListQuery(identity)
+    if (reservationFailure) return failure(input.request.action, reservationFailure)
+  }
+
   let token: string | undefined
   try {
     token = await resolveSecret(settings.tokenSecretRef, input.secrets)
@@ -104,14 +110,14 @@ export async function inspectGitLabCiForSession(input: {
     const lifecycleFailure = reviewRunLifecycleFailure(identity, input.signal)
     if (lifecycleFailure) return failure(input.request.action, lifecycleFailure)
     const diagnostic = `ci_token_unavailable:${errorName(error)}`
-    const persistenceFailure = recordDiagnostic(identity, diagnostic, input.request.action === 'list')
+    const persistenceFailure = recordDiagnostic(identity, diagnostic)
     if (persistenceFailure) return failure(input.request.action, persistenceFailure)
     return failure(input.request.action, diagnostic)
   }
   const tokenLifecycleFailure = reviewRunLifecycleFailure(identity, input.signal)
   if (tokenLifecycleFailure) return failure(input.request.action, tokenLifecycleFailure)
   if (!token) {
-    const persistenceFailure = recordDiagnostic(identity, 'ci_token_missing', input.request.action === 'list')
+    const persistenceFailure = recordDiagnostic(identity, 'ci_token_missing')
     if (persistenceFailure) return failure(input.request.action, persistenceFailure)
     return failure(input.request.action, 'ci_token_missing')
   }
@@ -147,7 +153,6 @@ export async function inspectGitLabCiForSession(input: {
       pipeline: result.pipeline,
       diagnostics: mergeDiagnostics(current.diagnostics, result.diagnostics),
       observedAt,
-      queryCount: (current.queryCount ?? 0) + 1,
     }))
     if (persistenceFailure) return failure(input.request.action, persistenceFailure)
     return boundListToolOutput({
@@ -178,7 +183,7 @@ export async function inspectGitLabCiForSession(input: {
   if (pipelineRequestFailure) return failure(input.request.action, pipelineRequestFailure)
   if (!pipelineResult.pipeline) {
     const diagnostic = pipelineResult.diagnostics[0] ?? 'ci_pipeline_unverified_for_current_head'
-    const persistenceFailure = recordDiagnostic(identity, diagnostic, false)
+    const persistenceFailure = recordDiagnostic(identity, diagnostic)
     if (persistenceFailure) return failure(input.request.action, persistenceFailure)
     return failure(input.request.action, diagnostic)
   }
@@ -292,6 +297,22 @@ function toolOutputBytes(output: GitLabCiToolOutput) {
   return new TextEncoder().encode(JSON.stringify(output)).length
 }
 
+function reserveListQuery(identity: ReviewRunIdentity) {
+  const currentResult = currentActiveReviewRun(identity)
+  if ('diagnostic' in currentResult) return currentResult.diagnostic
+  const current = currentResult.run
+  const count = current.ci?.queryCount ?? 0
+  if (count >= MAX_GITLAB_CI_LIST_QUERIES) return 'ci_list_query_limit_reached'
+  const updated = ReviewRunStore.updateIfCurrent(identity, {
+    ci: {
+      ...current.ci,
+      diagnostics: current.ci?.diagnostics ?? [],
+      queryCount: count + 1,
+    },
+  })
+  return updated ? undefined : 'ci_review_attempt_stale'
+}
+
 function reserveJobLogRead(identity: ReviewRunIdentity, jobId: number) {
   const currentResult = currentActiveReviewRun(identity)
   if ('diagnostic' in currentResult) return currentResult.diagnostic
@@ -310,12 +331,11 @@ function reserveJobLogRead(identity: ReviewRunIdentity, jobId: number) {
   return updated ? undefined : 'ci_review_attempt_stale'
 }
 
-function recordDiagnostic(identity: ReviewRunIdentity, diagnostic: string, countQuery: boolean) {
+function recordDiagnostic(identity: ReviewRunIdentity, diagnostic: string) {
   return updateCiSummary(identity, (current) => ({
     ...current,
     diagnostics: mergeDiagnostics(current.diagnostics, [diagnostic]),
     observedAt: Date.now(),
-    ...(countQuery ? { queryCount: (current.queryCount ?? 0) + 1 } : {}),
   }))
 }
 
@@ -336,6 +356,7 @@ type GitLabCiLifecycleDiagnostic =
   | 'ci_review_run_not_active'
   | 'ci_request_aborted'
   | 'ci_job_log_limit_reached'
+  | 'ci_list_query_limit_reached'
 
 type GitLabCiRequestState = {
   diagnostic?: GitLabCiLifecycleDiagnostic
@@ -395,7 +416,7 @@ function stopCiRequest(state: GitLabCiRequestState, diagnostic: GitLabCiLifecycl
 function reviewRunLifecycleFailure(
   identity: ReviewRunIdentity,
   signal?: AbortSignal,
-): Exclude<GitLabCiLifecycleDiagnostic, 'ci_job_log_limit_reached'> | undefined {
+): Exclude<GitLabCiLifecycleDiagnostic, 'ci_job_log_limit_reached' | 'ci_list_query_limit_reached'> | undefined {
   if (signal?.aborted) return 'ci_request_aborted'
   const currentResult = currentActiveReviewRun(identity)
   return 'diagnostic' in currentResult ? currentResult.diagnostic : undefined

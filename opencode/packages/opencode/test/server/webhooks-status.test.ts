@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { Hono } from "hono"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
@@ -25,14 +26,155 @@ import {
   gitLabReviewRuntimeTools,
   gitLabReviewRuntimeFailure,
   gitLabReviewSessionCreatedPatch,
+  gitLabReviewWebhookBodyLimit,
   publicGitLabReviewWebhookResult,
   publicGitLabReviewRun,
   resolveGitLabReviewRuntimeDirectory,
   startGitLabReviewRuntime,
   startGitLabReviewRuntimeRun,
+  WebhookPublicRoutes,
   WebhookRoutes,
   webhookLocalOrigin,
 } from "../../src/server/routes/webhooks"
+
+describe("public GitLab webhook request limits", () => {
+  test("rejects oversized JSON before validating missing or incorrect header tokens", async () => {
+    const body = JSON.stringify({
+      object_kind: "merge_request",
+      padding: "x".repeat(gitLabReviewPublicationBudget.maxManagementRequestBytes),
+    })
+    const contentLength = new TextEncoder().encode(body).byteLength
+
+    const cases = [
+      { path: "/gitlab", token: undefined, declareLength: true },
+      { path: "/gitlab", token: "incorrect-token", declareLength: false },
+      { path: "/gitlab/incorrect-path-secret", token: undefined, declareLength: false },
+    ] as const
+    for (const { path, token, declareLength } of cases) {
+      const response = await WebhookPublicRoutes().request(`http://localhost${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(declareLength ? { "content-length": String(contentLength) } : {}),
+          ...(token ? { "x-gitlab-token": token } : {}),
+        },
+        body,
+      })
+
+      expect(response.status).toBe(413)
+      expect(await response.json()).toEqual({
+        accepted: false,
+        error: "gitlab_webhook_payload_too_large",
+      })
+    }
+
+    const smallResponse = await WebhookPublicRoutes().request("http://localhost/gitlab", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "small",
+    })
+    expect(smallResponse.status).toBe(400)
+    expect(await smallResponse.json()).toEqual({ accepted: false, error: "json_body_required" })
+  })
+
+  test("cancels declared oversized request streams before downstream work", async () => {
+    let cancelled = false
+    let downstream = false
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    const request = new Request("http://localhost/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(gitLabReviewPublicationBudget.maxManagementRequestBytes + 1),
+      },
+      body,
+      duplex: "half",
+    } as any)
+    const app = new Hono().post("/", gitLabReviewWebhookBodyLimit, (c) => {
+      downstream = true
+      return c.json({ accepted: true })
+    })
+
+    const response = await app.request(request)
+
+    expect(response.status).toBe(413)
+    expect(cancelled).toBe(true)
+    expect(downstream).toBe(false)
+  })
+
+  test("enforces the streaming boundary, rebuilds valid JSON, and releases failed readers", async () => {
+    const maxBytes = gitLabReviewPublicationBudget.maxManagementRequestBytes
+    const app = new Hono().post("/", gitLabReviewWebhookBodyLimit, async (c) => {
+      const payload = await c.req.json<{ padding?: string; ok?: boolean }>()
+      return c.json({ paddingLength: payload.padding?.length, ok: payload.ok })
+    })
+    const exactBody = exactSizeJsonBody(maxBytes)
+
+    const exact = await app.request("http://localhost/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: exactBody,
+    })
+    expect(new TextEncoder().encode(exactBody).byteLength).toBe(maxBytes)
+    expect(exact.status).toBe(200)
+    expect(await exact.json()).toEqual({ paddingLength: JSON.parse(exactBody).padding.length })
+
+    const small = await app.request("http://localhost/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ok: true }),
+    })
+    expect(small.status).toBe(200)
+    expect(await small.json()).toEqual({ ok: true })
+
+    let overflowCancelled = false
+    const overflowBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(maxBytes))
+        controller.enqueue(new Uint8Array(1))
+      },
+      cancel() {
+        overflowCancelled = true
+      },
+    })
+    const overflowRequest = new Request("http://localhost/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: overflowBody,
+      duplex: "half",
+    } as any)
+    const overflow = await app.request(overflowRequest)
+    expect(overflow.status).toBe(413)
+    expect(overflowCancelled).toBe(true)
+    expect(overflowRequest.body?.locked).toBe(false)
+
+    const failedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("stream failed"))
+      },
+    })
+    const failedRequest = new Request("http://localhost/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: failedBody,
+      duplex: "half",
+    } as any)
+    const failed = await app.request(failedRequest)
+    expect(failed.status).toBe(400)
+    expect(await failed.json()).toEqual({ accepted: false, error: "invalid_json_body" })
+    expect(failedRequest.body?.locked).toBe(false)
+  })
+})
+
+function exactSizeJsonBody(bytes: number) {
+  const prefix = '{"padding":"'
+  const suffix = '"}'
+  return `${prefix}${"x".repeat(bytes - prefix.length - suffix.length)}${suffix}`
+}
 
 describe("webhook status URL selection", () => {
   test("does not move a terminal GitLab review run back to running", () => {

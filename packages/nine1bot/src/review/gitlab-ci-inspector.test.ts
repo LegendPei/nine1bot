@@ -277,7 +277,7 @@ describe('GitLab CI session inspector', () => {
     expect(fetchCalls).toBe(0)
   })
 
-  test('returns a stable diagnostic for aborted CI without persisting partial state', async () => {
+  test('records an aborted list reservation without persisting upstream response details', async () => {
     const run = createReviewRun('session-abort', 3, 10, 'head-a')
     const controller = new AbortController()
     let fetchCalls = 0
@@ -302,7 +302,7 @@ describe('GitLab CI session inspector', () => {
     })
     expect(JSON.stringify(result)).not.toContain('must-not-leak')
     expect(fetchCalls).toBe(1)
-    expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ queryCount: 1 })
   })
 
   test('does not persist a deferred CI response for a stale attempt', async () => {
@@ -335,8 +335,89 @@ describe('GitLab CI session inspector', () => {
       diagnostic: 'ci_review_attempt_stale',
     })
     expect(calls).toHaveLength(1)
-    expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ queryCount: 1 })
     expect(ReviewRunStore.get(retry.id)?.ci).toBeUndefined()
+  })
+
+  test('reserves one list query before GitLab access and rejects concurrent repeats', async () => {
+    const run = createReviewRun('session-list-quota', 3, 10, 'head-a')
+    const firstStarted = deferred<void>()
+    const releaseFirst = deferred<void>()
+    let pipelineCalls = 0
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/merge_requests/10/pipelines')) {
+        pipelineCalls += 1
+        if (pipelineCalls === 1) {
+          firstStarted.resolve()
+          await releaseFirst.promise
+        }
+        return Response.json([])
+      }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    const first = inspectGitLabCiForSession({
+      sessionId: 'session-list-quota',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    await firstStarted.promise
+
+    await expect(inspectGitLabCiForSession({
+      sessionId: 'session-list-quota',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })).resolves.toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_list_query_limit_reached',
+    })
+    expect(pipelineCalls).toBe(1)
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ queryCount: 1 })
+
+    releaseFirst.resolve()
+    await first
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ queryCount: 1 })
+  })
+
+  test('counts failed list queries and blocks later GitLab requests for the run', async () => {
+    const run = createReviewRun('session-list-failure', 3, 10, 'head-a')
+    let fetchCalls = 0
+    const fetchMock = (async () => {
+      fetchCalls += 1
+      throw new Error('upstream unavailable')
+    }) as unknown as typeof fetch
+
+    const first = await inspectGitLabCiForSession({
+      sessionId: 'session-list-failure',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    expect(first).toMatchObject({ ok: true, action: 'list' })
+    const callsAfterFailure = fetchCalls
+
+    await expect(inspectGitLabCiForSession({
+      sessionId: 'session-list-failure',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })).resolves.toEqual({
+      ok: false,
+      action: 'list',
+      diagnostic: 'ci_list_query_limit_reached',
+    })
+    expect(fetchCalls).toBe(callsAfterFailure)
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ queryCount: 1 })
   })
 
   test('allows success and failed logs on demand while enforcing one shared limit without persisting traces', async () => {
@@ -854,8 +935,9 @@ describe('GitLab CI session inspector', () => {
     })
     expect(first).toMatchObject({ ok: true, pipeline: { id: 55, status: 'failed' } })
 
-    ReviewRunStore.update(run.id, { sessionId: undefined, ci: undefined })
-    ReviewRunStore.update(run.id, { sessionId: 'session-new', status: 'running' })
+    const previous = ReviewRunStore.update(run.id, { sessionId: undefined })
+    if (!previous) throw new Error('expected previous attempt')
+    const retry = createRetryRun(previous, 'session-new')
     pipelineId = 77
 
     const staleSession = await inspectGitLabCiForSession({
@@ -879,7 +961,8 @@ describe('GitLab CI session inspector', () => {
       diagnostic: 'gitlab_review_session_not_bound',
     })
     expect(refreshed).toMatchObject({ ok: true, pipeline: { id: 77, status: 'success' } })
-    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ pipeline: { id: 77 }, queryCount: 1 })
+    expect(ReviewRunStore.get(run.id)?.ci).toMatchObject({ pipeline: { id: 55 }, queryCount: 1 })
+    expect(ReviewRunStore.get(retry.id)?.ci).toMatchObject({ pipeline: { id: 77 }, queryCount: 1 })
   })
 })
 
