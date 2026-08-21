@@ -1,7 +1,9 @@
 import type { GitLabChangedFile, GitLabSkippedFile } from './types'
 import { truncateUtf8 } from './utf8-budget'
 
-export type GitLabReviewDiffSlice = { file: string; hunk: string }
+const JSON_ESCAPED_FENCE = '\\u0060\\u0060\\u0060'
+
+export type GitLabReviewDiffSlice = { file: string; hunk: string; truncated?: boolean }
 
 export type GitLabReviewDiffEvidenceOptions = {
   skipped?: GitLabSkippedFile[]
@@ -16,14 +18,15 @@ export function sliceGitLabReviewDiff(files: GitLabChangedFile[], maxBytes: numb
   for (const file of files) {
     let omitted = false
     for (const hunk of splitHunks(file.diff)) {
-      const slice = { file: file.newPath, hunk }
-      const bytes = new TextEncoder().encode(renderGitLabReviewSliceEvidence(slice, slices.length)).length
-      if (used + bytes > maxBytes) {
+      const slice = fitGitLabReviewHunk(file.newPath, hunk, slices.length, maxBytes - used)
+      if (!slice) {
         omitted = true
         continue
       }
+      const bytes = new TextEncoder().encode(renderGitLabReviewSliceEvidence(slice, slices.length)).length
       used += bytes
       slices.push(slice)
+      if (slice.truncated) omitted = true
     }
     if (omitted) omissions.push({ file: file.newPath, reason: 'budget-exceeded' })
   }
@@ -35,7 +38,16 @@ export function buildGitLabReviewDiffEvidence(
   maxBytes: number,
   options: GitLabReviewDiffEvidenceOptions = {},
 ) {
-  const initial = sliceGitLabReviewDiff(files, Math.max(0, maxBytes))
+  const boundedMaxBytes = Math.max(0, maxBytes)
+  const mandatoryEnvelopeBytes = byteLength(renderGitLabReviewDiffEvidence({
+    slices: [],
+    skipped: options.skipped ?? [],
+    omissions: omittedFiles(files, []),
+    headSha: options.headSha,
+    maxSummaryItems: 0,
+  }))
+  const sliceBudget = Math.max(0, boundedMaxBytes - mandatoryEnvelopeBytes - (files.length > 0 ? 1 : 0))
+  const initial = sliceGitLabReviewDiff(files, sliceBudget)
   const slices = [...initial.slices]
   const maxSummaryItems = Math.max(0, Math.floor(options.maxSummaryItems ?? 20))
   let summaryItems = maxSummaryItems
@@ -50,7 +62,7 @@ export function buildGitLabReviewDiffEvidence(
       maxSummaryItems: summaryItems,
     })
     const evidenceBytes = byteLength(evidence)
-    if (evidenceBytes <= maxBytes) {
+    if (evidenceBytes <= boundedMaxBytes) {
       return {
         slices,
         omissions,
@@ -75,7 +87,7 @@ export function buildGitLabReviewDiffEvidence(
       `Skipped files: ${(options.skipped ?? []).length}`,
       `Omitted hunk files: ${omissions.length}`,
     ].join('\n')
-    const bounded = truncateUtf8(compact, Math.max(0, maxBytes))
+    const bounded = truncateUtf8(compact, boundedMaxBytes)
     return { slices, omissions, usedBytes: 0, evidence: bounded, evidenceBytes: byteLength(bounded) }
   }
 }
@@ -84,19 +96,28 @@ export function minimumGitLabReviewDiffEvidenceBytes(
   files: GitLabChangedFile[],
   options: GitLabReviewDiffEvidenceOptions = {},
 ) {
-  for (const file of files) {
-    const firstHunk = splitHunks(file.diff)[0]
-    if (!firstHunk) continue
-    const slices = [{ file: file.newPath, hunk: firstHunk }]
-    return byteLength(renderGitLabReviewDiffEvidence({
-      slices,
-      skipped: options.skipped ?? [],
-      omissions: omittedFiles(files, slices),
-      headSha: options.headSha,
-      maxSummaryItems: 0,
-    }))
+  const entries = files.map((file) => ({ file, hunks: splitHunks(file.diff) }))
+  const allOmissions = entries.map(({ file }) => ({
+    file: file.newPath,
+    reason: 'budget-exceeded' as const,
+  }))
+  let minimum = Number.POSITIVE_INFINITY
+  for (const entry of entries) {
+    for (const hunk of entry.hunks) {
+      const slice = minimumReviewableHunkSlice(entry.file.newPath, hunk)
+      if (!slice) continue
+      const slices = [slice]
+      const bytes = byteLength(renderGitLabReviewDiffEvidence({
+        slices,
+        skipped: options.skipped ?? [],
+        omissions: allOmissions,
+        headSha: options.headSha,
+        maxSummaryItems: 0,
+      }))
+      minimum = Math.min(minimum, bytes)
+    }
   }
-  return 0
+  return Number.isFinite(minimum) ? minimum : 0
 }
 
 export function renderGitLabReviewDiffEvidence(input: {
@@ -128,10 +149,11 @@ export function renderGitLabReviewDiffEvidence(input: {
 }
 
 export function renderGitLabReviewSliceEvidence(slice: GitLabReviewDiffSlice, index = 0) {
-  const evidence = JSON.stringify({
+  const evidence = escapeJsonEvidenceFences(JSON.stringify({
     file: slice.file,
+    ...(slice.truncated ? { truncated: true } : {}),
     reviewLineMap: renderReviewLineMap(slice.hunk),
-  }, null, 2).replace(/```/g, '`\\`\\`')
+  }, null, 2))
   return [
     `### Diff hunk ${index + 1}`,
     'Review line map for file/newLine/oldLine fields is encoded in this untrusted evidence object:',
@@ -144,38 +166,46 @@ export function renderGitLabReviewSliceEvidence(slice: GitLabReviewDiffSlice, in
 
 function renderReviewLineMap(diff: string) {
   const rows: string[] = []
-  let oldLine = 0
-  let newLine = 0
-  let inHunk = false
+  const state = { oldLine: 0, newLine: 0, inHunk: false }
 
   for (const line of diffLines(diff)) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (hunk) {
-      oldLine = Number(hunk[1])
-      newLine = Number(hunk[2])
-      inHunk = true
-      rows.push(line)
-      continue
-    }
-    if (!inHunk) continue
-    if (line.startsWith('+')) {
-      rows.push(`${lineRef(undefined, newLine)} ${line}`)
-      newLine += 1
-      continue
-    }
-    if (line.startsWith('-')) {
-      rows.push(`${lineRef(oldLine, undefined)} ${line}`)
-      oldLine += 1
-      continue
-    }
-    if (!line.startsWith('\\')) {
-      rows.push(`${lineRef(oldLine, newLine)} ${line}`)
-      oldLine += 1
-      newLine += 1
-    }
+    const row = reviewLineRow(line, state)
+    if (row !== undefined) rows.push(row)
   }
 
   return rows.join('\n')
+}
+
+type ReviewLineState = {
+  oldLine: number
+  newLine: number
+  inHunk: boolean
+}
+
+function reviewLineRow(line: string, state: ReviewLineState) {
+  const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+  if (hunk) {
+    state.oldLine = Number(hunk[1])
+    state.newLine = Number(hunk[2])
+    state.inHunk = true
+    return line
+  }
+  if (!state.inHunk) return undefined
+  if (line.startsWith('+')) {
+    const row = `${lineRef(undefined, state.newLine)} ${line}`
+    state.newLine += 1
+    return row
+  }
+  if (line.startsWith('-')) {
+    const row = `${lineRef(state.oldLine, undefined)} ${line}`
+    state.oldLine += 1
+    return row
+  }
+  if (line.startsWith('\\')) return undefined
+  const row = `${lineRef(state.oldLine, state.newLine)} ${line}`
+  state.oldLine += 1
+  state.newLine += 1
+  return row
 }
 
 function lineRef(oldLine?: number, newLine?: number) {
@@ -201,14 +231,90 @@ function splitHunks(diff: string) {
   return hunks
 }
 
+function fitGitLabReviewHunk(
+  file: string,
+  hunk: string,
+  index: number,
+  maxBytes: number,
+): GitLabReviewDiffSlice | undefined {
+  const complete = { file, hunk }
+  if (byteLength(renderGitLabReviewSliceEvidence(complete, index)) <= maxBytes) return complete
+
+  const lines = diffLines(hunk)
+  const headerIndex = lines.findIndex((line) => line.startsWith('@@'))
+  if (headerIndex < 0) return undefined
+  const baseBytes = byteLength(renderGitLabReviewSliceEvidence({ file, hunk: '', truncated: true }, index))
+  const selected: string[] = []
+  const state = { oldLine: 0, newLine: 0, inHunk: false }
+  let mapBytes = 0
+  let rowCount = 0
+  let bodyRows = 0
+
+  for (const line of lines.slice(headerIndex)) {
+    const row = reviewLineRow(line, state)
+    if (row === undefined) {
+      if (selected.length > 0) selected.push(line)
+      continue
+    }
+    const rowBytes = escapedJsonStringContentBytes(row) + (rowCount > 0 ? 2 : 0)
+    if (baseBytes + mapBytes + rowBytes > maxBytes) break
+    selected.push(line)
+    mapBytes += rowBytes
+    rowCount += 1
+    if (!line.startsWith('@@')) bodyRows += 1
+  }
+
+  if (bodyRows === 0) return undefined
+  const slice: GitLabReviewDiffSlice = {
+    file,
+    hunk: `${selected.join('\n')}\n`,
+    truncated: headerIndex > 0 || selected.length < lines.length,
+  }
+  return byteLength(renderGitLabReviewSliceEvidence(slice, index)) <= maxBytes ? slice : undefined
+}
+
+function minimumReviewableHunkSlice(file: string, hunk: string): GitLabReviewDiffSlice | undefined {
+  const lines = diffLines(hunk)
+  const headerIndex = lines.findIndex((line) => line.startsWith('@@'))
+  if (headerIndex < 0) return undefined
+  const selected: string[] = []
+  const state = { oldLine: 0, newLine: 0, inHunk: false }
+  for (const line of lines.slice(headerIndex)) {
+    const row = reviewLineRow(line, state)
+    selected.push(line)
+    if (row !== undefined && !line.startsWith('@@')) {
+      return {
+        file,
+        hunk: `${selected.join('\n')}\n`,
+        ...(headerIndex > 0 || selected.length < lines.length ? { truncated: true } : {}),
+      }
+    }
+  }
+  return undefined
+}
+
 function omittedFiles(files: GitLabChangedFile[], slices: GitLabReviewDiffSlice[]) {
   const selectedByFile = new Map<string, number>()
+  const partiallySelectedFiles = new Set<string>()
   for (const slice of slices) selectedByFile.set(slice.file, (selectedByFile.get(slice.file) ?? 0) + 1)
+  for (const slice of slices) {
+    if (slice.truncated) partiallySelectedFiles.add(slice.file)
+  }
   return files.flatMap((file) =>
-    (selectedByFile.get(file.newPath) ?? 0) < splitHunks(file.diff).length
+    partiallySelectedFiles.has(file.newPath)
+      || (selectedByFile.get(file.newPath) ?? 0) < splitHunks(file.diff).length
       ? [{ file: file.newPath, reason: 'budget-exceeded' as const }]
       : [],
   )
+}
+
+function escapedJsonStringContentBytes(value: string) {
+  const serialized = JSON.stringify(value).slice(1, -1)
+  return byteLength(escapeJsonEvidenceFences(serialized))
+}
+
+function escapeJsonEvidenceFences(value: string) {
+  return value.replace(/```/g, JSON_ESCAPED_FENCE)
 }
 
 function boundedPath(path: string) {
@@ -216,7 +322,7 @@ function boundedPath(path: string) {
 }
 
 function evidenceDetail(file: string, reason: string) {
-  return JSON.stringify({ file, reason })
+  return escapeJsonEvidenceFences(JSON.stringify({ file, reason }))
 }
 
 function byteLength(input: string) {

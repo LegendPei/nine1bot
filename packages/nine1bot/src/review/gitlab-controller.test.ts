@@ -3118,6 +3118,70 @@ describe('GitLab review controller', () => {
     ])
   })
 
+  test('blocks an MR before runtime when no code evidence fits the context budget', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      if (String(url).includes('/changes')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'budget-sha' },
+          changes: [{
+            old_path: 'src/large.ts',
+            new_path: 'src/large.ts',
+            diff: '@@ -1 +1 @@\n-old value\n+new value\n',
+          }],
+        })
+      }
+      if (String(url).endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'budget-sha' },
+        })
+      }
+      return Response.json({ id: 1 })
+    }) as typeof fetch
+
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'budget-sha' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab.settings,
+            'review.dryRun': false,
+            'review.baseUrl': 'https://gitlab.example.com',
+            'review.maxDiffBytes': 64,
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      status: 'blocked',
+      context: {
+        diff: {
+          blocked: true,
+          blockReason: 'No reviewable GitLab diff evidence fits the configured context budget.',
+        },
+      },
+    })
+    expect(calls.some((call) => call.url.includes('/pipelines'))).toBe(false)
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1)
+  })
+
   test('rejects a blocked MR when its HEAD changes before the blocked note with zero POSTs', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     let headGets = 0

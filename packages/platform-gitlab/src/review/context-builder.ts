@@ -130,6 +130,26 @@ function manifestFromSlices(
   slices: ReturnType<typeof buildGitLabReviewDiffEvidence>,
 ) {
   if (candidate.blocked) return candidate
+  if (candidate.files.length > 0 && slices.slices.length === 0) {
+    const omittedFiles = candidate.files.map((file) => ({
+      path: file.newPath,
+      reason: 'budget-exceeded' as const,
+    }))
+    const skipped = [...candidate.skipped, ...omittedFiles]
+    return {
+      ...candidate,
+      files: [],
+      skipped,
+      blocked: true,
+      blockReason: 'No reviewable GitLab diff evidence fits the configured context budget.',
+      stats: {
+        ...candidate.stats,
+        includedFileCount: 0,
+        skippedFileCount: skipped.length,
+        includedBytes: 0,
+      },
+    }
+  }
   const hunksByFile = new Map<string, string[]>()
   for (const slice of slices.slices) {
     const hunks = hunksByFile.get(slice.file) ?? []
