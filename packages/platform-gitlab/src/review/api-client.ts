@@ -9,6 +9,23 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const MAX_CI_TEXT_LENGTH = 512
 const MAX_CI_URL_LENGTH = 4_096
 const MAX_COMMIT_PARENTS = 64
+const SAFE_HTTP_STATUS_TEXT = new Map<number, string>([
+  [400, 'Bad Request'],
+  [401, 'Unauthorized'],
+  [403, 'Forbidden'],
+  [404, 'Not Found'],
+  [405, 'Method Not Allowed'],
+  [408, 'Request Timeout'],
+  [409, 'Conflict'],
+  [413, 'Payload Too Large'],
+  [422, 'Unprocessable Content'],
+  [429, 'Too Many Requests'],
+  [500, 'Internal Server Error'],
+  [501, 'Not Implemented'],
+  [502, 'Bad Gateway'],
+  [503, 'Service Unavailable'],
+  [504, 'Gateway Timeout'],
+])
 
 export type GitLabRequestOptions = {
   signal?: AbortSignal
@@ -161,16 +178,26 @@ export type GitLabGroupHookInput = {
 export type GitLabHookTestTrigger = 'push_events' | 'merge_requests_events' | 'note_events'
 
 export class GitLabApiError extends Error {
+  readonly statusText: string
   readonly sanitizedDetail?: string
 
   constructor(
     readonly status: number,
-    readonly statusText: string,
+    _statusText: string,
     responseBody?: string,
   ) {
+    const statusText = SAFE_HTTP_STATUS_TEXT.get(status) ?? 'Unknown Status'
     super(`GitLab API request failed: ${status} ${statusText}`)
     this.name = 'GitLabApiError'
+    this.statusText = statusText
     this.sanitizedDetail = sanitizeGitLabApiErrorDetail(responseBody)
+  }
+}
+
+export class GitLabApiResponseError extends Error {
+  constructor() {
+    super('gitlab_api_response_invalid_json')
+    this.name = 'GitLabApiResponseError'
   }
 }
 
@@ -475,7 +502,7 @@ export class GitLabApiClient {
       const body = await readBoundedText(response, this.maxJsonResponseBytes)
       if (body.truncated) throw new Error(`GitLab API response exceeded ${this.maxJsonResponseBytes} bytes`)
       const text = body.text
-      const data = text.trim() ? JSON.parse(text) as T : undefined as T
+      const data = text.trim() ? parseGitLabJson<T>(text) : undefined as T
       const nextPage = response.headers.get('x-next-page')?.trim() || undefined
       return { data, nextPage }
     }, requestGuard)
@@ -614,6 +641,14 @@ export class GitLabApiClient {
       currentInit = redirectedRequestInit(currentInit, response.status)
       currentUrl = target
     }
+  }
+}
+
+function parseGitLabJson<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new GitLabApiResponseError()
   }
 }
 

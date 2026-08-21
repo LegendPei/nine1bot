@@ -354,6 +354,7 @@ describe("webhook status URL selection", () => {
     }
     const fallbackRun = createRun(10, "management-fallback-head")
     const failedRun = createRun(11, "management-failed-head")
+    const malformedRun = createRun(12, "management-malformed-head")
     const fallbackStageResult = {
       stage: "pm",
       status: "ok" as const,
@@ -369,6 +370,10 @@ describe("webhook status URL selection", () => {
     const failedStageResult = {
       ...fallbackStageResult,
       summary: "This publication will fail.",
+    }
+    const malformedStageResult = {
+      ...fallbackStageResult,
+      summary: "This publication receives malformed metadata.",
     }
     const fallbackNoteBodies: string[] = []
 
@@ -406,6 +411,9 @@ describe("webhook status URL selection", () => {
             diff_refs: { base_sha: "base", start_sha: "start", head_sha: "management-failed-head" },
           })
         }
+        if (method === "GET" && url.endsWith("/api/v4/projects/123/merge_requests/12")) {
+          return new Response('{"x":UNLABELLED_MANAGEMENT_SECRET_4b1d}', { status: 200 })
+        }
         if (method === "POST" && url.endsWith("/merge_requests/10/discussions")) {
           return new Response(JSON.stringify({ error: "position is invalid", detail: privateBody }), {
             status: 400,
@@ -435,16 +443,22 @@ describe("webhook status URL selection", () => {
       }
       const fallbackResponse = await publish(fallbackRun.id, fallbackStageResult)
       const failedResponse = await publish(failedRun.id, failedStageResult)
+      const malformedResponse = await publish(malformedRun.id, malformedStageResult)
       const fallbackManagementResponse = await WebhookRoutes().request(
         `http://localhost/gitlab/runs/${fallbackRun.id}`,
       )
       const failedManagementResponse = await WebhookRoutes().request(
         `http://localhost/gitlab/runs/${failedRun.id}`,
       )
+      const malformedManagementResponse = await WebhookRoutes().request(
+        `http://localhost/gitlab/runs/${malformedRun.id}`,
+      )
       const fallbackResult = await fallbackResponse.json()
       const failedResult = await failedResponse.json()
+      const malformedResult = await malformedResponse.json()
       const fallbackManagement = await fallbackManagementResponse.json()
       const failedManagement = await failedManagementResponse.json()
+      const malformedManagement = await malformedManagementResponse.json()
       const persisted = await readFile(runStorePath, "utf8")
 
       expect(fallbackResponse.status).toBe(200)
@@ -469,6 +483,16 @@ describe("webhook status URL selection", () => {
         status: "failed",
         error: "gitlab_api_publish_result_failed:503:Service Unavailable",
       })
+      expect(malformedResponse.status).toBe(502)
+      expect(malformedResult).toEqual({
+        published: false,
+        runId: malformedRun.id,
+        error: "gitlab_api_publish_result_failed:gitlab_api_response_invalid_json",
+      })
+      expect(ReviewRunStore.get(malformedRun.id)).toMatchObject({
+        status: "failed",
+        error: "gitlab_api_publish_result_failed:gitlab_api_response_invalid_json",
+      })
 
       const parsedFallback = parseReviewStageResult(fallbackStageResult, { runId: fallbackRun.id })
       const expectedPlan = prepareGitLabReviewPublicationPlan({
@@ -491,6 +515,8 @@ describe("webhook status URL selection", () => {
         failedResult,
         fallbackManagement,
         failedManagement,
+        malformedResult,
+        malformedManagement,
         persisted,
       })
       for (const secret of [
@@ -502,6 +528,7 @@ describe("webhook status URL selection", () => {
         "management-pem-secret",
         "management-database-secret",
         "internal-management-detail",
+        "UNLABELLED_MANAGEMENT_SECRET_4b1d",
       ]) {
         expect(exposed).not.toContain(secret)
       }

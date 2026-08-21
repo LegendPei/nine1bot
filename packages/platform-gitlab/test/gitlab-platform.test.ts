@@ -618,7 +618,7 @@ describe('GitLab platform adapter package', () => {
     ].join('\n')
     globalThis.fetch = (async () => new Response(privateBody, {
       status: 500,
-      statusText: 'Internal Server Error',
+      statusText: 'glpat-runtime-status-secret',
     })) as unknown as typeof fetch
     const context = {
       platformId: 'gitlab',
@@ -661,10 +661,44 @@ describe('GitLab platform adapter package', () => {
           'runtime-pem-secret',
           'runtime-database-secret',
           'internal-runtime-detail',
+          'glpat-runtime-status-secret',
         ]) {
           expect(exposed).not.toContain(secret)
         }
       }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('keeps malformed successful GitLab JSON out of runtime action results', async () => {
+    const originalFetch = globalThis.fetch
+    const privateBody = '{"x":UNLABELLED_RUNTIME_SECRET_7c2e}'
+    globalThis.fetch = (async () => new Response(privateBody, {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    try {
+      const result = await gitlabPlatformContribution.handleAction?.('connection.test', undefined, {
+        platformId: 'gitlab',
+        enabled: true,
+        settings: {
+          'review.enabled': true,
+          'review.baseUrl': 'https://gitlab.example.com',
+          'review.tokenSecretRef': 'token-value',
+        },
+        features: {},
+        packageResources: packageResources(),
+        env: {},
+        secrets: secretAccess(),
+        audit: { write() {} },
+      })
+
+      const exposed = JSON.stringify(result)
+      expect(result?.status).toBe('failed')
+      expect(exposed).toContain('gitlab_api_response_invalid_json')
+      expect(exposed).not.toContain('UNLABELLED_RUNTIME_SECRET_7c2e')
     } finally {
       globalThis.fetch = originalFetch
     }

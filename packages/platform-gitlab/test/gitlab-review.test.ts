@@ -3113,12 +3113,21 @@ describe('GitLab review foundation', () => {
       {
         status: 400,
         statusText: 'Bad Request',
+        expectedStatusText: 'Bad Request',
         body: JSON.stringify({ error: 'position is invalid', detail: privateDetail }),
         sanitizedDetail: 'position is invalid',
       },
       {
         status: 503,
         statusText: 'Service Unavailable',
+        expectedStatusText: 'Service Unavailable',
+        body: privateDetail,
+        sanitizedDetail: undefined,
+      },
+      {
+        status: 502,
+        statusText: 'glpat-status-text-secret',
+        expectedStatusText: 'Bad Gateway',
         body: privateDetail,
         sanitizedDetail: undefined,
       },
@@ -3141,15 +3150,34 @@ describe('GitLab review foundation', () => {
         expect(error).toBeInstanceOf(GitLabApiError)
         const apiError = error as GitLabApiError & { sanitizedDetail?: string }
         expect(apiError.status).toBe(scenario.status)
-        expect(apiError.statusText).toBe(scenario.statusText)
+        expect(apiError.statusText).toBe(scenario.expectedStatusText)
         expect(apiError.message).toBe(
-          `GitLab API request failed: ${scenario.status} ${scenario.statusText}`,
+          `GitLab API request failed: ${scenario.status} ${scenario.expectedStatusText}`,
         )
         expect(apiError.sanitizedDetail).toBe(scenario.sanitizedDetail)
         expect('responseBody' in apiError).toBe(false)
         const exposed = `${apiError.message}\n${apiError.sanitizedDetail ?? ''}\n${JSON.stringify(apiError)}`
         for (const secret of secretValues) expect(exposed).not.toContain(secret)
       }
+    }
+  })
+
+  test('converts malformed successful GitLab JSON into a fixed body-free diagnostic', async () => {
+    const privateBody = '{"x":UNLABELLED_UPSTREAM_SECRET_9f6a}'
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async () => new Response(privateBody, { status: 200 })) as unknown as typeof fetch,
+    })
+
+    try {
+      await client.getMergeRequestPipelines(3, 2)
+      throw new Error('expected GitLab response error')
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error)
+      const exposed = `${(error as Error).name}:${(error as Error).message}:${JSON.stringify(error)}`
+      expect(exposed).toContain('gitlab_api_response_invalid_json')
+      expect(exposed).not.toContain('UNLABELLED_UPSTREAM_SECRET_9f6a')
     }
   })
 
@@ -3175,8 +3203,8 @@ describe('GitLab review foundation', () => {
       expect(error).toBeInstanceOf(GitLabApiError)
       const apiError = error as GitLabApiError & { sanitizedDetail?: string }
       expect(apiError.status).toBe(500)
-      expect(apiError.statusText).toBe('failed')
-      expect(apiError.message).toBe('GitLab API request failed: 500 failed')
+      expect(apiError.statusText).toBe('Internal Server Error')
+      expect(apiError.message).toBe('GitLab API request failed: 500 Internal Server Error')
       expect(apiError.sanitizedDetail).toBeUndefined()
       expect('responseBody' in apiError).toBe(false)
     }
