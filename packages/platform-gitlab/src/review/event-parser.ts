@@ -1,4 +1,8 @@
-import { isGitLabReviewProjectInScope, type GitLabReviewSettings } from './settings'
+import {
+  GITLAB_REVIEW_INVALID_CONFIGURATION,
+  isGitLabReviewProjectInScope,
+  type GitLabReviewSettings,
+} from './settings'
 import { gitLabAuthorityFromUrl, normalizeGitLabAuthority } from './host'
 import type { GitLabReviewTrigger } from './types'
 
@@ -9,7 +13,7 @@ export type GitLabParsedEvent =
 export function parseGitLabWebhookEvent(payload: unknown, settings: GitLabReviewSettings): GitLabParsedEvent {
   if (!settings.enabled) return { ok: false, reason: 'gitlab-review-disabled' }
   if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
-    return { ok: false, reason: 'invalid-review-configuration' }
+    return { ok: false, reason: GITLAB_REVIEW_INVALID_CONFIGURATION }
   }
   if (!isRecord(payload)) return { ok: false, reason: 'invalid-payload' }
 

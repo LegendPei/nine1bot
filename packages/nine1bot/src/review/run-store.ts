@@ -121,10 +121,11 @@ function maxRecords() {
 export namespace ReviewRunStore {
   export function create(input: CreateReviewRunInput): ReviewRunRecord {
     load()
-    const run = createRecord(input)
-    runs.set(run.id, run)
-    save()
-    return copyReviewRunRecord(run)
+    return persistMutation(() => {
+      const run = createRecord(input)
+      runs.set(run.id, run)
+      return copyReviewRunRecord(run)
+    })
   }
 
   export function findByIdempotencyKey(idempotencyKey: string): ReviewRunRecord | undefined {
@@ -156,14 +157,15 @@ export namespace ReviewRunStore {
     load()
     const existing = runs.get(id)
     if (!existing) return undefined
-    const next = {
-      ...existing,
-      ...patch,
-      updatedAt: Date.now(),
-    }
-    runs.set(id, next)
-    save()
-    return copyReviewRunRecord(next)
+    return persistMutation(() => {
+      const next = {
+        ...existing,
+        ...patch,
+        updatedAt: Date.now(),
+      }
+      runs.set(id, next)
+      return copyReviewRunRecord(next)
+    })
   }
 
   export function updateIfCurrent(
@@ -175,12 +177,13 @@ export namespace ReviewRunStore {
     if (!existing) return false
     if (existing.generation !== identity.generation || existing.sessionId !== identity.sessionId) return false
     if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return false
-    runs.set(existing.id, {
-      ...existing,
-      ...patch,
-      updatedAt: Date.now(),
+    persistMutation(() => {
+      runs.set(existing.id, {
+        ...existing,
+        ...patch,
+        updatedAt: Date.now(),
+      })
     })
-    save()
     return true
   }
 
@@ -208,7 +211,7 @@ export namespace ReviewRunStore {
     const claimId = randomUUID()
     const completedMarkers = publication ? [...publication.completedMarkers] : []
     const identity = { runId: existing.id, claimId, ownerId: input.ownerId, payloadHash: input.payloadHash }
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         updatedAt: now,
@@ -253,7 +256,7 @@ export namespace ReviewRunStore {
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     if (existing.publication!.completedMarkers.includes(input.marker)) return true
     const now = Date.now()
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         updatedAt: now,
@@ -273,7 +276,7 @@ export namespace ReviewRunStore {
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
     const completedMarkers = [...new Set(input.markers)]
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         updatedAt: now,
@@ -292,7 +295,7 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         status: 'failed',
@@ -317,7 +320,7 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         status: 'rejected',
@@ -347,7 +350,7 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistPublicationMutation(() => {
+    persistMutation(() => {
       runs.set(existing.id, {
         ...existing,
         status: input.status,
@@ -378,17 +381,18 @@ export namespace ReviewRunStore {
     if (!existing || existing.generation !== previous.generation) return undefined
     if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return undefined
 
-    const run = createRecord({
-      ...input,
-      triggerKey: existing.triggerKey,
-    }, {
-      rootRunId: existing.rootRunId,
-      attempt: existing.attempt + 1,
-      retryOf: existing.id,
+    return persistMutation(() => {
+      const run = createRecord({
+        ...input,
+        triggerKey: existing.triggerKey,
+      }, {
+        rootRunId: existing.rootRunId,
+        attempt: existing.attempt + 1,
+        retryOf: existing.id,
+      })
+      runs.set(run.id, run)
+      return copyReviewRunRecord(run)
     })
-    runs.set(run.id, run)
-    save()
-    return copyReviewRunRecord(run)
   }
 
   export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
@@ -522,21 +526,34 @@ function save() {
   }
 }
 
-function persistPublicationMutation(mutate: () => void) {
-  const previousRuns = new Map(runs)
-  const previousActiveClaims = new Map(activePublicationClaims)
-  const previousSequence = sequence
+function persistMutation<T>(mutate: () => T): T {
+  const previous = snapshotStoreState()
   try {
-    mutate()
+    const result = mutate()
     save()
+    return result
   } catch (error) {
-    runs.clear()
-    for (const [id, run] of previousRuns) runs.set(id, run)
-    activePublicationClaims.clear()
-    for (const [id, claim] of previousActiveClaims) activePublicationClaims.set(id, claim)
-    sequence = previousSequence
+    restoreStoreState(previous)
     throw error
   }
+}
+
+function snapshotStoreState() {
+  return {
+    runs: new Map([...runs].map(([id, run]) => [id, structuredClone(run)])),
+    activePublicationClaims: new Map(
+      [...activePublicationClaims].map(([id, claim]) => [id, structuredClone(claim)]),
+    ),
+    sequence,
+  }
+}
+
+function restoreStoreState(snapshot: ReturnType<typeof snapshotStoreState>) {
+  runs.clear()
+  for (const [id, run] of snapshot.runs) runs.set(id, run)
+  activePublicationClaims.clear()
+  for (const [id, claim] of snapshot.activePublicationClaims) activePublicationClaims.set(id, claim)
+  sequence = snapshot.sequence
 }
 
 function prune() {

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import {
   GitLabApiClient,
   GitLabApiError,
+  GITLAB_REVIEW_INVALID_CONFIGURATION,
   GitLabReviewPublicationBudgetError,
   GitLabReviewPublicationCompatibilityError,
   GITLAB_REVIEW_PUBLICATION_INPUT_TOO_LARGE,
@@ -14,6 +15,7 @@ import {
   renderBlockedDiffComment,
   gitLabReviewSkillIds,
   gitLabAuthorityFromUrl,
+  isGitLabReviewConfigurationExecutable,
   isGitLabReviewPublicationComplete,
   isGitLabReviewProjectInScope,
   normalizeGitLabReviewSettings,
@@ -236,6 +238,7 @@ function fencedJson(input: unknown) {
 }
 
 const recoverableGitLabReviewRejections = new Set([
+  GITLAB_REVIEW_INVALID_CONFIGURATION,
   'project_profile_missing',
   'project_profile_disabled',
   'project_binding_missing',
@@ -369,6 +372,15 @@ export async function handleGitLabReviewWebhook(input: GitLabReviewWebhookInput)
       projectResolution.project,
     )
   }
+  if (!isGitLabReviewConfigurationExecutable(settings)) {
+    return reject(
+      202,
+      GITLAB_REVIEW_INVALID_CONFIGURATION,
+      idempotencyKey,
+      parsed.trigger as unknown as Record<string, unknown>,
+      projectResolution.project,
+    )
+  }
   const projectWarnings: string[] = []
 
   const run = ReviewRunStore.create({
@@ -425,8 +437,8 @@ export async function retryGitLabReviewAttempt(
   })
   const projectRejection = gitLabProjectRejection(projectResolution.status)
   if (projectRejection) return retryRejected(previous, 409, projectRejection)
-  if (settings.configurationErrors.length > 0) {
-    return retryRejected(previous, 409, 'invalid-review-configuration')
+  if (!isGitLabReviewConfigurationExecutable(settings)) {
+    return retryRejected(previous, 409, GITLAB_REVIEW_INVALID_CONFIGURATION)
   }
 
   const apiBaseUrl = resolveGitLabApiBaseUrl({

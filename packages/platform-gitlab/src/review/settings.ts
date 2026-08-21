@@ -76,6 +76,8 @@ export type GitLabReviewSecretRef = string | {
   key: string
 }
 
+export const GITLAB_REVIEW_INVALID_CONFIGURATION = 'invalid-review-configuration'
+
 export const defaultGitLabWebhookSecretRef: GitLabReviewSecretRef = {
   provider: 'nine1bot-local',
   key: 'platform:gitlab:default:review.webhookSecretRef',
@@ -291,6 +293,12 @@ export function hasUsableGitLabReviewProjectProfile(settings: GitLabReviewSettin
     if (!profile.enabled || !profile.host || !profile.nine1botProjectID) return false
     return idCounts.get(profile.id) === 1 && identityCounts.get(projectProfileIdentity(profile)) === 1
   })
+}
+
+export function isGitLabReviewConfigurationExecutable(
+  settings: Pick<GitLabReviewSettings, 'configurationErrors'>,
+) {
+  return settings.configurationErrors.length === 0
 }
 
 export function isGitLabReviewProjectInScope(

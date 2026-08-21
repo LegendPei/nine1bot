@@ -1050,6 +1050,191 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.get(rejected.runId)?.context).toBeUndefined()
   })
 
+  test('fails closed for the same globally invalid project profiles on first webhook and retry', async () => {
+    const invalidPlatforms = {
+      gitlab: {
+        enabled: true,
+        settings: {
+          ...platforms.gitlab.settings,
+          'review.projects': [{
+            id: 'nine1bot',
+            host: 'gitlab.example.com',
+            projectId: 123,
+            nine1botProjectID: 'project-nine1bot',
+            enabled: true,
+          }, {
+            id: 'other-project',
+            host: 'gitlab.example.com',
+            projectId: 999,
+            project_id: null,
+            nine1botProjectID: 'project-other',
+            enabled: true,
+          }],
+        },
+      },
+    }
+    const retryCandidate = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      error: 'project_profile_missing',
+      idempotencyKey: 'invalid-configuration-retry',
+      triggerKey: 'invalid-configuration-retry',
+      trigger: {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        projectPath: 'nine1/nine1bot',
+        objectType: 'mr',
+        objectIid: 41,
+        headSha: 'invalid-configuration-retry-head',
+        eventName: 'merge_request',
+        mode: 'webhook',
+      },
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+
+    const first = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: { iid: 40, last_commit: { id: 'invalid-configuration-first-head' } },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: invalidPlatforms,
+      secrets: memorySecrets,
+    })
+    const retried = await retryGitLabReviewAttempt({
+      runId: retryCandidate.id,
+      platforms: invalidPlatforms,
+      secrets: memorySecrets,
+    })
+
+    expect(first).toMatchObject({
+      accepted: false,
+      error: 'invalid-review-configuration',
+      httpStatus: 202,
+    })
+    expect(ReviewRunStore.get(first.runId!)).toMatchObject({
+      status: 'rejected',
+      error: 'invalid-review-configuration',
+      rejectionKind: 'configuration',
+      recoverable: true,
+      attempt: 1,
+    })
+    expect(retried).toMatchObject({
+      accepted: false,
+      error: 'invalid-review-configuration',
+      httpStatus: 409,
+      runId: retryCandidate.id,
+    })
+    expect(ReviewRunStore.findLatestByTriggerKey(retryCandidate.triggerKey)).toMatchObject({
+      id: retryCandidate.id,
+      attempt: 1,
+    })
+
+    const repaired = await retryGitLabReviewAttempt({
+      runId: first.runId!,
+      platforms,
+      secrets: liveSecrets,
+      fetch: (async (_url: string | URL | Request) => Response.json({
+        diff_refs: {
+          base_sha: 'base',
+          start_sha: 'start',
+          head_sha: 'invalid-configuration-first-head',
+        },
+        changes: [{
+          old_path: 'src/config.ts',
+          new_path: 'src/config.ts',
+          diff: '@@ -1 +1 @@\n-old\n+new\n',
+        }],
+      })) as typeof fetch,
+    })
+
+    expect(repaired).toMatchObject({
+      accepted: true,
+      status: 'dry-run',
+      rootRunId: first.runId,
+      retryOf: first.runId,
+      attempt: 2,
+    })
+    expect(ReviewRunStore.get(first.runId!)).toMatchObject({
+      status: 'rejected',
+      error: 'invalid-review-configuration',
+      attempt: 1,
+    })
+  })
+
+  test('keeps pure missing, disabled, and unbound project rejections recoverable on retry', async () => {
+    const scenarios = [{
+      name: 'missing',
+      projects: [],
+      error: 'project_profile_missing',
+    }, {
+      name: 'disabled',
+      projects: [{
+        id: 'nine1bot',
+        host: 'gitlab.example.com',
+        projectId: 123,
+        nine1botProjectID: 'project-nine1bot',
+        enabled: false,
+      }],
+      error: 'project_profile_disabled',
+    }, {
+      name: 'unbound',
+      projects: [{
+        id: 'nine1bot',
+        host: 'gitlab.example.com',
+        projectId: 123,
+        enabled: true,
+      }],
+      error: 'project_binding_missing',
+    }] as const
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const previous = ReviewRunStore.create({
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        triggerKey: `pure-project-configuration-${scenario.name}`,
+        trigger: {
+          host: 'gitlab.example.com',
+          projectId: 123,
+          projectPath: 'nine1/nine1bot',
+          objectType: 'mr',
+          objectIid: 50 + index,
+          headSha: `pure-project-configuration-${scenario.name}-head`,
+          eventName: 'merge_request',
+          mode: 'webhook',
+        },
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })
+
+      await expect(retryGitLabReviewAttempt({
+        runId: previous.id,
+        platforms: {
+          gitlab: {
+            enabled: true,
+            settings: {
+              ...platforms.gitlab.settings,
+              'review.projects': scenario.projects,
+            },
+          },
+        },
+        secrets: memorySecrets,
+      })).resolves.toMatchObject({
+        accepted: false,
+        error: scenario.error,
+        httpStatus: 409,
+        runId: previous.id,
+      })
+    }
+  })
+
   test('rejects a stale runtime project binding as recoverable configuration and retries it as a new attempt', async () => {
     const accepted = await handleGitLabReviewWebhook({
       payload: {
@@ -1584,6 +1769,50 @@ describe('GitLab review controller', () => {
     expect(ReviewRunStore.list()).toHaveLength(1)
   })
 
+  test('rolls back failed webhook run creation so replay does not hit ghost idempotency state', async () => {
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+    const payload = {
+      object_kind: 'merge_request',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: {
+        iid: 88,
+        last_commit: { id: 'create-save-failure-head' },
+      },
+      changes: {
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'create-save-failure-head' },
+        changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+      },
+    }
+
+    await rm(storeFile, { force: true })
+    await mkdir(storeFile)
+    await expect(handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })).rejects.toThrow()
+    expect(ReviewRunStore.list()).toEqual([])
+
+    await rm(storeFile, { recursive: true, force: true })
+    const replay = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms,
+      secrets: memorySecrets,
+    })
+
+    expect(replay).toMatchObject({ accepted: true, status: 'dry-run' })
+    if (!replay.accepted) throw new Error('expected replayed webhook to create a run')
+    expect(replay.duplicateOf).toBeUndefined()
+    expect(replay.runId.split('_').at(-1)).toBe('1')
+    expect(ReviewRunStore.list()).toHaveLength(1)
+  })
+
   test('persists review runs between store reloads', async () => {
     const created = ReviewRunStore.create({
       platform: 'gitlab',
@@ -1848,6 +2077,176 @@ describe('GitLab review controller', () => {
       status: 'succeeded',
       warnings: [],
     })).toBe(true)
+  })
+
+  test('rolls back failed ordinary updates while preserving the active publication claim', async () => {
+    const run = createPublishableReviewRun({ headSha: 'ordinary-update-save-failure-head' })
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+    const payloadHash = publicationPayloadHash(publicationStageResult())
+    const claim = ReviewRunStore.claimPublication({ runId: run.id, payloadHash, ownerId: 'publisher-a' })
+    if (!claim.ok) throw new Error(`expected publication claim: ${claim.error}`)
+    const identity = { runId: run.id, claimId: claim.claimId, ownerId: 'publisher-a', payloadHash }
+    const before = ReviewRunStore.get(run.id)
+
+    await rm(storeFile, { force: true })
+    await mkdir(storeFile)
+    expect(() => ReviewRunStore.update(run.id, {
+      status: 'failed',
+      error: 'ordinary-update-must-roll-back',
+      ci: {
+        diagnostics: ['failed update'],
+        queryCount: 99,
+        jobLogReadCount: 99,
+        queriedJobIds: [99],
+      },
+    })).toThrow()
+
+    expect(ReviewRunStore.get(run.id)).toEqual(before)
+    expect(ReviewRunStore.isPublicationClaimCurrent(identity)).toBe(true)
+
+    await rm(storeFile, { recursive: true, force: true })
+    expect(ReviewRunStore.completePublication({
+      ...identity,
+      status: 'succeeded',
+      warnings: [],
+    })).toBe(true)
+  })
+
+  test('rolls back failed conditional CI quota and job-log reservations', async () => {
+    const run = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      sessionId: 'ci-quota-session',
+      ci: {
+        diagnostics: ['baseline'],
+        queryCount: 1,
+        jobLogReadCount: 1,
+        queriedJobIds: [11],
+      },
+    })
+    const identity = {
+      runId: run.id,
+      sessionId: run.sessionId,
+      generation: run.generation,
+    }
+    const reservedCi = {
+      diagnostics: ['baseline', 'reserved'],
+      queryCount: 2,
+      jobLogReadCount: 2,
+      queriedJobIds: [11, 22],
+    }
+    const before = ReviewRunStore.get(run.id)
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+
+    await rm(storeFile, { force: true })
+    await mkdir(storeFile)
+    expect(() => ReviewRunStore.updateIfCurrent(identity, { ci: reservedCi })).toThrow()
+    expect(ReviewRunStore.get(run.id)).toEqual(before)
+
+    await rm(storeFile, { recursive: true, force: true })
+    expect(ReviewRunStore.updateIfCurrent(identity, { ci: reservedCi })).toBe(true)
+    expect(ReviewRunStore.get(run.id)?.ci).toEqual(reservedCi)
+  })
+
+  test('rolls back failed retry creation including sequence and prune side effects', async () => {
+    ReviewRunStore.setMaxRecordsForTesting(2)
+    const unrelated = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'retry-save-failure-unrelated',
+      triggerKey: 'retry-save-failure-unrelated',
+    })
+    const previous = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'retry-save-failure-chain',
+      triggerKey: 'retry-save-failure-chain',
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    const before = ReviewRunStore.list()
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+
+    await rm(storeFile, { force: true })
+    await mkdir(storeFile)
+    expect(() => ReviewRunStore.createRetryAttempt(previous, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: previous.idempotencyKey,
+    })).toThrow()
+
+    expect(ReviewRunStore.list()).toEqual(before)
+    expect(ReviewRunStore.findLatestByTriggerKey(previous.triggerKey)).toMatchObject({ id: previous.id })
+
+    await rm(storeFile, { recursive: true, force: true })
+    const retry = ReviewRunStore.createRetryAttempt(previous, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: previous.idempotencyKey,
+    })
+
+    expect(retry).toMatchObject({ attempt: 2, rootRunId: previous.id, retryOf: previous.id })
+    expect(retry?.id.split('_').at(-1)).toBe('3')
+    expect(ReviewRunStore.get(unrelated.id)).toBeUndefined()
+  })
+
+  test('rolls back save-time lineage repair and pruning when persistence fails', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'rollback-lineage-review-runs.json')
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 3,
+      runs: [{
+        id: 'review_unrelated_1',
+        rootRunId: 'review_unrelated_1',
+        attempt: 1,
+        triggerKey: 'unrelated-trigger',
+        generation: 'unrelated-generation',
+        platform: 'gitlab',
+        status: 'accepted',
+        createdAt: 5,
+        updatedAt: 5,
+      }, {
+        id: 'review_suffix_2',
+        rootRunId: 'review_missing_1',
+        attempt: 2,
+        retryOf: 'review_missing_1',
+        triggerKey: 'suffix-trigger',
+        generation: 'suffix-generation-2',
+        platform: 'gitlab',
+        status: 'rejected',
+        createdAt: 20,
+        updatedAt: 20,
+      }, {
+        id: 'review_suffix_3',
+        rootRunId: 'review_missing_1',
+        attempt: 3,
+        retryOf: 'review_suffix_2',
+        triggerKey: 'suffix-trigger',
+        generation: 'suffix-generation-3',
+        platform: 'gitlab',
+        status: 'accepted',
+        createdAt: 30,
+        updatedAt: 30,
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+    ReviewRunStore.setMaxRecordsForTesting(2)
+    const before = ReviewRunStore.list()
+
+    await rm(persistedPath, { force: true })
+    await mkdir(persistedPath)
+    expect(() => ReviewRunStore.update('review_suffix_3', { status: 'running' })).toThrow()
+
+    expect(ReviewRunStore.list()).toEqual(before)
+    expect(ReviewRunStore.get('review_suffix_2')).toMatchObject({
+      rootRunId: 'review_missing_1',
+      retryOf: 'review_missing_1',
+    })
+    expect(ReviewRunStore.get('review_suffix_3')).toMatchObject({
+      rootRunId: 'review_missing_1',
+      retryOf: 'review_suffix_2',
+      status: 'accepted',
+    })
   })
 
   test('applies conditional review updates only to the current attempt identity', () => {
