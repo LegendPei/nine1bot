@@ -476,7 +476,7 @@ git add packages/platform-gitlab/docs/review-implementation/21-review-follow-up-
 git commit -m "docs(gitlab): close final review residual hardening"
 ```
 
-- [ ] **Step 6: 普通推送并核对远端**
+- [x] **Step 6: 普通推送并核对远端**
 
 ```powershell
 git fetch origin feat/gitlab-review-workflow-v2
@@ -499,7 +499,7 @@ git rev-parse origin/feat/gitlab-review-workflow-v2
 | Task 2 | 每次 MR POST 紧邻 HEAD 校验 | 已完成 | `ac8f657` 实施，`783efcf` 修复 guard 错误传播；HEAD 改变后零后续 POST |
 | Task 3 | claim 前完整发布计划预算 | 已完成 | `7fc88d0` 实施，`feac45e` 补齐编码 preflight；超限时零 claim、零网络并返回 HTTP 413 |
 | Task 4 | profile 逐表示无损校验 | 已完成 | `9763894` 实施，`22bb0b1` 修复 Web 诊断区分；collision/null 与无损往返均已覆盖 |
-| Task 5 | 全量验证、最终复审、文档与推送 | 进行中 | 自动化验证与最终 whole-branch review 已完成；等待本文档提交、普通推送及远端 SHA 核对 |
+| Task 5 | 全量验证、最终复审、文档与推送 | 已完成并推送 | 自动化与最终 review 全绿；`2059047` 收口点已 fast-forward 推送且本地/远端 SHA 一致，最终状态记录继续普通推送 |
 
 ## 实施与验证记录
 
@@ -537,6 +537,10 @@ git rev-parse origin/feat/gitlab-review-workflow-v2
 `git diff --check`、`git diff origin/main...HEAD --check` 和远端祖先检查均通过。敏感信息扫描只命中脱敏正则、固定 `PRIVATE-TOKEN` header 名称和 Web 内部 `output-reset-token` 属性，没有凭证值；`.idea/` 与 `nine1bot.iml` 始终保持 untracked 且未进入提交。
 
 真实 self-managed GitLab 的 webhook、可信 CI、Notes/Discussions 发布、远端 marker 对账和恢复动作仍为 **待人工联调**；以上自动化结果不构成 live-integration 证据。
+
+### 推送记录
+
+2026-08-21 先 fetch `origin/feat/gitlab-review-workflow-v2` 并确认远端 `509eb44` 是本地 HEAD 的祖先。首次 push 在 TLS 握手阶段失败且未修改远端，原命令普通重试后完成 `509eb44..2059047` fast-forward；再次 fetch 后，本地与远端均为 `2059047b44c693486c8a29df42e363d9fe3a30b2`。本状态记录提交同样只允许普通 push，最终完成条件仍是 `git rev-parse HEAD` 与 `git rev-parse origin/feat/gitlab-review-workflow-v2` 完全一致。
 
 ## 完成定义
 
