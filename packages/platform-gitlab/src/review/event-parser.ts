@@ -32,7 +32,9 @@ function parseMergeRequestWebhook(payload: Record<string, unknown>, settings: Gi
   const host = gitLabAuthorityFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
   const headSha = stringValue(attrs?.last_commit && recordValue(attrs.last_commit)?.id) ?? stringValue(attrs?.last_commit_id) ?? stringValue(attrs?.sha)
   if (!projectId || !mrIid || !host || !headSha) return { ok: false, reason: 'missing-merge-request-identity' }
-  if (!isAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) return { ok: false, reason: 'project-not-allowed' }
+  if (!isGitLabReviewTargetAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) {
+    return { ok: false, reason: 'project-not-allowed' }
+  }
 
   return {
     ok: true,
@@ -66,7 +68,9 @@ function parseNoteWebhook(payload: Record<string, unknown>, settings: GitLabRevi
   const projectId = idValue(project?.id ?? note?.project_id)
   const host = gitLabAuthorityFromUrl(stringValue(project?.web_url) ?? stringValue(project?.git_http_url) ?? stringValue(project?.homepage))
   if (!projectId || !host) return { ok: false, reason: 'missing-project-identity' }
-  if (!isAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) return { ok: false, reason: 'project-not-allowed' }
+  if (!isGitLabReviewTargetAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) {
+    return { ok: false, reason: 'project-not-allowed' }
+  }
 
   if (mergeRequest) {
     const mrIid = idValue(mergeRequest.iid)
@@ -290,7 +294,12 @@ function isBotAuthor(author: string | undefined, botMention: string) {
   return author.trim().toLowerCase() === botName
 }
 
-function isAllowed(settings: GitLabReviewSettings, host: string, projectId: string | number, projectPath?: string) {
+export function isGitLabReviewTargetAllowed(
+  settings: GitLabReviewSettings,
+  host: string,
+  projectId: string | number,
+  projectPath?: string,
+) {
   const normalizedHost = normalizeGitLabAuthority(host)
   const hostAllowed = settings.allowedHosts.length === 0 || settings.allowedHosts.some((candidate) =>
     normalizeGitLabAuthority(candidate) === normalizedHost,

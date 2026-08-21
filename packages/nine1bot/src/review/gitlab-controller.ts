@@ -17,7 +17,7 @@ import {
   gitLabAuthorityFromUrl,
   isGitLabReviewConfigurationExecutable,
   isGitLabReviewPublicationComplete,
-  isGitLabReviewProjectInScope,
+  isGitLabReviewTargetAllowed,
   normalizeGitLabReviewSettings,
   parseGitLabWebhookEvent,
   resolveGitLabApiBaseUrl,
@@ -429,6 +429,9 @@ export async function retryGitLabReviewAttempt(
   if (!trigger) return retryRejected(previous, 400, 'review_run_trigger_invalid')
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   if (!settings.enabled) return retryRejected(previous, 409, 'gitlab_review_disabled')
+  if (!isGitLabReviewTargetAllowed(settings, trigger.host, trigger.projectId, trigger.projectPath)) {
+    return retryRejected(previous, 409, 'project-not-allowed')
+  }
 
   const projectResolution = resolveGitLabReviewProjectProfile(settings, {
     host: trigger.host,
@@ -1040,7 +1043,7 @@ function rejectedMentionTarget(payload: unknown, settings: GitLabReviewSettings)
     settings.baseUrl,
   )
   if (!projectId || !host) return undefined
-  if (!isAllowedGitLabTarget(settings, host, projectId, stringValue(project?.path_with_namespace))) return undefined
+  if (!isGitLabReviewTargetAllowed(settings, host, projectId, stringValue(project?.path_with_namespace))) return undefined
   if (mergeRequest) {
     const mrIid = idValue(mergeRequest.iid)
     if (!mrIid) return undefined
@@ -1062,15 +1065,6 @@ function buildRejectedMentionIdempotencyKey(reason: string, target: RejectedMent
     target.noteId ? `note:${target.noteId}` : 'note:unknown',
     reason,
   ].join(':')
-}
-
-function isAllowedGitLabTarget(settings: GitLabReviewSettings, host: string, projectId: string | number, projectPath?: string) {
-  const hostAllowed = settings.allowedHosts.length === 0 || settings.allowedHosts.includes(host)
-  const projectAllowed = isGitLabReviewProjectInScope(settings, {
-    id: projectId,
-    pathWithNamespace: projectPath,
-  })
-  return hostAllowed && projectAllowed
 }
 
 function renderFailureComment(phase: string, error: string) {

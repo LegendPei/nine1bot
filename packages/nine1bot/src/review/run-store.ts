@@ -121,11 +121,12 @@ function maxRecords() {
 export namespace ReviewRunStore {
   export function create(input: CreateReviewRunInput): ReviewRunRecord {
     load()
-    return persistMutation(() => {
+    const runId = persistRunMutation(() => {
       const run = createRecord(input)
-      runs.set(run.id, run)
-      return copyReviewRunRecord(run)
+      setStoredReviewRun(run)
+      return run.id
     })
+    return copyReviewRunRecord(requiredStoredReviewRun(runId))
   }
 
   export function findByIdempotencyKey(idempotencyKey: string): ReviewRunRecord | undefined {
@@ -157,15 +158,16 @@ export namespace ReviewRunStore {
     load()
     const existing = runs.get(id)
     if (!existing) return undefined
-    return persistMutation(() => {
+    const runId = persistRunMutation(() => {
       const next = {
         ...existing,
         ...patch,
         updatedAt: Date.now(),
       }
-      runs.set(id, next)
-      return copyReviewRunRecord(next)
+      setStoredReviewRun(next)
+      return existing.id
     })
+    return copyReviewRunRecord(requiredStoredReviewRun(runId))
   }
 
   export function updateIfCurrent(
@@ -177,12 +179,13 @@ export namespace ReviewRunStore {
     if (!existing) return false
     if (existing.generation !== identity.generation || existing.sessionId !== identity.sessionId) return false
     if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return false
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         ...patch,
         updatedAt: Date.now(),
       })
+      return existing.id
     })
     return true
   }
@@ -211,8 +214,8 @@ export namespace ReviewRunStore {
     const claimId = randomUUID()
     const completedMarkers = publication ? [...publication.completedMarkers] : []
     const identity = { runId: existing.id, claimId, ownerId: input.ownerId, payloadHash: input.payloadHash }
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         updatedAt: now,
         publication: {
@@ -231,6 +234,7 @@ export namespace ReviewRunStore {
         },
       })
       activePublicationClaims.set(existing.id, identity)
+      return existing.id
     })
     return {
       ok: true,
@@ -256,8 +260,8 @@ export namespace ReviewRunStore {
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     if (existing.publication!.completedMarkers.includes(input.marker)) return true
     const now = Date.now()
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         updatedAt: now,
         publication: {
@@ -266,6 +270,7 @@ export namespace ReviewRunStore {
           completedMarkers: [...existing.publication!.completedMarkers, input.marker],
         },
       })
+      return existing.id
     })
     return true
   }
@@ -276,8 +281,8 @@ export namespace ReviewRunStore {
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
     const completedMarkers = [...new Set(input.markers)]
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         updatedAt: now,
         publication: {
@@ -286,6 +291,7 @@ export namespace ReviewRunStore {
           completedMarkers,
         },
       })
+      return existing.id
     })
     return true
   }
@@ -295,8 +301,8 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         status: 'failed',
         error: input.error,
@@ -311,6 +317,7 @@ export namespace ReviewRunStore {
         },
       })
       activePublicationClaims.delete(existing.id)
+      return existing.id
     })
     return true
   }
@@ -320,8 +327,8 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         status: 'rejected',
         error: input.error,
@@ -338,6 +345,7 @@ export namespace ReviewRunStore {
         },
       })
       activePublicationClaims.delete(existing.id)
+      return existing.id
     })
     return true
   }
@@ -350,8 +358,8 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
-    persistMutation(() => {
-      runs.set(existing.id, {
+    persistRunMutation(() => {
+      setStoredReviewRun({
         ...existing,
         status: input.status,
         error: undefined,
@@ -368,6 +376,7 @@ export namespace ReviewRunStore {
         },
       })
       activePublicationClaims.delete(existing.id)
+      return existing.id
     })
     return true
   }
@@ -381,7 +390,7 @@ export namespace ReviewRunStore {
     if (!existing || existing.generation !== previous.generation) return undefined
     if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return undefined
 
-    return persistMutation(() => {
+    const runId = persistRunMutation(() => {
       const run = createRecord({
         ...input,
         triggerKey: existing.triggerKey,
@@ -390,9 +399,10 @@ export namespace ReviewRunStore {
         attempt: existing.attempt + 1,
         retryOf: existing.id,
       })
-      runs.set(run.id, run)
-      return copyReviewRunRecord(run)
+      setStoredReviewRun(run)
+      return run.id
     })
+    return copyReviewRunRecord(requiredStoredReviewRun(runId))
   }
 
   export function list(options: { limit?: number } = {}): ReviewRunRecord[] {
@@ -473,14 +483,50 @@ function activePublicationClaimMatches(identity: PublicationClaimIdentity) {
 }
 
 function copyReviewRunRecord(run: ReviewRunRecord): ReviewRunRecord {
-  return {
-    ...run,
-    publication: run.publication
-      ? {
-          ...run.publication,
-          completedMarkers: [...run.publication.completedMarkers],
-        }
-      : undefined,
+  const copy = copyJsonValue(run)
+  copy.publication = copy.publication ?? undefined
+  return copy
+}
+
+function setStoredReviewRun(run: ReviewRunRecord) {
+  const stored = copyReviewRunRecord(run)
+  runs.set(stored.id, stored)
+}
+
+function requiredStoredReviewRun(id: string) {
+  const run = runs.get(id)
+  if (!run) throw new Error('review_run_missing_after_persist')
+  return run
+}
+
+function copyJsonValue<T>(value: T): T {
+  const json = JSON.stringify(value)
+  if (json === undefined) throw new TypeError('review_run_value_not_json_serializable')
+  const copy = JSON.parse(json) as T
+  restoreExplicitUndefinedProperties(value, copy)
+  return copy
+}
+
+function restoreExplicitUndefinedProperties(source: unknown, target: unknown) {
+  if (!source || typeof source !== 'object' || !target || typeof target !== 'object') return
+  if (Array.isArray(source)) {
+    if (!Array.isArray(target)) return
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] !== undefined) restoreExplicitUndefinedProperties(source[index], target[index])
+    }
+    return
+  }
+  if (Array.isArray(target)) return
+  const sourceRecord = source as Record<string, unknown>
+  const targetRecord = target as Record<string, unknown>
+  for (const key of Object.keys(sourceRecord)) {
+    if (sourceRecord[key] === undefined) {
+      targetRecord[key] = undefined
+      continue
+    }
+    if (Object.prototype.hasOwnProperty.call(targetRecord, key)) {
+      restoreExplicitUndefinedProperties(sourceRecord[key], targetRecord[key])
+    }
   }
 }
 
@@ -496,7 +542,7 @@ function load() {
       : []
     runs.clear()
     for (const run of records) {
-      runs.set(run.id, { ...run })
+      setStoredReviewRun(run)
     }
     sequence = typeof parsed.sequence === 'number' && Number.isFinite(parsed.sequence)
       ? parsed.sequence
@@ -507,10 +553,10 @@ function load() {
   }
 }
 
-function save() {
+function save(retainedRunIds: Iterable<string> = []) {
   const filepath = storePath()
   mkdirSync(dirname(filepath), { recursive: true })
-  prune()
+  prune(retainedRunIds)
   const data: ReviewRunStoreFile = {
     version: 2,
     sequence,
@@ -526,11 +572,15 @@ function save() {
   }
 }
 
-function persistMutation<T>(mutate: () => T): T {
+function persistRunMutation(mutate: () => string) {
+  return persistMutation(mutate, (runId) => [runId])
+}
+
+function persistMutation<T>(mutate: () => T, retainedRunIds: (result: T) => Iterable<string>): T {
   const previous = snapshotStoreState()
   try {
     const result = mutate()
-    save()
+    save(retainedRunIds(result))
     return result
   } catch (error) {
     restoreStoreState(previous)
@@ -540,9 +590,9 @@ function persistMutation<T>(mutate: () => T): T {
 
 function snapshotStoreState() {
   return {
-    runs: new Map([...runs].map(([id, run]) => [id, structuredClone(run)])),
+    runs: new Map([...runs].map(([id, run]) => [id, copyReviewRunRecord(run)])),
     activePublicationClaims: new Map(
-      [...activePublicationClaims].map(([id, claim]) => [id, structuredClone(claim)]),
+      [...activePublicationClaims].map(([id, claim]) => [id, copyJsonValue(claim)]),
     ),
     sequence,
   }
@@ -556,20 +606,45 @@ function restoreStoreState(snapshot: ReturnType<typeof snapshotStoreState>) {
   sequence = snapshot.sequence
 }
 
-function prune() {
+function prune(retainedRunIds: Iterable<string>) {
   repairRunLineage()
+  removeOrphanedPublicationClaims()
   const limit = maxRecords()
   if (runs.size <= limit) return
   const groups = groupRunsByTriggerKey([...runs.values()])
   groups.sort((a, b) => compareNewestFirst(a.latest, b.latest))
   const keep = new Set<string>()
+  const protectedTriggerKeys = new Set<string>()
+  for (const runId of retainedRunIds) {
+    const run = runs.get(runId)
+    if (run) protectedTriggerKeys.add(run.triggerKey)
+  }
+  for (const runId of activePublicationClaims.keys()) {
+    const run = runs.get(runId)
+    if (run) protectedTriggerKeys.add(run.triggerKey)
+  }
   for (const group of groups) {
+    if (!protectedTriggerKeys.has(group.latest.triggerKey)) continue
+    for (const run of group.records) keep.add(run.id)
+  }
+  for (const group of groups) {
+    if (protectedTriggerKeys.has(group.latest.triggerKey)) continue
     if (keep.size === 0 || keep.size + group.records.length <= limit) {
       for (const run of group.records) keep.add(run.id)
     }
   }
   for (const id of runs.keys()) {
     if (!keep.has(id)) runs.delete(id)
+  }
+  removeOrphanedPublicationClaims()
+}
+
+function removeOrphanedPublicationClaims() {
+  for (const [runId, claim] of activePublicationClaims) {
+    const run = runs.get(runId)
+    if (!run || claim.runId !== runId || !publicationClaimMatches(run, claim)) {
+      activePublicationClaims.delete(runId)
+    }
   }
 }
 
@@ -618,7 +693,7 @@ function isContiguousAttemptChainSuffix(records: ReviewRunRecord[]) {
 
 function setRunLineage(run: ReviewRunRecord, rootRunId: string, retryOf: string | undefined) {
   if (run.rootRunId === rootRunId && run.retryOf === retryOf) return
-  runs.set(run.id, { ...run, rootRunId, retryOf })
+  setStoredReviewRun({ ...run, rootRunId, retryOf })
 }
 
 function groupRunsByTriggerKey(records: ReviewRunRecord[]) {

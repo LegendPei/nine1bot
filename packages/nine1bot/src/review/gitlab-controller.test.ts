@@ -24,7 +24,7 @@ import {
   retryGitLabReviewAttempt,
   validateGitLabDedicatedWebhookSecret,
 } from './gitlab-controller'
-import { ReviewRunStore } from './run-store'
+import { ReviewRunStore, type CreateReviewRunInput } from './run-store'
 import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
 
 const memorySecrets: PlatformSecretAccess = {
@@ -1235,6 +1235,144 @@ describe('GitLab review controller', () => {
     }
   })
 
+  test('revalidates the current host allowlist and project scope before creating a retry attempt', async () => {
+    const scenarios = [{
+      name: 'host',
+      settings: {
+        ...platforms.gitlab.settings,
+        'review.dryRun': false,
+        allowedHosts: ['other.example.com'],
+      },
+    }, {
+      name: 'project',
+      settings: {
+        ...platforms.gitlab.settings,
+        'review.dryRun': false,
+        'review.scopeMode': 'selected-only',
+        'review.includedProjects': [{ id: 999 }],
+      },
+    }] as const
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const headSha = `retry-current-${scenario.name}-policy-head`
+      const previous = ReviewRunStore.create({
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        idempotencyKey: `retry-current-${scenario.name}-policy`,
+        triggerKey: `retry-current-${scenario.name}-policy`,
+        trigger: {
+          host: 'gitlab.example.com',
+          projectId: 123,
+          projectPath: 'nine1/nine1bot',
+          objectType: 'mr',
+          objectIid: 60 + index,
+          headSha,
+          eventName: 'merge_request',
+          mode: 'webhook',
+        },
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })
+      const requests: string[] = []
+
+      const result = await retryGitLabReviewAttempt({
+        runId: previous.id,
+        platforms: { gitlab: { enabled: true, settings: scenario.settings } },
+        secrets: liveSecrets,
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          return Response.json({
+            diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: headSha },
+            changes: [{ old_path: 'src/app.ts', new_path: 'src/app.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+          })
+        }) as typeof fetch,
+      })
+
+      expect(result).toMatchObject({
+        accepted: false,
+        error: 'project-not-allowed',
+        httpStatus: 409,
+        runId: previous.id,
+      })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.findLatestByTriggerKey(previous.triggerKey)).toMatchObject({
+        id: previous.id,
+        attempt: 1,
+      })
+    }
+  })
+
+  test('prioritizes denied retry scope over missing and disabled profile diagnostics', async () => {
+    const scenarios = [{
+      name: 'missing',
+      projects: [],
+    }, {
+      name: 'disabled',
+      projects: [{
+        id: 'nine1bot',
+        host: 'gitlab.example.com',
+        projectId: 123,
+        nine1botProjectID: 'project-nine1bot',
+        enabled: false,
+      }],
+    }] as const
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const previous = ReviewRunStore.create({
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        idempotencyKey: `retry-denied-scope-${scenario.name}`,
+        triggerKey: `retry-denied-scope-${scenario.name}`,
+        trigger: {
+          host: 'gitlab.example.com',
+          projectId: 123,
+          projectPath: 'nine1/nine1bot',
+          objectType: 'mr',
+          objectIid: 70 + index,
+          headSha: `retry-denied-scope-${scenario.name}-head`,
+          eventName: 'merge_request',
+          mode: 'webhook',
+        },
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })
+      const requests: string[] = []
+
+      const result = await retryGitLabReviewAttempt({
+        runId: previous.id,
+        platforms: {
+          gitlab: {
+            enabled: true,
+            settings: {
+              ...platforms.gitlab.settings,
+              'review.scopeMode': 'selected-only',
+              'review.includedProjects': [{ id: 999 }],
+              'review.projects': scenario.projects,
+            },
+          },
+        },
+        secrets: memorySecrets,
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          throw new Error('denied retry must not access GitLab')
+        }) as unknown as typeof fetch,
+      })
+
+      expect(result).toMatchObject({
+        accepted: false,
+        error: 'project-not-allowed',
+        httpStatus: 409,
+        runId: previous.id,
+      })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.list().filter((run) => run.triggerKey === previous.triggerKey)).toEqual([
+        expect.objectContaining({ id: previous.id, attempt: 1 }),
+      ])
+    }
+  })
+
   test('rejects a stale runtime project binding as recoverable configuration and retries it as a new attempt', async () => {
     const accepted = await handleGitLabReviewWebhook({
       payload: {
@@ -1841,6 +1979,168 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('deep copies JSON write inputs and every returned review run record', () => {
+    const input: CreateReviewRunInput = {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'deep-copy-create',
+      sessionId: 'deep-copy-session',
+      trigger: { nested: { value: 'stored-trigger' } },
+      project: {
+        id: 'deep-copy-project',
+        host: 'gitlab.example.com',
+        projectId: 123,
+        nine1botProjectID: 'project-nine1bot',
+        enabled: true,
+        reviewFocus: ['security'],
+        includePathPrefixes: ['src/'],
+        excludePathPatterns: ['**/*.generated.ts'],
+        ci: { maxJobLogs: 3, maxJobLogBytes: 8_000 },
+        source: 'configured',
+        matchedAt: 1,
+      },
+      ci: {
+        diagnostics: ['stored-ci'],
+        queryCount: 1,
+        jobLogReadCount: 1,
+        queriedJobIds: [11],
+      },
+      warnings: ['stored-warning'],
+      context: {
+        nested: { value: 'stored-context' },
+        serializedAt: new Date('2024-01-02T03:04:05.000Z'),
+      },
+      publication: {
+        state: 'partial',
+        payloadHash: 'a'.repeat(64),
+        updatedAt: 1,
+        summaryMarker: 'stored-summary-marker',
+        completedMarkers: ['stored-publication-marker'],
+      },
+    }
+    const created = ReviewRunStore.create(input)
+    type ReturnedRun = NonNullable<ReturnType<typeof ReviewRunStore.get>>
+    const mutateReturnedRecord = (record: ReturnedRun) => {
+      record.ci!.diagnostics.push('mutated')
+      record.ci!.queriedJobIds!.push(99)
+      record.warnings!.push('mutated')
+      ;(record.trigger as { nested: { value: string } }).nested.value = 'mutated'
+      record.project!.reviewFocus.push('mutated')
+      record.project!.ci.maxJobLogs = 99
+      ;(record.context as { nested: { value: string } }).nested.value = 'mutated'
+      record.publication!.completedMarkers.push('mutated')
+    }
+    const expectStoredRecord = () => {
+      expect(ReviewRunStore.get(created.id)).toMatchObject({
+        ci: {
+          diagnostics: ['stored-ci'],
+          queryCount: 1,
+          jobLogReadCount: 1,
+          queriedJobIds: [11],
+        },
+        warnings: ['stored-warning'],
+        trigger: { nested: { value: 'stored-trigger' } },
+        project: {
+          reviewFocus: ['security'],
+          ci: { maxJobLogs: 3, maxJobLogBytes: 8_000 },
+        },
+        context: {
+          nested: { value: 'stored-context' },
+          serializedAt: '2024-01-02T03:04:05.000Z',
+        },
+        publication: { completedMarkers: ['stored-publication-marker'] },
+      })
+    }
+
+    input.ci!.diagnostics.push('mutated-input')
+    input.warnings!.push('mutated-input')
+    ;(input.trigger as { nested: { value: string } }).nested.value = 'mutated-input'
+    input.project!.reviewFocus.push('mutated-input')
+    ;(input.context as { nested: { value: string } }).nested.value = 'mutated-input'
+    input.publication!.completedMarkers.push('mutated-input')
+    mutateReturnedRecord(created)
+    expectStoredRecord()
+
+    const readers: Array<() => ReturnedRun> = [
+      () => ReviewRunStore.get(created.id)!,
+      () => ReviewRunStore.findByIdempotencyKey(input.idempotencyKey!)!,
+      () => ReviewRunStore.findLatestByTriggerKey(created.triggerKey)!,
+      () => ReviewRunStore.findBySessionId(input.sessionId!)!,
+      () => ReviewRunStore.list().find((run) => run.id === created.id)!,
+    ]
+    for (const read of readers) {
+      mutateReturnedRecord(read())
+      expectStoredRecord()
+    }
+  })
+
+  test('deep copies update and retry inputs and their successful return records', () => {
+    const updatedRun = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'deep-copy-update',
+    })
+    const updatePatch = {
+      status: 'running' as const,
+      ci: { diagnostics: ['updated-ci'], queriedJobIds: [21] },
+      warnings: ['updated-warning'],
+      trigger: { nested: { value: 'updated-trigger' } },
+      context: { nested: { value: 'updated-context' } },
+    }
+    const updated = ReviewRunStore.update(updatedRun.id, updatePatch)
+    if (!updated) throw new Error('expected updated run')
+
+    updatePatch.ci.diagnostics.push('mutated-input')
+    updatePatch.warnings.push('mutated-input')
+    updatePatch.trigger.nested.value = 'mutated-input'
+    updatePatch.context.nested.value = 'mutated-input'
+    updated.ci!.diagnostics.push('mutated-return')
+    updated.warnings!.push('mutated-return')
+    ;(updated.trigger as { nested: { value: string } }).nested.value = 'mutated-return'
+    ;(updated.context as { nested: { value: string } }).nested.value = 'mutated-return'
+    expect(ReviewRunStore.get(updatedRun.id)).toMatchObject({
+      ci: { diagnostics: ['updated-ci'], queriedJobIds: [21] },
+      warnings: ['updated-warning'],
+      trigger: { nested: { value: 'updated-trigger' } },
+      context: { nested: { value: 'updated-context' } },
+    })
+
+    const previous = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'deep-copy-retry',
+      triggerKey: 'deep-copy-retry',
+      rejectionKind: 'configuration',
+      recoverable: true,
+    })
+    const retryInput: CreateReviewRunInput = {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: previous.idempotencyKey,
+      ci: { diagnostics: ['retry-ci'], queriedJobIds: [31] },
+      warnings: ['retry-warning'],
+      trigger: { nested: { value: 'retry-trigger' } },
+      context: { nested: { value: 'retry-context' } },
+    }
+    const retry = ReviewRunStore.createRetryAttempt(previous, retryInput)
+    if (!retry) throw new Error('expected retry run')
+
+    retryInput.ci!.diagnostics.push('mutated-input')
+    retryInput.warnings!.push('mutated-input')
+    ;(retryInput.trigger as { nested: { value: string } }).nested.value = 'mutated-input'
+    ;(retryInput.context as { nested: { value: string } }).nested.value = 'mutated-input'
+    retry.ci!.diagnostics.push('mutated-return')
+    retry.warnings!.push('mutated-return')
+    ;(retry.trigger as { nested: { value: string } }).nested.value = 'mutated-return'
+    ;(retry.context as { nested: { value: string } }).nested.value = 'mutated-return'
+    expect(ReviewRunStore.get(retry.id)).toMatchObject({
+      ci: { diagnostics: ['retry-ci'], queriedJobIds: [31] },
+      warnings: ['retry-warning'],
+      trigger: { nested: { value: 'retry-trigger' } },
+      context: { nested: { value: 'retry-context' } },
+    })
+  })
+
   test('models review attempt chains with stable generations and legacy defaults', async () => {
     const first = ReviewRunStore.create({
       platform: 'gitlab',
@@ -2247,6 +2547,150 @@ describe('GitLab review controller', () => {
       retryOf: 'review_suffix_2',
       status: 'accepted',
     })
+  })
+
+  test('keeps an active publication attempt group through prune pressure and lets it complete', () => {
+    const first = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'rejected',
+      idempotencyKey: 'active-publication-prune-chain',
+      triggerKey: 'active-publication-prune-chain',
+    })
+    const publishing = ReviewRunStore.createRetryAttempt(first, {
+      platform: 'gitlab',
+      status: 'running',
+      idempotencyKey: first.idempotencyKey,
+    })
+    if (!publishing) throw new Error('expected publishing retry')
+    const payloadHash = publicationPayloadHash(publicationStageResult())
+    const claim = ReviewRunStore.claimPublication({
+      runId: publishing.id,
+      payloadHash,
+      ownerId: 'active-prune-publisher',
+    })
+    if (!claim.ok) throw new Error(`expected publication claim: ${claim.error}`)
+    const identity = {
+      runId: publishing.id,
+      claimId: claim.claimId,
+      ownerId: 'active-prune-publisher',
+      payloadHash,
+    }
+
+    ReviewRunStore.setMaxRecordsForTesting(1)
+    const pressure = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'active-publication-prune-pressure',
+      triggerKey: 'active-publication-prune-pressure',
+    })
+
+    expect(ReviewRunStore.get(pressure.id)).toEqual(pressure)
+    expect(ReviewRunStore.get(first.id)).toBeDefined()
+    expect(ReviewRunStore.get(publishing.id)).toBeDefined()
+    expect(ReviewRunStore.recordPublicationMarker({ ...identity, marker: 'active-prune-marker' })).toBe(true)
+    expect(ReviewRunStore.completePublication({
+      ...identity,
+      status: 'succeeded',
+      warnings: ['completed under prune pressure'],
+    })).toBe(true)
+    expect(ReviewRunStore.get(publishing.id)).toMatchObject({
+      status: 'succeeded',
+      warnings: ['completed under prune pressure'],
+      publication: { state: 'published', completedMarkers: ['active-prune-marker'] },
+    })
+  })
+
+  test('does not protect an orphaned active claim after its publication identity is removed', () => {
+    const abandoned = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      idempotencyKey: 'orphaned-publication-claim',
+      triggerKey: 'orphaned-publication-claim',
+    })
+    const claim = ReviewRunStore.claimPublication({
+      runId: abandoned.id,
+      payloadHash: 'b'.repeat(64),
+      ownerId: 'orphaned-claim-owner',
+    })
+    if (!claim.ok) throw new Error(`expected publication claim: ${claim.error}`)
+    expect(ReviewRunStore.update(abandoned.id, { publication: undefined })).toBeDefined()
+
+    ReviewRunStore.setMaxRecordsForTesting(1)
+    const newer = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'orphaned-publication-newer',
+      triggerKey: 'orphaned-publication-newer',
+    })
+
+    expect(ReviewRunStore.get(newer.id)).toEqual(newer)
+    expect(ReviewRunStore.get(abandoned.id)).toBeUndefined()
+  })
+
+  test('returns the final repaired Map record from update', () => {
+    const run = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: 'post-save-update-lineage',
+      triggerKey: 'post-save-update-lineage',
+    })
+
+    const updated = ReviewRunStore.update(run.id, {
+      status: 'running',
+      rootRunId: 'missing-root',
+      attempt: 4,
+      retryOf: 'missing-parent',
+    })
+
+    expect(updated).toMatchObject({
+      id: run.id,
+      rootRunId: run.id,
+      attempt: 4,
+      status: 'running',
+    })
+    expect(updated?.retryOf).toBeUndefined()
+    expect(updated).toEqual(ReviewRunStore.get(run.id))
+  })
+
+  test('returns the final repaired Map record from createRetryAttempt', async () => {
+    const persistedPath = join(tempDirs.at(-1)!, 'post-save-retry-lineage.json')
+    await writeFile(persistedPath, JSON.stringify({
+      version: 2,
+      sequence: 2,
+      runs: [{
+        id: 'review_retry_suffix_2',
+        rootRunId: 'review_missing_1',
+        attempt: 2,
+        retryOf: 'review_missing_1',
+        triggerKey: 'post-save-retry-lineage',
+        generation: 'post-save-retry-generation-2',
+        platform: 'gitlab',
+        idempotencyKey: 'post-save-retry-lineage',
+        status: 'rejected',
+        rejectionKind: 'configuration',
+        recoverable: true,
+        createdAt: 20,
+        updatedAt: 20,
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(persistedPath)
+    const previous = ReviewRunStore.get('review_retry_suffix_2')
+    if (!previous) throw new Error('expected persisted retry suffix')
+
+    const retry = ReviewRunStore.createRetryAttempt(previous, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: previous.idempotencyKey,
+    })
+
+    expect(retry).toMatchObject({
+      rootRunId: previous.id,
+      attempt: 3,
+      retryOf: previous.id,
+    })
+    expect(retry).toEqual(ReviewRunStore.get(retry!.id))
+    expect(ReviewRunStore.get(previous.id)).toMatchObject({ rootRunId: previous.id })
+    expect(ReviewRunStore.get(previous.id)?.retryOf).toBeUndefined()
   })
 
   test('applies conditional review updates only to the current attempt identity', () => {
