@@ -1,4 +1,5 @@
 import type { GitLabChangedFile, GitLabSkippedFile } from './types'
+import { truncateUtf8 } from './utf8-budget'
 
 export type GitLabReviewDiffSlice = { file: string; hunk: string }
 
@@ -220,13 +221,4 @@ function evidenceDetail(file: string, reason: string) {
 
 function byteLength(input: string) {
   return new TextEncoder().encode(input).length
-}
-
-function truncateUtf8(value: string, maxBytes: number) {
-  if (maxBytes <= 0) return ''
-  const encoder = new TextEncoder()
-  if (encoder.encode(value).length <= maxBytes) return value
-  const codePoints = Array.from(value)
-  while (codePoints.length > 0 && encoder.encode(codePoints.join('')).length > maxBytes) codePoints.pop()
-  return codePoints.join('')
 }

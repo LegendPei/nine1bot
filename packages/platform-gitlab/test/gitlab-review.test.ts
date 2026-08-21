@@ -3606,6 +3606,29 @@ describe('GitLab review foundation', () => {
     await expect(client.getMergeRequestPipelines(3, 2)).resolves.toEqual([])
   })
 
+  test('truncates expanded invalid UTF-8 responses with constant UTF-8 encodes', async () => {
+    const maxBytes = 4_096
+    const invalidUtf8 = new Uint8Array(maxBytes).fill(0xFF)
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'token',
+      fetch: (async () => new Response(invalidUtf8, { status: 200 })) as unknown as typeof fetch,
+    })
+    const encode = spyOn(TextEncoder.prototype, 'encode')
+    let trace = ''
+    let encodeCalls = 0
+    try {
+      trace = await client.getJobTrace(3, 8, maxBytes)
+      encodeCalls = encode.mock.calls.length
+    } finally {
+      encode.mockRestore()
+    }
+
+    expect(encodeCalls).toBeLessThanOrEqual(2)
+    expect(trace).toBe('\uFFFD'.repeat(Math.floor(maxBytes / 3)))
+    expect(new TextEncoder().encode(trace).byteLength).toBeLessThanOrEqual(maxBytes)
+  })
+
   test('cancels a job trace stream when content exceeds the byte limit', async () => {
     let canceled = false
     const client = new GitLabApiClient({

@@ -1,6 +1,7 @@
 import type { GitLabRawChangesResponse } from './types'
 import { encodeGitLabReviewPublicationForm } from './publication-budget'
 import { sanitizeGitLabApiErrorDetail } from './sanitizer'
+import { truncateUtf8 } from './utf8-budget'
 
 const GITLAB_PAGE_SIZE = 100
 const MAX_PAGINATED_PAGES = 5
@@ -880,14 +881,6 @@ async function readBoundedText(response: Response, maxBytes?: number) {
     offset += chunk.byteLength
   }
   return { text: truncateUtf8(new TextDecoder().decode(bytes), maxBytes), truncated }
-}
-
-function truncateUtf8(value: string, maxBytes: number) {
-  const encoder = new TextEncoder()
-  if (encoder.encode(value).length <= maxBytes) return value
-  const codePoints = Array.from(value)
-  while (codePoints.length > 0 && encoder.encode(codePoints.join('')).length > maxBytes) codePoints.pop()
-  return codePoints.join('')
 }
 
 function projectHookBody(input: GitLabProjectHookInput) {
