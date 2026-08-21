@@ -6,6 +6,7 @@ import { PermissionNext } from "../../src/permission/next"
 import { ControllerAgentRunCompiler } from "../../src/runtime/controller/agent-run-compiler"
 import { RuntimePlatformAdapterRegistry } from "../../src/runtime/platform/adapter"
 import { ControllerTemplateResolver } from "../../src/runtime/controller/template-resolver"
+import { RuntimeResourceResolver } from "../../src/runtime/resource/resolver"
 import { RuntimeSourceRegistry } from "../../src/runtime/source/registry"
 import { SessionProfileCompiler } from "../../src/runtime/session/profile-compiler"
 import { Session } from "../../src/session"
@@ -87,6 +88,7 @@ function registerAgentSource(input: {
 test("platform agent visibility keeps declared and recommendable agents out of the default list", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const declaredDir = path.join(dir, "agents-declared")
       const recommendableDir = path.join(dir, "agents-recommendable")
@@ -162,6 +164,7 @@ test("platform agent visibility keeps declared and recommendable agents out of t
 test("platform agent source unregister invalidates agent lookup cache", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -195,6 +198,7 @@ test("platform agent source unregister invalidates agent lookup cache", async ()
 test("platform agent source normalizes frontmatter names", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await Bun.write(
@@ -234,6 +238,7 @@ You are a trimmed platform agent.
 test("platform agent cache is cleared when the current instance is disposed", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -273,6 +278,7 @@ test("platform agent cache is cleared when the current instance is disposed", as
 test("session choice can freeze a declared-only platform agent into the profile", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -308,6 +314,7 @@ test("session choice can freeze a declared-only platform agent into the profile"
 test("template resolver validates platform recommended agents", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -321,9 +328,14 @@ test("template resolver validates platform recommended agents", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
+      let resourceAgentName: string | undefined
       RuntimePlatformAdapterRegistry.register({
         id: "gitlab",
         recommendedAgent: () => "gitlab.review",
+        resourceContributions: ({ agentName }) => {
+          resourceAgentName = agentName
+          return RuntimeResourceResolver.emptyResources()
+        },
       })
       registerAgentSource({
         id: "gitlab-agents",
@@ -345,6 +357,15 @@ test("template resolver validates platform recommended agents", async () => {
         accepted: true,
         platform: "gitlab",
       }))
+      const acceptedProfile = await SessionProfileCompiler.compile({
+        source: "new-session",
+        profileTemplate: accepted.profileTemplate,
+      })
+      expect(resourceAgentName).toBe(acceptedProfile.agent.name)
+      expect(acceptedProfile.agent).toEqual({
+        name: "gitlab.review",
+        source: "internal-runtime",
+      })
 
       RuntimeSourceRegistry.unregisterOwner("gitlab")
 
@@ -370,6 +391,7 @@ test("template resolver validates platform recommended agents", async () => {
 test("controller compiler fails closed when a profiled platform agent source is disabled", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -437,6 +459,7 @@ test("controller compiler fails closed when a profiled platform agent source is 
 test("direct prompt agent override cannot select declared-only platform agents", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {
@@ -478,6 +501,7 @@ test("direct prompt agent override cannot select declared-only platform agents",
 test("controller prompt can persist the frozen declared-only platform agent", async () => {
   await using tmp = await tmpdir({
     git: true,
+    config: { model: "test-provider/test-model" },
     init: async (dir) => {
       const agentsDir = path.join(dir, "agents")
       await writeAgent(agentsDir, "review.agent.md", {

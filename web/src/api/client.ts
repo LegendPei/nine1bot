@@ -396,7 +396,7 @@ export interface ToolMetricsRow {
 }
 
 export interface ResourceMetricsRow {
-  resourceType: 'mcp' | 'skill'
+  resourceType: 'mcp' | 'skill' | 'tool'
   resourceID: string
   failures: number
   recoverableFailures: number
@@ -504,8 +504,10 @@ export type MetricsDetailEvent =
       turnSnapshotId?: string
       declaredMcp: number
       declaredSkills: number
+      declaredRegisteredTools: number
       resolvedMcp: number
       resolvedSkills: number
+      resolvedRegisteredTools: number
       failures: number
     }
   | {
@@ -514,8 +516,11 @@ export type MetricsDetailEvent =
       recordedAt: number
       sessionID: string
       turnSnapshotId?: string
-      resourceType: 'mcp' | 'skill'
+      resourceType: 'mcp' | 'skill' | 'tool'
       resourceID: string
+      ownerID?: string
+      generation?: number
+      code?: string
       failureStatus: 'degraded' | 'unavailable' | 'auth-required'
       stage: 'resolve' | 'connect' | 'auth' | 'load' | 'execute'
       reason?: string
@@ -547,16 +552,27 @@ export interface SessionDebugResponse {
     source?: string
     version?: string
     resources?: {
-      mcp?: string[]
-      skills?: string[]
+      mcp?: { servers?: string[] }
+      skills?: { skills?: string[] }
+      registeredTools?: { tools?: string[] }
     }
   }
   resourceAudit?: {
     failures?: Array<{
-      resourceType?: 'mcp' | 'skill'
+      resourceType?: 'mcp' | 'skill' | 'tool'
       resourceID?: string
       status?: string
       stage?: string
+      reason?: string
+    }>
+  }
+  registeredTools?: {
+    declared: string[]
+    resolved: Array<{
+      id: string
+      ownerId: string
+      generation: number
+      status: string
       reason?: string
     }>
   }
@@ -1026,7 +1042,7 @@ export const api = {
     providerID?: string
     modelID?: string
     tool?: string
-    resourceType?: 'mcp' | 'skill'
+    resourceType?: 'mcp' | 'skill' | 'tool'
     resourceID?: string
     sessionID?: string
     turnSnapshotId?: string
@@ -2167,6 +2183,7 @@ export interface BrowserExtensionConfig {
   prompt?: string
   mcpServers?: string[]
   skills?: string[]
+  registeredTools?: string[]
 }
 
 // === Platform Adapter Types ===
@@ -2289,6 +2306,20 @@ export interface PlatformRuntimeSourcesSummary {
   skills: PlatformRuntimeSourceSummary[]
 }
 
+export interface PlatformToolSummary {
+  id: string
+  ownerId: string
+  description: string
+  catalogVisibility: 'declared-only' | 'user-selectable'
+  status: 'registered' | 'unavailable' | 'auth-required' | 'conflict' | 'error' | 'disabled'
+  generation: number
+  unavailableReason?: string
+  action?: {
+    type: 'open-settings' | 'start-auth' | 'retry'
+    label: string
+  }
+}
+
 export interface PlatformSecretFieldValue {
   redacted: true
   hasValue: boolean
@@ -2312,6 +2343,8 @@ export interface PlatformSummary {
     message: string
     at: string
   }
+  desiredConfigRevision: number
+  appliedConfigRevision?: number
 }
 
 export interface PlatformDetail extends PlatformSummary {
@@ -2323,6 +2356,7 @@ export interface PlatformDetail extends PlatformSummary {
   settings: Record<string, unknown>
   runtimeStatus: PlatformRuntimeStatus
   runtimeSources?: PlatformRuntimeSourcesSummary
+  runtimeTools?: PlatformToolSummary[]
 }
 
 export interface PlatformConfigPatch {
@@ -2549,6 +2583,7 @@ export const nine1botConfigApi = {
     prompt?: string | null
     mcpServers?: string[] | null
     skills?: string[] | null
+    registeredTools?: string[] | null
   }): Promise<BrowserExtensionConfig> {
     const res = await fetchWithTimeout(`${BASE_URL}/config/nine1bot/browser-extension`, {
       method: 'PATCH',
@@ -2604,6 +2639,19 @@ export const platformApi = {
     }
     const data = await res.json()
     return Array.isArray(data.platforms) ? data.platforms : []
+  },
+
+  async tools(input: { agent?: string; templateIds?: string[] } = {}): Promise<PlatformToolSummary[]> {
+    const query = new URLSearchParams()
+    if (input.agent) query.set('agent', input.agent)
+    if (input.templateIds?.length) query.set('templateIds', input.templateIds.join(','))
+    const suffix = query.size ? `?${query}` : ''
+    const res = await fetchWithTimeout(`${BASE_URL}/nine1bot/platforms/tools${suffix}`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(data.error || `Failed to load platform tools: ${res.status}`)
+    }
+    return Array.isArray(data.tools) ? data.tools : []
   },
 
   async get(id: string): Promise<PlatformDetail> {

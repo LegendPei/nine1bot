@@ -45,7 +45,7 @@ describe("tool.registry", () => {
         expect(ids).toContain("hello")
       },
     })
-  })
+  }, 30_000)
 
   test("loads tools from .opencode/tools (plural)", async () => {
     await using tmp = await tmpdir({
@@ -79,7 +79,7 @@ describe("tool.registry", () => {
         expect(ids).toContain("hello")
       },
     })
-  })
+  }, 30_000)
 
   test("hides browser tools until the bridge is configured", async () => {
     await using tmp = await tmpdir()

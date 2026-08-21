@@ -3,7 +3,9 @@ import { streamSSE } from "hono/streaming"
 import { describeRoute, resolver, validator } from "hono-openapi"
 import { HTTPException } from "hono/http-exception"
 import z from "zod"
+import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
+import { MCP } from "@/mcp"
 import { Instance } from "@/project/instance"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
@@ -20,6 +22,8 @@ import { RuntimeResourceResolver } from "@/runtime/resource/resolver"
 import { ControllerTemplateResolver } from "@/runtime/controller/template-resolver"
 import { SessionProfileCompiler } from "@/runtime/session/profile-compiler"
 import { SessionRuntimeProfile } from "@/runtime/session/profile"
+import { RuntimeToolRegistry, RuntimeToolSelectionError } from "@/runtime/tool/registry"
+import { ToolRegistry } from "@/tool/registry"
 import { Log } from "@/util/log"
 import { lazy } from "@/util/lazy"
 import { NamedError } from "@opencode-ai/util/error"
@@ -41,6 +45,7 @@ type ControllerPromptBody = Omit<
 >
 
 async function capabilities(): Promise<RuntimeControllerProtocol.CapabilitiesResponse> {
+  const resourceResolver = await RuntimeFeatureFlags.resourceResolverEnabled()
   return {
     version: RuntimeControllerProtocol.VERSION,
     protocolVersions: [RuntimeControllerProtocol.VERSION],
@@ -48,7 +53,8 @@ async function capabilities(): Promise<RuntimeControllerProtocol.CapabilitiesRes
       controllerApi: true,
       sessionProfileSnapshots: await RuntimeFeatureFlags.profileSnapshotEnabled(),
       contextPipeline: await RuntimeFeatureFlags.contextPipelineEnabled(),
-      resourceResolver: await RuntimeFeatureFlags.resourceResolverEnabled(),
+      resourceResolver,
+      registeredTools: resourceResolver,
       sessionEvents: true,
       interactionEvents: true,
       artifactEvents: true,
@@ -144,6 +150,8 @@ function controllerMetricFailure(error: unknown) {
     busy = true
   } else if (error instanceof HTTPException) {
     status = error.status
+  } else if (error instanceof RuntimeToolSelectionError) {
+    status = 400
   } else if (error instanceof NamedError) {
     if (error instanceof Storage.NotFoundError) status = 404
     else if (error instanceof Provider.ModelNotFoundError) status = 400
@@ -217,7 +225,7 @@ function mergeBrowserExtensionResources(
   current: RuntimeControllerProtocol.ResourceSelection,
   config: BrowserExtensionConfig,
 ): RuntimeControllerProtocol.ResourceSelection {
-  if (!config.mcpServers?.length && !config.skills?.length) return current
+  if (!config.mcpServers?.length && !config.skills?.length && !config.registeredTools?.length) return current
 
   const merged: NonNullable<RuntimeControllerProtocol.ResourceSelection> = {
     ...(current ?? {}),
@@ -232,6 +240,21 @@ function mergeBrowserExtensionResources(
     merged.skills = {
       ...(merged.skills ?? {}),
       skills: unique([...(merged.skills?.skills ?? []), ...config.skills]),
+    }
+  }
+  if (config.registeredTools?.length) {
+    const registeredTools = config.registeredTools.filter((toolID) => {
+      const reference = RuntimeToolRegistry.get(toolID)
+      return Boolean(
+        reference?.owner.enabled &&
+        reference.definition.catalogVisibility === "user-selectable",
+      )
+    })
+    merged.registeredTools = {
+      tools: unique([
+        ...(merged.registeredTools?.tools ?? []),
+        ...registeredTools,
+      ]),
     }
   }
   return merged
@@ -262,7 +285,6 @@ export async function createControllerSession(input?: RuntimeControllerProtocol.
     directory: input?.directory ?? Instance.directory,
     permission,
     source: "new-session",
-    agentName: sessionChoice?.agent,
     profileTemplate: template.profileTemplate,
   })
   const session = await Session.createNext({
@@ -505,14 +527,35 @@ async function debugSession(sessionID: string) {
     RuntimeContextEvents.list({ sessionID, projectID: session.projectID }),
     Session.messages({ sessionID, limit: 20 }),
   ])
-  const resourceResolution = profileSnapshot
-    ? await RuntimeResourceResolver.resolve({
-        sessionID,
-        profile: profileSnapshot,
-        emitFailures: false,
-        emitResolved: false,
-      })
-    : undefined
+  let resourceResolution: RuntimeResourceResolver.Resolved | undefined
+  if (profileSnapshot) {
+    const profileAgent = await Agent.get(profileSnapshot.agent.name, {
+      includeDeclaredOnly: true,
+      includeRecommendable: true,
+    })
+    const ruleset = profileAgent
+      ? PermissionNext.merge(profileAgent.permission, session.permission ?? [])
+      : undefined
+    const preliminary = await RuntimeResourceResolver.resolve({
+      sessionID,
+      profile: profileSnapshot,
+      projectID: session.projectID,
+      directory: session.directory,
+      agent: profileSnapshot.agent.name,
+      templateIds: profileSnapshot.sourceTemplateIds,
+      isToolExposureDenied: (toolID) => !ruleset || PermissionNext.disabled([toolID], ruleset).has(toolID),
+      emitFailures: false,
+      emitResolved: false,
+    })
+    const [nativeToolIDs, mcpTools] = await Promise.all([
+      ToolRegistry.ids(),
+      MCP.tools({ servers: preliminary.mcp.availableServers }),
+    ])
+    resourceResolution = RuntimeResourceResolver.applyToolConflicts(
+      preliminary,
+      new Set([...nativeToolIDs, ...Object.keys(mcpTools)]),
+    )
+  }
   return {
     version: RuntimeControllerProtocol.VERSION,
     sessionId: sessionID,
@@ -525,6 +568,16 @@ async function debugSession(sessionID: string) {
     },
     profileSnapshot,
     resourceAudit: resourceResolution?.audit,
+    registeredTools: {
+      declared: resourceResolution?.audit.declared.registeredTools ?? [],
+      resolved: resourceResolution?.registeredTools.availableTools.map((tool) => ({
+        id: tool.id,
+        ownerId: tool.ownerID,
+        generation: tool.generation,
+        status: tool.availability.status,
+        reason: tool.availability.reason,
+      })) ?? [],
+    },
     contextEvents,
     recentMessages: messages.map((message) => ({
       id: message.info.id,
@@ -593,17 +646,27 @@ export const Nine1BotAgentRoutes = lazy(() =>
       validator("json", RuntimeControllerProtocol.TemplateResolveRequest),
       async (c) => {
         const body = c.req.valid("json")
-        const result = await withControllerMetrics({
-          route: "/nine1bot/agent/templates/resolve",
-          method: c.req.method,
-          entry: body?.entry,
-          protocolVersion: RuntimeControllerProtocol.VERSION,
-          run: async () => ({
-            status: 200,
-            body: await resolveTemplate(body),
-          }),
-        })
-        return c.json(result.body, result.status as never)
+        try {
+          const result = await withControllerMetrics({
+            route: "/nine1bot/agent/templates/resolve",
+            method: c.req.method,
+            entry: body?.entry,
+            protocolVersion: RuntimeControllerProtocol.VERSION,
+            run: async () => ({
+              status: 200,
+              body: await resolveTemplate(body),
+            }),
+          })
+          return c.json(result.body, result.status as never)
+        } catch (error) {
+          if (error instanceof RuntimeToolSelectionError) {
+            return c.json({
+              error: "Some registered tools cannot be selected for this session.",
+              invalid: error.invalid,
+            }, 400)
+          }
+          throw error
+        }
       },
     )
     .post(
@@ -611,18 +674,28 @@ export const Nine1BotAgentRoutes = lazy(() =>
       validator("json", RuntimeControllerProtocol.SessionCreateRequest),
       async (c) => {
         const body = c.req.valid("json")
-        const result = await withControllerMetrics({
-          route: "/nine1bot/agent/sessions",
-          method: c.req.method,
-          entry: body?.entry,
-          protocolVersion: RuntimeControllerProtocol.VERSION,
-          run: async () => ({
-            status: 200,
-            accepted: true,
-            body: await createControllerSession(body),
-          }),
-        })
-        return c.json(result.body, result.status as never)
+        try {
+          const result = await withControllerMetrics({
+            route: "/nine1bot/agent/sessions",
+            method: c.req.method,
+            entry: body?.entry,
+            protocolVersion: RuntimeControllerProtocol.VERSION,
+            run: async () => ({
+              status: 200,
+              accepted: true,
+              body: await createControllerSession(body),
+            }),
+          })
+          return c.json(result.body, result.status as never)
+        } catch (error) {
+          if (error instanceof RuntimeToolSelectionError) {
+            return c.json({
+              error: "Some registered tools cannot be selected for this session.",
+              invalid: error.invalid,
+            }, 400)
+          }
+          throw error
+        }
       },
     )
     .post(
