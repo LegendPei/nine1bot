@@ -186,7 +186,25 @@ const gitLabProjectProfileDocument = computed(() => parseGitLabProjectProfileDoc
 const gitLabProjectProfileDiagnostics = computed(() => validateGitLabProjectProfileDocument(gitLabProjectProfileDocument.value))
 const gitLabProjectProfiles = computed(() => gitLabProjectProfileDocument.value.editable.map((entry) => entry.profile))
 const gitLabProjectProfileFormError = computed(() => gitLabProjectProfilesValidationError())
-const gitLabProfileSaveBlocked = computed(() => isGitLabPlatform.value && Boolean(gitLabProjectProfileFormError.value))
+const gitLabDeactivationSave = computed(() => {
+  const platform = props.selectedPlatform
+  if (!isGitLabPlatform.value || !platform) return false
+  const disablesPlatform = platform.enabled && !enabledDraft.value
+  const disablesReview = platform.settings['review.enabled'] === true && formValues['review.enabled'] === false
+  return disablesPlatform || disablesReview
+})
+const gitLabProfileValidationRequired = computed(() => isGitLabPlatform.value && !gitLabDeactivationSave.value)
+const gitLabProfileSaveBlocked = computed(() => (
+  gitLabProfileValidationRequired.value && Boolean(gitLabProjectProfileFormError.value)
+))
+const gitLabSaveError = computed(() => {
+  if (!isGitLabPlatform.value) return ''
+  const fieldError = Object.entries(jsonErrors).find(([key]) => (
+    key !== gitLabProjectProfilesFieldKey || gitLabProfileValidationRequired.value
+  ))?.[1]
+  if (fieldError) return fieldError
+  return gitLabProfileValidationRequired.value ? gitLabProjectProfileFormError.value : ''
+})
 const gitLabScopeMode = computed(() => textValue(gitLabScopeModeFieldKey) || 'all-received')
 const gitLabRuntimeWebhookUrl = computed(() => {
   const actionWebhookUrl = props.actionResult?.data?.webhookUrl
@@ -772,6 +790,9 @@ function buildSettingsPatch() {
   for (const key of Object.keys(jsonErrors)) delete jsonErrors[key]
 
   for (const field of configFields.value) {
+    if (isGitLabPlatform.value && gitLabDeactivationSave.value && field.key === gitLabProjectProfilesFieldKey) {
+      continue
+    }
     const parsed = parseField(field)
     if (parsed.error) {
       jsonErrors[field.key] = parsed.error
@@ -780,7 +801,11 @@ function buildSettingsPatch() {
     if (parsed.include) settings[field.key] = parsed.value
   }
 
-  if (isGitLabPlatform.value && !jsonErrors[gitLabProjectProfilesFieldKey]) {
+  if (
+    isGitLabPlatform.value
+    && gitLabProfileValidationRequired.value
+    && !jsonErrors[gitLabProjectProfilesFieldKey]
+  ) {
     const serialized = serializeGitLabProjectProfileDocument(gitLabProjectProfileDocument.value)
     if (!serialized.ok) {
       jsonErrors[gitLabProjectProfilesFieldKey] = gitLabProjectProfileDiagnosticLabel(serialized.diagnostics[0])
@@ -1189,6 +1214,9 @@ function actionResultDetails(result: PlatformActionResult) {
                   <Save :size="13" />
                   <span>{{ saving ? '保存中' : '保存 MVP 配置' }}</span>
                 </button>
+                <span v-if="gitLabSaveError" class="platform-field-error gitlab-save-error" role="alert">
+                  {{ gitLabSaveError }}
+                </span>
                 <button type="button" class="btn btn-ghost btn-sm" :disabled="operationLocked" @click="runGitLabAction('connection.test')">
                   <Play :size="13" />
                   <span>{{ actionRunning === 'connection.test' ? '测试中' : '测试 API token' }}</span>
@@ -1820,6 +1848,9 @@ function actionResultDetails(result: PlatformActionResult) {
                 <Save :size="14" />
                 <span>{{ saving ? '保存中' : '保存配置' }}</span>
               </button>
+              <span v-if="gitLabSaveError" class="platform-field-error gitlab-save-error" role="alert">
+                {{ gitLabSaveError }}
+              </span>
             </div>
           </form>
 

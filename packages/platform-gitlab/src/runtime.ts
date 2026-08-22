@@ -1,9 +1,9 @@
 import {
   asRecord,
   gitLabTemplateIdsForPage,
-  isGitLabPagePayload,
   normalizeGitLabPagePayload,
   parseGitLabUrl,
+  type GitLabHostPolicy,
 } from './shared'
 import { randomBytes } from 'node:crypto'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
@@ -20,6 +20,7 @@ import {
   normalizeGitLabReviewSettings,
 } from './review/settings'
 import type {
+  AnyPlatformToolDefinition,
   PlatformActionResult,
   PlatformAdapterContext,
   PlatformAdapterContribution,
@@ -269,7 +270,7 @@ export const gitlabPlatformDescriptor = {
 export const gitlabPlatformContribution = {
   descriptor: gitlabPlatformDescriptor,
   runtime: {
-    createAdapter: createGitLabPlatformAdapter,
+    createAdapter: (ctx) => createGitLabPlatformAdapter(ctx.settings),
     sources: (ctx) => ({
       agents: [
         {
@@ -291,11 +292,11 @@ export const gitlabPlatformContribution = {
       ],
     }),
     tools: (ctx: PlatformAdapterContext) => {
-      const settings = normalizeGitLabReviewSettings(ctx.settings)
-      return createGitLabCliPlatformTools({
-        allowedHosts: settings.allowedHosts,
-        allowedHostsInvalid: settings.configurationErrors.includes('allowed_hosts_invalid'),
-      })
+      const hostPolicy = effectiveGitLabHostPolicy(ctx.settings)
+      return applyGitLabHostPolicyToCliTargetResolution(createGitLabCliPlatformTools({
+        allowedHosts: [...hostPolicy.allowedHosts],
+        allowedHostsInvalid: hostPolicy.allowedHostsInvalid,
+      }), hostPolicy)
     },
   },
   getStatus: getGitLabPlatformStatus,
@@ -303,19 +304,20 @@ export const gitlabPlatformContribution = {
   handleAction: handleGitLabPlatformAction,
 } satisfies PlatformAdapterContribution
 
-export function createGitLabPlatformAdapter(): GitLabPlatformAdapter {
+export function createGitLabPlatformAdapter(settingsInput?: unknown): GitLabPlatformAdapter {
+  const hostPolicy = effectiveGitLabHostPolicy(settingsInput)
   return {
     id: 'gitlab',
-    matchPage: isGitLabPagePayload,
-    normalizePage: normalizeGitLabPagePayload,
-    blocksFromPage: buildGitLabContextBlocks,
+    matchPage: (page) => Boolean(normalizeGitLabPagePayload(page, hostPolicy)),
+    normalizePage: (page) => normalizeGitLabPagePayload(page, hostPolicy),
+    blocksFromPage: (page, observedAt) => buildGitLabContextBlocks(page, observedAt, hostPolicy),
     inferTemplateIds(input) {
       if (input.entry?.platform !== 'gitlab' && !input.page) return []
-      const ids = gitLabTemplateIdsForPage(input.page)
-      return ids.length > 0 || input.entry?.platform !== 'gitlab' ? ids : ['browser-gitlab']
+      if (input.page) return gitLabTemplateIdsForPage(input.page, hostPolicy)
+      return ['browser-gitlab']
     },
     templateContextBlocks(input) {
-      return buildGitLabTemplateContextBlocks(input.templateIds, input.page)
+      return buildGitLabTemplateContextBlocks(input.templateIds, input.page, hostPolicy)
     },
     resourceContributions(input) {
       if (!input.templateIds.some((templateId) => templateId === 'browser-gitlab' || templateId.startsWith('gitlab-'))) {
@@ -409,7 +411,10 @@ async function getGitLabPlatformStatus(ctx: PlatformAdapterContext): Promise<Pla
   }
 }
 
-async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<PlatformValidationResult> {
+async function validateGitLabPlatformConfig(
+  settingsInput: unknown,
+  ctx?: PlatformAdapterContext,
+): Promise<PlatformValidationResult> {
   const settings = normalizeGitLabReviewSettings(settingsInput)
   const fieldErrors: Record<string, string> = {}
 
@@ -417,7 +422,7 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
     fieldErrors.allowedHosts = 'Allowed GitLab hosts must contain only valid host or host:port values.'
   }
 
-  if (settings.enabled) {
+  if (settings.enabled && ctx?.enabled !== false) {
     if (!settings.tokenSecretRef) fieldErrors['review.tokenSecretRef'] = 'GitLab API token is required when code review is enabled.'
     if (settings.baseUrl && !isHttpUrl(settings.baseUrl)) fieldErrors['review.baseUrl'] = 'GitLab base URL must be an http(s) URL.'
     if (!settings.botMention.trim().startsWith('@')) fieldErrors['review.botMention'] = 'Bot mention must start with @.'
@@ -1128,8 +1133,12 @@ async function resolveOrCreateGitLabWebhookSecret(
   return generated
 }
 
-function buildGitLabContextBlocks(page: PageContextPayload, observedAt: number): PlatformContextBlock[] | undefined {
-  const adapted = normalizeGitLabPagePayload(page)
+function buildGitLabContextBlocks(
+  page: PageContextPayload,
+  observedAt: number,
+  hostPolicy?: GitLabHostPolicy,
+): PlatformContextBlock[] | undefined {
+  const adapted = normalizeGitLabPagePayload(page, hostPolicy)
   if (!adapted) return undefined
   const gitlab = asRecord(adapted.raw?.gitlab)
   const pageType = adapted.pageType ?? 'gitlab-repo'
@@ -1179,8 +1188,12 @@ function buildGitLabContextBlocks(page: PageContextPayload, observedAt: number):
   return blocks
 }
 
-function buildGitLabTemplateContextBlocks(templateIds: string[], page?: PageContextPayload): PlatformContextBlock[] {
-  const normalizedPage = page ? normalizeGitLabPagePayload(page) : undefined
+function buildGitLabTemplateContextBlocks(
+  templateIds: string[],
+  page?: PageContextPayload,
+  hostPolicy?: GitLabHostPolicy,
+): PlatformContextBlock[] {
+  const normalizedPage = page ? normalizeGitLabPagePayload(page, hostPolicy) : undefined
   const blocks: PlatformContextBlock[] = []
   for (const templateId of templateIds) {
     if (templateId === 'browser-gitlab') {
@@ -1310,6 +1323,113 @@ function emptyResources(
       mergeMode: 'additive-only',
     },
   }
+}
+
+function effectiveGitLabHostPolicy(settingsInput: unknown): GitLabHostPolicy {
+  const settings = normalizeGitLabReviewSettings(settingsInput)
+  if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
+    return { allowedHosts: [], allowedHostsInvalid: true }
+  }
+  if (settings.allowedHosts.length > 0) {
+    return { allowedHosts: settings.allowedHosts }
+  }
+
+  const baseUrl = settings.baseUrl
+  if (baseUrl) {
+    try {
+      const url = new URL(baseUrl)
+      if (
+        (url.protocol === 'http:' || url.protocol === 'https:')
+        && !url.username
+        && !url.password
+        && url.hostname
+      ) {
+        return { allowedHosts: [url.host.toLowerCase()] }
+      }
+    } catch {
+      // Invalid base URLs use the public GitLab default until review validation reports the field error.
+    }
+  }
+  return { allowedHosts: ['gitlab.com'] }
+}
+
+function applyGitLabHostPolicyToCliTargetResolution(
+  tools: AnyPlatformToolDefinition[],
+  hostPolicy: GitLabHostPolicy,
+) {
+  return tools.map((tool) => {
+    if (tool.id !== gitLabCliToolIds.resolveTarget) return tool
+    return {
+      ...tool,
+      parse(input: unknown) {
+        return withGitLabCliResolutionPage(tool.parse(input), hostPolicy)
+      },
+    }
+  })
+}
+
+function withGitLabCliResolutionPage(input: unknown, hostPolicy: GitLabHostPolicy) {
+  const record = asRecord(input)
+  if (!record) return input
+
+  const explicitUrl = stringValue(record.url)
+  if (explicitUrl) {
+    const parsed = parseGitLabUrl(explicitUrl, hostPolicy)
+    return parsed ? gitLabCliResolutionInputWithPage(record, explicitUrl, parsed) : input
+  }
+
+  const page = asRecord(record.page)
+  const rawGitLab = asRecord(asRecord(page?.raw)?.gitlab)
+  if (parseGitLabUrl(stringValue(page?.url)) || stringValue(rawGitLab?.projectPath)) return input
+
+  const text = stringValue(record.text)
+  for (const url of gitLabUrlsFromText(text)) {
+    const parsed = parseGitLabUrl(url, hostPolicy)
+    if (parsed) return gitLabCliResolutionInputWithPage(record, url, parsed)
+    if (parseGitLabUrl(url)) return input
+  }
+
+  if (hostPolicy.allowedHostsInvalid || hostPolicy.allowedHosts.length !== 1 || !text) return input
+  const shorthand = text.match(/(?<![\w.-])((?:[\w.-]+\/)+[\w.-]+)!(\d+)\b/)
+  const projectPath = shorthand?.[1]
+  const iid = shorthand?.[2]
+  if (!projectPath || !iid) return input
+  const url = `https://${hostPolicy.allowedHosts[0]}/${projectPath}/-/merge_requests/${iid}`
+  const parsed = parseGitLabUrl(url, hostPolicy)
+  return parsed ? gitLabCliResolutionInputWithPage(record, url, parsed) : input
+}
+
+function gitLabCliResolutionInputWithPage(
+  record: Record<string, unknown>,
+  url: string,
+  parsed: NonNullable<ReturnType<typeof parseGitLabUrl>>,
+) {
+  return {
+    ...record,
+    url: undefined,
+    page: {
+      platform: 'gitlab',
+      url,
+      title: 'GitLab target',
+      pageType: parsed.pageType,
+      objectKey: parsed.objectKey,
+      raw: {
+        gitlab: {
+          host: parsed.host,
+          projectPath: parsed.projectPath,
+          route: parsed.route,
+          iid: parsed.iid,
+          sha: parsed.sha,
+        },
+      },
+    },
+  }
+}
+
+function gitLabUrlsFromText(input?: string) {
+  if (!input) return []
+  const matches = input.match(/https?:\/\/[^\s<>"'`，。；、]+/g) ?? []
+  return matches.map((url) => url.replace(/[),.;]+$/, ''))
 }
 
 let cliStatusCache: { status: GitLabCliStatus; expiresAt: number } | undefined

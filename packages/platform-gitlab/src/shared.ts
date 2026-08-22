@@ -1,6 +1,11 @@
 import type { GitLabUrlInfo, PageContextPayload } from './types'
 
-export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
+export type GitLabHostPolicy = {
+  allowedHosts: readonly string[]
+  allowedHostsInvalid?: boolean
+}
+
+export function parseGitLabUrl(input?: string, hostPolicy?: GitLabHostPolicy): GitLabUrlInfo | undefined {
   if (!input) return undefined
 
   let url: URL
@@ -10,7 +15,12 @@ export function parseGitLabUrl(input?: string): GitLabUrlInfo | undefined {
     return undefined
   }
 
-  if (!isLikelyGitLabHost(url.hostname)) return undefined
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:')
+    || url.username
+    || url.password
+    || !isGitLabHostAllowed(url.host, hostPolicy)
+  ) return undefined
 
   let parts: string[]
   try {
@@ -114,8 +124,8 @@ export function buildGitLabPageContextPayload(input: {
   selection?: string
   visibleSummary?: string
   raw?: Record<string, unknown>
-}): PageContextPayload {
-  const gitlab = parseGitLabUrl(input.url)
+}, hostPolicy?: GitLabHostPolicy): PageContextPayload {
+  const gitlab = parseGitLabUrl(input.url, hostPolicy)
   if (!gitlab) {
     return {
       platform: 'generic-browser',
@@ -152,10 +162,13 @@ export function buildGitLabPageContextPayload(input: {
   }
 }
 
-export function normalizeGitLabPagePayload(page: PageContextPayload): PageContextPayload | undefined {
-  const parsed = parseGitLabUrl(page.url)
+export function normalizeGitLabPagePayload(
+  page: PageContextPayload,
+  hostPolicy?: GitLabHostPolicy,
+): PageContextPayload | undefined {
+  const parsed = parseGitLabUrl(page.url, hostPolicy)
   if (!parsed && page.platform !== 'gitlab') return undefined
-  const gitlab = parsed ?? gitLabInfoFromRaw(page)
+  const gitlab = parsed ?? gitLabInfoFromRaw(page, hostPolicy)
   if (!gitlab) return undefined
 
   return {
@@ -180,16 +193,24 @@ export function normalizeGitLabPagePayload(page: PageContextPayload): PageContex
   }
 }
 
-export function gitLabTemplateIdsForPage(page?: Pick<PageContextPayload, 'platform' | 'pageType' | 'url'>): string[] {
-  const normalized = page ? normalizeGitLabPagePayload(page as PageContextPayload) : undefined
+export function gitLabTemplateIdsForPage(
+  page?: Pick<PageContextPayload, 'platform' | 'pageType' | 'url'>,
+  hostPolicy?: GitLabHostPolicy,
+): string[] {
+  const normalized = page ? normalizeGitLabPagePayload(page as PageContextPayload, hostPolicy) : undefined
   if (!normalized) return []
   const ids = ['browser-gitlab']
   if (normalized.pageType?.startsWith('gitlab-')) ids.push(normalized.pageType)
   return ids
 }
 
-export function isGitLabPagePayload(page?: Pick<PageContextPayload, 'platform' | 'url'>): boolean {
-  return Boolean(page && (page.platform === 'gitlab' || parseGitLabUrl(page.url)))
+export function isGitLabPagePayload(
+  page?: Pick<PageContextPayload, 'platform' | 'url'>,
+  hostPolicy?: GitLabHostPolicy,
+): boolean {
+  if (!page) return false
+  if (parseGitLabUrl(page.url, hostPolicy)) return true
+  return page.platform === 'gitlab' && isGitLabPageUrlAllowed(page.url, hostPolicy)
 }
 
 export function trimText(input: string | undefined, maxLength: number): string | undefined {
@@ -207,16 +228,36 @@ function isLikelyGitLabHost(hostname: string) {
   return normalized === 'gitlab.com' || normalized.includes('gitlab')
 }
 
+function isGitLabHostAllowed(authority: string, hostPolicy?: GitLabHostPolicy) {
+  if (!hostPolicy) return isLikelyGitLabHost(authority.split(':')[0] ?? authority)
+  if (hostPolicy.allowedHostsInvalid) return false
+
+  const normalizedAuthority = normalizeGitLabAuthority(authority)
+  if (!normalizedAuthority) return false
+  const allowedHosts = hostPolicy.allowedHosts.length > 0 ? hostPolicy.allowedHosts : ['gitlab.com']
+  const normalizedAllowedHosts = allowedHosts.map(normalizeGitLabAuthority)
+  if (normalizedAllowedHosts.some((host) => !host)) return false
+  return normalizedAllowedHosts.includes(normalizedAuthority)
+}
+
+function isGitLabPageUrlAllowed(input: string | undefined, hostPolicy?: GitLabHostPolicy) {
+  const authority = gitLabAuthorityFromUrl(input)
+  return Boolean(authority && isGitLabHostAllowed(authority, hostPolicy))
+}
+
 function objectKey(host: string, projectPath: string, ...parts: Array<string | undefined>) {
   return [host, projectPath, ...parts.filter((part) => part && part.trim())].join(':')
 }
 
-function gitLabInfoFromRaw(page: PageContextPayload): GitLabUrlInfo | undefined {
+function gitLabInfoFromRaw(page: PageContextPayload, hostPolicy?: GitLabHostPolicy): GitLabUrlInfo | undefined {
   const raw = asRecord(page.raw?.gitlab)
-  const host = stringValue(raw?.host)
+  const host = normalizeGitLabAuthority(stringValue(raw?.host))
   const projectPath = stringValue(raw?.projectPath)
   const route = stringValue(raw?.route)
-  if (!host || !projectPath) return undefined
+  if (!host || !projectPath || !isGitLabHostAllowed(host, hostPolicy)) return undefined
+
+  const pageAuthority = gitLabAuthorityFromUrl(page.url)
+  if (pageAuthority && pageAuthority !== host) return undefined
 
   const pageType = page.pageType?.startsWith('gitlab-')
     ? page.pageType as GitLabUrlInfo['pageType']
@@ -246,4 +287,37 @@ function gitLabInfoFromRaw(page: PageContextPayload): GitLabUrlInfo | undefined 
 
 function stringValue(input: unknown): string | undefined {
   return typeof input === 'string' && input.trim() ? input : undefined
+}
+
+function normalizeGitLabAuthority(input?: string) {
+  if (!input?.trim()) return undefined
+  const value = input.trim()
+  try {
+    const url = new URL(value.includes('://') ? value : `https://${value}`)
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || url.username
+      || url.password
+      || !url.hostname
+    ) return undefined
+    return url.host.toLowerCase()
+  } catch {
+    return undefined
+  }
+}
+
+function gitLabAuthorityFromUrl(input?: string) {
+  if (!input) return undefined
+  try {
+    const url = new URL(input)
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || url.username
+      || url.password
+      || !url.hostname
+    ) return undefined
+    return url.host.toLowerCase()
+  } catch {
+    return undefined
+  }
 }
