@@ -134,7 +134,7 @@ describe('GitLab CLI platform tools', () => {
       calls.push({ args, cwd: options?.cwd, signal: options?.signal })
       const key = args.join(' ')
       if (key === '--version') return runResult(args, 'glab version 1.45.0')
-      if (key === 'auth status') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
+      if (key === 'auth status --hostname gitlab.example.com') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
       if (key === 'api projects/root%2Fproject --hostname gitlab.example.com') {
         return runResult(args, JSON.stringify({
           path_with_namespace: 'root/project',
@@ -161,11 +161,72 @@ describe('GitLab CLI platform tools', () => {
     expect(result.status).toBe('ok')
     expect(calls.map((call) => call.args.join(' '))).toEqual([
       '--version',
-      'auth status',
+      'auth status --hostname gitlab.example.com',
       'api projects/root%2Fproject --hostname gitlab.example.com',
     ])
     expect(calls.every((call) => call.cwd === context.directory)).toBe(true)
     expect(calls.every((call) => call.signal === controller.signal)).toBe(true)
+  })
+
+  test('scopes authentication status caching by directory and target host', async () => {
+    const calls: string[] = []
+    const runner: GitLabCliRunner = async (args) => {
+      const command = args.join(' ')
+      calls.push(command)
+      if (command === '--version') return runResult(args, 'glab version 1.45.0')
+      if (command.startsWith('auth status --hostname gitlab.')) {
+        const host = command.split(' ').at(-1)
+        return runResult(args, `${host}\n Logged in as @nine1bot`)
+      }
+      if (command.startsWith('api projects/root%2Fproject --hostname gitlab.')) {
+        return runResult(args, JSON.stringify({ path_with_namespace: 'root/project' }))
+      }
+      return runResult(args, '', `unexpected command: ${command}`, 1)
+    }
+    const tool = requiredTool(
+      createGitLabCliPlatformTools({ runner, statusCacheTtlMs: 60_000 }),
+      gitLabCliToolIds.projectSnapshot,
+    )
+    const context = callContext()
+
+    for (const host of ['gitlab.one.example', 'gitlab.two.example', 'gitlab.one.example']) {
+      const result = await tool.execute(tool.parse({
+        target: { kind: 'project', host, projectPath: 'root/project' },
+      }), context)
+      expect(result.status).toBe('ok')
+    }
+
+    expect(calls.filter((command) => command.startsWith('auth status'))).toEqual([
+      'auth status --hostname gitlab.one.example',
+      'auth status --hostname gitlab.two.example',
+    ])
+  })
+
+  test('keeps the status tool as a current-context diagnostic cache', async () => {
+    const calls: string[] = []
+    const runner: GitLabCliRunner = async (args) => {
+      const command = args.join(' ')
+      calls.push(command)
+      if (command === '--version') return runResult(args, 'glab version 1.45.0')
+      if (command === 'auth status') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
+      return runResult(args, '', `unexpected command: ${command}`, 1)
+    }
+    const tools = createGitLabCliPlatformTools({ runner, statusCacheTtlMs: 60_000 })
+    const statusTool = requiredTool(tools, gitLabCliToolIds.status)
+    const projectTool = requiredTool(tools, gitLabCliToolIds.projectSnapshot)
+    const context = callContext()
+
+    const status = await statusTool.execute(statusTool.parse({}), context)
+    const availability = await projectTool.availability?.({
+      sessionId: context.sessionId,
+      directory: context.directory,
+      agent: context.agent,
+      templateIds: context.templateIds,
+    })
+
+    expect(status.status).toBe('ok')
+    expect(availability).toMatchObject({ status: 'available' })
+    expect(calls).toEqual(['--version', 'auth status'])
   })
 
   test('returns auth-required without attempting API calls when glab is logged out', async () => {
@@ -174,7 +235,7 @@ describe('GitLab CLI platform tools', () => {
       const key = args.join(' ')
       calls.push(key)
       if (key === '--version') return runResult(args, 'glab version 1.45.0')
-      if (key === 'auth status') return runResult(args, '', 'not logged in', 1)
+      if (key === 'auth status --hostname gitlab.example.com') return runResult(args, '', 'not logged in', 1)
       return runResult(args, '', 'unexpected API call', 1)
     }
     const tool = requiredTool(createGitLabCliPlatformTools({ runner }), gitLabCliToolIds.mrSnapshot)
@@ -188,7 +249,7 @@ describe('GitLab CLI platform tools', () => {
       code: 'gitlab-cli-auth-required',
       recoverable: true,
     })
-    expect(calls).toEqual(['--version', 'auth status'])
+    expect(calls).toEqual(['--version', 'auth status --hostname gitlab.example.com'])
   })
 
   test('allows publishing dry-run previews without GitLab CLI availability', async () => {
@@ -230,7 +291,7 @@ describe('GitLab CLI platform tools', () => {
     const runner: GitLabCliRunner = async (args) => {
       const key = args.join(' ')
       if (key === '--version') return runResult(args, 'glab version 1.45.0')
-      if (key === 'auth status') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
+      if (key === 'auth status --hostname gitlab.example.com') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
       if (key === 'api projects/root%2Fproject/merge_requests/42/changes --hostname gitlab.example.com') {
         return runResult(args, JSON.stringify({
           changes: [{
@@ -269,7 +330,7 @@ describe('GitLab CLI platform tools', () => {
     const runner: GitLabCliRunner = async (args) => {
       const key = args.join(' ')
       if (key === '--version') return runResult(args, 'glab version 1.45.0')
-      if (key === 'auth status') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
+      if (key === 'auth status --hostname gitlab.example.com') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
       return runResult(args, '', 'token=glpat-secret command failed', 1)
     }
     const tool = requiredTool(createGitLabCliPlatformTools({ runner }), gitLabCliToolIds.projectSnapshot)
@@ -290,7 +351,7 @@ describe('GitLab CLI platform tools', () => {
     const runner: GitLabCliRunner = async (args) => {
       const key = args.join(' ')
       if (key === '--version') return runResult(args, 'glab version 1.45.0')
-      if (key === 'auth status') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
+      if (key === 'auth status --hostname gitlab.example.com') return runResult(args, 'gitlab.example.com\n Logged in as @nine1bot')
       return runResult(args, '', 'request timed out after the server accepted data', 1)
     }
     const tool = requiredTool(createGitLabCliPlatformTools({ runner }), gitLabCliToolIds.publishReviewNote)

@@ -111,19 +111,22 @@ export function createGitLabCliClient(options: GitLabCliClientOptions = {}) {
       maxBytes?: number
     }): Promise<GitLabBoundedDiff> {
       assertValidGitLabTarget(input.target)
-      const changes = arrayValue(await runApi(
-        input.target,
-        `${projectEndpoint(input.target.projectPath)}/repository/commits/${encodeURIComponent(input.target.sha)}/diff`,
-      ))
-      const manifest = buildCliDiffManifest(changes, {
-        maxFiles: input.maxFiles,
+      const maxFiles = boundedInteger(input.maxFiles, 20, 1, 24)
+      const commitDiff = await readBoundedCommitDiff(runApi, input.target, maxFiles)
+      const manifest = buildCliDiffManifest(commitDiff.changes, {
+        maxFiles,
         maxBytes: input.maxBytes,
       })
+      if (commitDiff.additionalFilesOmitted || commitDiff.gitLabDiffLimited) manifest.stats.truncated = true
       return {
         target: input.target,
         manifest,
         truncated: Boolean(manifest.blocked || manifest.stats.truncated || manifest.stats.skippedFileCount > 0),
-        coverage: diffCoverage(manifest.files.length, manifest.stats.skippedFileCount, manifest.blocked),
+        coverage: diffCoverage(manifest.files.length, manifest.stats.skippedFileCount, manifest.blocked, {
+          additionalCommitFiles: commitDiff.additionalFilesOmitted,
+          gitLabDiffLimited: commitDiff.gitLabDiffLimited,
+          maxFiles,
+        }),
       }
     },
 
@@ -230,6 +233,42 @@ export function createGitLabCliClient(options: GitLabCliClientOptions = {}) {
 
 function projectEndpoint(projectPath: string) {
   return `projects/${encodeURIComponent(projectPath)}`
+}
+
+async function readBoundedCommitDiff(
+  runApi: (target: { host?: string } | undefined, endpoint: string) => Promise<unknown>,
+  target: Extract<GitLabTarget, { kind: 'commit' }>,
+  maxFiles: number,
+) {
+  const endpoint = `${projectEndpoint(target.projectPath)}/repository/commits/${encodeURIComponent(target.sha)}/diff`
+  const fetchLimit = maxFiles + 1
+  const changes: unknown[] = []
+  let page = 1
+  let responseExceededRequest = false
+  let gitLabDiffLimited = false
+
+  while (changes.length < fetchLimit) {
+    const perPage = Math.min(100, fetchLimit - changes.length)
+    const params = new URLSearchParams({ page: String(page), per_page: String(perPage) })
+    const pageChanges = arrayValue(await runApi(target, `${endpoint}?${params}`))
+    gitLabDiffLimited ||= pageChanges.some(isGitLabLimitedDiff)
+    const remaining = fetchLimit - changes.length
+    changes.push(...pageChanges.slice(0, remaining))
+    responseExceededRequest ||= pageChanges.length > remaining
+    if (changes.length >= fetchLimit || pageChanges.length < perPage) break
+    page += 1
+  }
+
+  return {
+    changes,
+    additionalFilesOmitted: changes.length > maxFiles || responseExceededRequest,
+    gitLabDiffLimited,
+  }
+}
+
+function isGitLabLimitedDiff(input: unknown) {
+  const change = recordOrUndefined(input)
+  return change?.collapsed === true || change?.too_large === true || change?.overflow === true
 }
 
 async function readRootTree(
@@ -463,9 +502,23 @@ function arrayValue(input: unknown): unknown[] {
   throw new ToolError('invalid_output', 'GitLab CLI returned an unexpected JSON array.', undefined)
 }
 
-function diffCoverage(included: number, skipped: number, blocked?: boolean) {
+function diffCoverage(
+  included: number,
+  skipped: number,
+  blocked?: boolean,
+  options: { additionalCommitFiles?: boolean; gitLabDiffLimited?: boolean; maxFiles?: number } = {},
+) {
   if (blocked) return 'Diff review context is blocked because GitLab reported overflow or configured limits were exceeded.'
-  return `Included ${included} changed file(s); skipped ${skipped}.`
+  const lines = [options.additionalCommitFiles
+    ? `Included ${included} changed file(s); skipped at least ${skipped}.`
+    : `Included ${included} changed file(s); skipped ${skipped}.`]
+  if (options.additionalCommitFiles) {
+    lines.push(`Additional commit diff files were omitted after the local ${options.maxFiles}-file limit.`)
+  }
+  if (options.gitLabDiffLimited) {
+    lines.push('GitLab diff limits omitted content for one or more commit files.')
+  }
+  return lines.join(' ')
 }
 
 function repositoryHealthCoverage(input: {

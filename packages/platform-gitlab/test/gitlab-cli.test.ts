@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { chmod, copyFile, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import {
   createGitLabCliClient,
+  createGlabRunner,
   getGitLabCliStatus,
   gitLabCliMaxOutputBytes,
   resolveGitLabTarget,
@@ -9,6 +13,171 @@ import {
 } from '../src/cli'
 
 describe('GitLab CLI capability layer', () => {
+  test('resolves glab once from trusted PATH without selecting the repository cwd', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-glab-path-'))
+    const repository = join(root, 'repository')
+    const trustedBin = join(root, 'trusted-bin')
+    const executableName = process.platform === 'win32' ? 'glab.exe' : 'glab'
+    const repositoryCandidate = join(repository, executableName)
+    const trustedCandidate = join(trustedBin, executableName)
+    try {
+      await mkdir(repository)
+      await mkdir(trustedBin)
+      await copyFile(process.execPath, repositoryCandidate)
+      await copyFile(process.execPath, trustedCandidate)
+      if (process.platform !== 'win32') {
+        await chmod(repositoryCandidate, 0o755)
+        await chmod(trustedCandidate, 0o755)
+      }
+      const trustedExecutable = await realpath(trustedCandidate)
+      const executions: Array<{ executable: string; cwd?: string }> = []
+      const runner = createGlabRunner({
+        env: { PATH: [repository, trustedBin].join(delimiter) },
+        execute: async (request) => {
+          executions.push({ executable: request.executable, cwd: request.cwd })
+          return { stdout: 'glab version 1.45.0', stderr: '', exitCode: 0 }
+        },
+      })
+
+      await runner(['--version'], { cwd: repository })
+      await rm(trustedCandidate)
+      await runner(['auth', 'status'], { cwd: repository })
+
+      expect(executions).toEqual([
+        { executable: trustedExecutable, cwd: repository },
+        { executable: trustedExecutable, cwd: repository },
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects a cached glab path when a later repository cwd contains it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-glab-cached-cwd-'))
+    const repository = join(root, 'repository')
+    const trustedBin = join(root, 'trusted-bin')
+    const executableName = process.platform === 'win32' ? 'glab.exe' : 'glab'
+    const trustedCandidate = join(trustedBin, executableName)
+    try {
+      await mkdir(repository)
+      await mkdir(trustedBin)
+      await copyFile(process.execPath, trustedCandidate)
+      if (process.platform !== 'win32') await chmod(trustedCandidate, 0o755)
+      const executions: string[] = []
+      const runner = createGlabRunner({
+        env: { PATH: trustedBin },
+        execute: async (request) => {
+          executions.push(request.executable)
+          return { stdout: 'glab version 1.45.0', stderr: '', exitCode: 0 }
+        },
+      })
+
+      const first = await runner(['--version'], { cwd: repository })
+      const second = await runner(['--version'], { cwd: trustedBin })
+
+      expect(first.exitCode).toBe(0)
+      expect(second).toMatchObject({
+        exitCode: 1,
+        stderr: 'GitLab CLI executable was not found in trusted PATH.',
+      })
+      expect(executions).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('passes a controlled child environment without GitLab or CI authentication overrides', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nine1bot-glab-env-'))
+    const repository = join(root, 'repository')
+    const trustedBin = join(root, 'trusted-bin')
+    const executableName = process.platform === 'win32' ? 'glab.exe' : 'glab'
+    const trustedCandidate = join(trustedBin, executableName)
+    try {
+      await mkdir(repository)
+      await mkdir(trustedBin)
+      await copyFile(process.execPath, trustedCandidate)
+      if (process.platform !== 'win32') await chmod(trustedCandidate, 0o755)
+
+      const sourceEnv: NodeJS.ProcessEnv = {
+        PATH: trustedBin,
+        HOME: join(root, 'home'),
+        USERPROFILE: join(root, 'profile'),
+        CI_PROJECT_PATH: 'root/project',
+        GITLAB_TOKEN: 'glpat-primary-secret',
+        gitlab_access_token: 'glpat-case-insensitive-secret',
+        OAUTH_TOKEN: 'oauth-secret',
+        GITLAB_HOST: 'gitlab.wrong.example',
+        GITLAB_URI: 'https://gitlab.wrong.example',
+        GITLAB_API_HOST: 'api.gitlab.wrong.example',
+        GL_HOST: 'gitlab.wrong.example',
+        GLAB_TOKEN: 'future-glab-secret',
+        CI_JOB_TOKEN: 'ci-job-secret',
+        CI_BUILD_TOKEN: 'ci-build-secret',
+        CI_JOB_JWT: 'ci-jwt-secret',
+        CI_REGISTRY_PASSWORD: 'ci-registry-secret',
+        CI_REPOSITORY_URL: 'https://gitlab-ci-token:embedded-secret@gitlab.wrong.example/root/project.git',
+        GLAB_ENABLE_CI_AUTOLOGIN: 'true',
+        GITLAB_CI: 'true',
+        CI_SERVER_FQDN: 'gitlab.wrong.example',
+        CI_SERVER_HOST: 'gitlab.wrong.example',
+        CI_SERVER_PROTOCOL: 'https',
+        CI_SERVER_SHELL_SSH_HOST: 'ssh.gitlab.wrong.example',
+        CI_SERVER_URL: 'https://gitlab.wrong.example',
+        CI_API_V4_URL: 'https://gitlab.wrong.example/api/v4',
+      }
+      let childEnv: NodeJS.ProcessEnv | undefined
+      const runner = createGlabRunner({
+        env: sourceEnv,
+        execute: async (request) => {
+          childEnv = request.env
+          return { stdout: '{}', stderr: '', exitCode: 0 }
+        },
+      })
+
+      const result = await runner(['api', 'projects/root%2Fproject', '--hostname', 'gitlab.target.example'], {
+        cwd: repository,
+      })
+      const normalizedEnv = Object.fromEntries(
+        Object.entries(childEnv ?? {}).map(([key, value]) => [key.toUpperCase(), value]),
+      )
+
+      expect(normalizedEnv).toMatchObject({
+        PATH: trustedBin,
+        HOME: join(root, 'home'),
+        USERPROFILE: join(root, 'profile'),
+        CI_PROJECT_PATH: 'root/project',
+      })
+      for (const key of [
+        'GITLAB_TOKEN',
+        'GITLAB_ACCESS_TOKEN',
+        'OAUTH_TOKEN',
+        'GITLAB_HOST',
+        'GITLAB_URI',
+        'GITLAB_API_HOST',
+        'GL_HOST',
+        'GLAB_TOKEN',
+        'CI_JOB_TOKEN',
+        'CI_BUILD_TOKEN',
+        'CI_JOB_JWT',
+        'CI_REGISTRY_PASSWORD',
+        'CI_REPOSITORY_URL',
+        'GLAB_ENABLE_CI_AUTOLOGIN',
+        'GITLAB_CI',
+        'CI_SERVER_FQDN',
+        'CI_SERVER_HOST',
+        'CI_SERVER_PROTOCOL',
+        'CI_SERVER_SHELL_SSH_HOST',
+        'CI_SERVER_URL',
+        'CI_API_V4_URL',
+      ]) {
+        expect(normalizedEnv).not.toHaveProperty(key)
+      }
+      expect(JSON.stringify(result)).not.toContain('secret')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('parses GitLab CLI status without exposing raw auth details', async () => {
     const status = await getGitLabCliStatus({
       runner: runnerFrom({
@@ -25,6 +194,33 @@ describe('GitLab CLI capability layer', () => {
       user: 'nine1bot',
       message: 'GitLab CLI is authenticated for gitlab.com as nine1bot.',
     })
+  })
+
+  test('checks authentication status for the explicit target host', async () => {
+    const calls: string[] = []
+    const status = await getGitLabCliStatus({
+      host: 'gitlab.target.example',
+      runner: async (args) => {
+        const command = args.join(' ')
+        calls.push(command)
+        if (command === '--version') return runResult(args, 'glab version 1.45.0')
+        if (command === 'auth status --hostname gitlab.target.example') {
+          return runResult(args, 'gitlab.target.example\n  Logged in to gitlab.target.example as @nine1bot\n')
+        }
+        return runResult(args, '', `unexpected command: ${command}`, 1)
+      },
+    })
+
+    expect(status).toMatchObject({
+      available: true,
+      authenticated: true,
+      host: 'gitlab.target.example',
+      user: 'nine1bot',
+    })
+    expect(calls).toEqual([
+      '--version',
+      'auth status --hostname gitlab.target.example',
+    ])
   })
 
   test('reports installed but unauthenticated GitLab CLI', async () => {
@@ -252,6 +448,89 @@ describe('GitLab CLI capability layer', () => {
       reason: 'too-large',
     })
     expect(diff.coverage).toBe('Included 1 changed file(s); skipped 1.')
+  })
+
+  test('bounds commit diff retrieval to maxFiles plus one and reports additional coverage', async () => {
+    const calls: string[] = []
+    const client = createGitLabCliClient({
+      runner: apiRunner(calls, {
+        'api projects/root%2Fproject/repository/commits/abc123/diff?page=1&per_page=3 --hostname gitlab.example.com': [
+          {
+            old_path: 'src/one.ts',
+            new_path: 'src/one.ts',
+            diff: '@@ -1 +1 @@\n-old one\n+new one\n',
+          },
+          {
+            old_path: 'src/two.ts',
+            new_path: 'src/two.ts',
+            diff: '@@ -1 +1 @@\n-old two\n+new two\n',
+          },
+          {
+            old_path: 'src/three.ts',
+            new_path: 'src/three.ts',
+            diff: '@@ -1 +1 @@\n-old three\n+new three\n',
+          },
+        ],
+      }),
+    })
+
+    const diff = await client.commitDiff({
+      target: {
+        kind: 'commit',
+        host: 'gitlab.example.com',
+        projectPath: 'root/project',
+        sha: 'abc123',
+      },
+      maxFiles: 2,
+      maxBytes: 1_000,
+    })
+
+    expect(calls).toEqual([
+      'api projects/root%2Fproject/repository/commits/abc123/diff?page=1&per_page=3 --hostname gitlab.example.com',
+    ])
+    expect(diff.manifest.files.map((file) => file.newPath)).toEqual(['src/one.ts', 'src/two.ts'])
+    expect(diff.manifest.stats).toMatchObject({
+      fileCount: 3,
+      includedFileCount: 2,
+      skippedFileCount: 1,
+      truncated: true,
+    })
+    expect(diff.truncated).toBe(true)
+    expect(diff.coverage).toBe(
+      'Included 2 changed file(s); skipped at least 1. Additional commit diff files were omitted after the local 2-file limit.',
+    )
+  })
+
+  test('reports GitLab commit diff limits as truncated coverage', async () => {
+    const client = createGitLabCliClient({
+      runner: apiRunner([], {
+        'api projects/root%2Fproject/repository/commits/abc123/diff?page=1&per_page=5 --hostname gitlab.example.com': [
+          {
+            old_path: 'src/collapsed.ts',
+            new_path: 'src/collapsed.ts',
+            diff: '',
+            collapsed: true,
+          },
+        ],
+      }),
+    })
+
+    const diff = await client.commitDiff({
+      target: {
+        kind: 'commit',
+        host: 'gitlab.example.com',
+        projectPath: 'root/project',
+        sha: 'abc123',
+      },
+      maxFiles: 4,
+    })
+
+    expect(diff.manifest.skipped).toEqual([{ path: 'src/collapsed.ts', reason: 'too-large' }])
+    expect(diff.manifest.stats.truncated).toBe(true)
+    expect(diff.truncated).toBe(true)
+    expect(diff.coverage).toBe(
+      'Included 0 changed file(s); skipped 1. GitLab diff limits omitted content for one or more commit files.',
+    )
   })
 
   test('builds repository health context with important file previews and budget', async () => {

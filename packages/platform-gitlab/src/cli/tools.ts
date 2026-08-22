@@ -73,7 +73,7 @@ export function createGitLabCliPlatformTools(
       execution: { timeoutMs: 30_000 },
       async execute(_input, ctx) {
         return await safeResult(async () => {
-          const status = await statusProbe.get(ctx.directory, ctx.signal, true)
+          const status = await statusProbe.get(ctx.directory, ctx.signal, { force: true })
           return okResult('GitLab CLI status', status)
         })
       },
@@ -128,7 +128,7 @@ export function createGitLabCliPlatformTools(
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
       execution: { timeoutMs: 60_000 },
-      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, 'GitLab project snapshot', (client) => (
+      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab project snapshot', (client) => (
         client.projectSnapshot(input.target)
       )),
     },
@@ -144,7 +144,7 @@ export function createGitLabCliPlatformTools(
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
       execution: { timeoutMs: 60_000 },
-      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, 'GitLab merge request snapshot', (client) => (
+      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab merge request snapshot', (client) => (
         client.mrSnapshot(input.target)
       )),
     },
@@ -165,7 +165,7 @@ export function createGitLabCliPlatformTools(
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
       execution: { timeoutMs: 90_000 },
-      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, 'GitLab merge request diff', async (client) => (
+      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab merge request diff', async (client) => (
         summarizeDiff(await client.mrDiff(input), input.includeDiff)
       )),
     },
@@ -186,7 +186,7 @@ export function createGitLabCliPlatformTools(
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
       execution: { timeoutMs: 90_000 },
-      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, 'GitLab commit diff', async (client) => (
+      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab commit diff', async (client) => (
         summarizeDiff(await client.commitDiff(input), input.includeDiff)
       )),
     },
@@ -218,7 +218,7 @@ export function createGitLabCliPlatformTools(
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
       execution: { timeoutMs: 90_000 },
-      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, 'GitLab repository health context', (client) => (
+      execute: (input, ctx) => withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab repository health context', (client) => (
         client.repositoryHealthContext(input)
       )),
     },
@@ -250,7 +250,7 @@ export function createGitLabCliPlatformTools(
       execution: { timeoutMs: 60_000 },
       execute: (input, ctx) => input.dryRun
         ? withoutCliStatus(options, ctx, 'GitLab review note preview', (client) => client.publishReviewNote(input))
-        : withAuthenticatedCli(options, statusProbe, ctx, 'GitLab review note published', (client) => client.publishReviewNote(input), true),
+        : withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab review note published', (client) => client.publishReviewNote(input), true),
     },
     {
       id: gitLabCliToolIds.publishReviewDiscussion,
@@ -283,7 +283,7 @@ export function createGitLabCliPlatformTools(
       execution: { timeoutMs: 60_000 },
       execute: (input, ctx) => input.dryRun
         ? withoutCliStatus(options, ctx, 'GitLab inline discussion preview', (client) => client.publishReviewDiscussion(input))
-        : withAuthenticatedCli(options, statusProbe, ctx, 'GitLab inline discussion published', (client) => client.publishReviewDiscussion(input), true),
+        : withAuthenticatedCli(options, statusProbe, ctx, input.target.host, 'GitLab inline discussion published', (client) => client.publishReviewDiscussion(input), true),
     },
   ]
 }
@@ -296,24 +296,30 @@ function createStatusProbe(options: GitLabCliPlatformToolsOptions) {
 
   return {
     availability(directory: string): PlatformToolAvailability {
-      const cached = cache.get(directory)
+      const cached = cache.get(statusCacheKey(directory))
       if (!cached || Date.now() - cached.checkedAt > ttlMs) {
         return { status: 'unknown', reason: 'GitLab CLI status is checked when the wrapper is invoked.' }
       }
       return availabilityFromStatus(cached.status, cached.checkedAt)
     },
-    async get(directory: string, signal: AbortSignal, force = false) {
+    async get(
+      directory: string,
+      signal: AbortSignal,
+      request: { host?: string; force?: boolean } = {},
+    ) {
       if (signal.aborted) throw new GitLabCliToolError('command_cancelled', 'GitLab CLI command was cancelled.')
-      const cached = cache.get(directory)
-      if (!force && cached && Date.now() - cached.checkedAt <= ttlMs) return cached.status
+      const key = statusCacheKey(directory, request.host)
+      const cached = cache.get(key)
+      if (!request.force && cached && Date.now() - cached.checkedAt <= ttlMs) return cached.status
       const status = await getGitLabCliStatus({
         runner: options.runner,
         cwd: directory,
+        host: request.host,
         signal,
         timeoutMs: 10_000,
       })
       if (signal.aborted) throw new GitLabCliToolError('command_cancelled', 'GitLab CLI command was cancelled.')
-      cache.set(directory, { status, checkedAt: Date.now() })
+      cache.set(key, { status, checkedAt: Date.now() })
       return status
     },
   }
@@ -323,12 +329,13 @@ async function withAuthenticatedCli<T>(
   options: GitLabCliPlatformToolsOptions,
   statusProbe: StatusProbe,
   ctx: PlatformToolCallContext,
+  host: string | undefined,
   title: string,
   task: (client: ReturnType<typeof createGitLabCliClient>) => Promise<T>,
   write = false,
 ): Promise<PlatformToolResult> {
   return await safeResult(async () => {
-    const status = await statusProbe.get(ctx.directory, ctx.signal)
+    const status = await statusProbe.get(ctx.directory, ctx.signal, { host })
     if (!status.available) {
       return failure('unavailable', 'gitlab-cli-not-installed', status.message, true, {
         type: 'retry',
@@ -348,6 +355,10 @@ async function withAuthenticatedCli<T>(
     })
     return okResult(title, await task(client))
   }, { write })
+}
+
+function statusCacheKey(directory: string, host?: string) {
+  return JSON.stringify([directory, host?.toLowerCase() ?? null])
 }
 
 async function withoutCliStatus<T>(
