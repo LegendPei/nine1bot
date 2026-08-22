@@ -30,6 +30,7 @@ import {
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
+import { gitLabReviewRepositoryDirectoryFingerprint } from "../../../../../../packages/nine1bot/src/review/gitlab-repository-inspector"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 import { registerBuiltinPlatformAdapters } from "../../../../../../packages/nine1bot/src/platform/builtin"
@@ -523,7 +524,7 @@ async function testWebhook(c: any) {
 }
 
 export function publicGitLabReviewRun(run: ReviewRunRecord) {
-  const { context: _context, project, ci, ...publicRun } = run
+  const { context: _context, project, ci, repository: _repository, ...publicRun } = run
   return {
     ...publicRun,
     ...(project ? {
@@ -716,7 +717,11 @@ export async function startGitLabReviewRuntimeRun(
     async onSessionCreated({ sessionID }) {
       const run = ReviewRunStore.get(result.runId)
       if (!run) throw new Error("review_run_not_found")
-      const patch = gitLabReviewSessionCreatedPatch(sessionID, run)
+      const patch = gitLabReviewSessionCreatedPatch(
+        sessionID,
+        run,
+        gitLabReviewRepositoryDirectoryFingerprint(directory),
+      )
       if (patch) ReviewRunStore.update(result.runId, patch)
     },
     async onControllerResponse(response) {
@@ -802,12 +807,25 @@ async function failGitLabReviewRuntimeRun(
   return true
 }
 
-export function gitLabReviewSessionCreatedPatch(sessionID: string, run?: ReviewRunRecord) {
+export function gitLabReviewSessionCreatedPatch(
+  sessionID: string,
+  run?: ReviewRunRecord,
+  directoryFingerprint?: string,
+) {
   const patch = {
     status: "running" as const,
     sessionId: sessionID,
     turnSnapshotId: undefined,
     error: undefined,
+    ...(directoryFingerprint && /^[a-f0-9]{64}$/.test(directoryFingerprint) ? {
+      repository: {
+        directoryFingerprint,
+        queryCount: 0,
+        readCount: 0,
+        searchCount: 0,
+        outputBytes: 0,
+      },
+    } : {}),
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
   return run ? gitLabReviewRuntimePatch(run, patch) : patch
 }
@@ -829,11 +847,16 @@ export function gitLabReviewRuntimeTools(objectType: "mr" | "commit") {
     "*": false,
     task: true,
     gitlab_ci_inspect: objectType === "mr",
+    gitlab_repository_inspect: true,
   }
 }
 
 export function gitLabReviewCiNotQueriedPatch(run: ReviewRunRecord) {
-  if (run.trigger?.objectType !== "mr" || (run.ci?.queryCount ?? 0) > 0) return undefined
+  if (
+    run.trigger?.objectType !== "mr"
+    || (run.ci?.queryCount ?? 0) > 0
+    || (run.ci?.jobLogReadCount ?? 0) > 0
+  ) return undefined
   return {
     ci: {
       ...run.ci,

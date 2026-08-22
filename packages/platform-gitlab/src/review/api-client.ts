@@ -203,6 +203,13 @@ export class GitLabApiResponseError extends Error {
   }
 }
 
+export class GitLabApiTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`GitLab API request timed out after ${timeoutMs}ms`)
+    this.name = 'GitLabApiTimeoutError'
+  }
+}
+
 export class GitLabApiRedirectError extends Error {
   constructor(readonly code: GitLabApiRedirectErrorCode) {
     super(code)
@@ -557,7 +564,7 @@ export class GitLabApiClient {
     const onUpstreamAbort = () => controller.abort(upstreamSignal?.reason)
     if (upstreamSignal?.aborted) onUpstreamAbort()
     else upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true })
-    const timeoutError = new Error(`GitLab API request timed out after ${this.requestTimeoutMs}ms`)
+    const timeoutError = new GitLabApiTimeoutError(this.requestTimeoutMs)
     let timeout: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {

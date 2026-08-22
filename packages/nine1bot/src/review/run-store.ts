@@ -14,9 +14,18 @@ export type ReviewRunCiSummary = {
   pipeline?: GitLabCiPipeline
   diagnostics: string[]
   observedAt?: number
+  listCompletedAt?: number
   queryCount?: number
   jobLogReadCount?: number
   queriedJobIds?: number[]
+}
+
+export type ReviewRunRepositorySummary = {
+  directoryFingerprint: string
+  queryCount?: number
+  readCount?: number
+  searchCount?: number
+  outputBytes?: number
 }
 
 export type ReviewRunPublication = {
@@ -65,6 +74,7 @@ export type ReviewRunRecord = {
   trigger?: Record<string, unknown>
   project?: GitLabReviewProjectSnapshot
   ci?: ReviewRunCiSummary
+  repository?: ReviewRunRepositorySummary
   sessionId?: string
   turnSnapshotId?: string
   publishedAt?: number

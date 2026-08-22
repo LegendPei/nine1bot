@@ -13,7 +13,7 @@
 - GitLab agents、skills 通过 `PlatformAdapterContribution.runtime.sources` 暴露，wrapper tools 通过 `runtime.tools` 注册到 Platform Adapter Manager。
 - Web 对话栏的交互任务通过 page context 或显式 URL 选择目标；自动 Review 通过 project profile 和冻结的 ReviewRun/attempt 关联项目、MR、源码版本和上下文。
 - 模型只能调用显式注册且由页面模板声明的 wrapper tool，不向模型暴露 token、任意 `glab` 命令、`curl`、`webfetch`、shell 或通用网络能力。
-- 交互式 GitLab 页面会话可使用 `runtime.tools` 注册的受控 CLI wrapper；自动 webhook Review 不声明、不注入这些工具，仍只通过 `gitlab_ci_inspect` 和原有发布链路访问 GitLab。
+- 交互式 GitLab 页面会话可使用 `runtime.tools` 注册的受控 CLI wrapper；自动 webhook Review 不声明、不注入这些 CLI 工具，只使用 ReviewRun 绑定的 `gitlab_ci_inspect`、`gitlab_repository_inspect` 和原有发布链路。
 - skill 固定审查步骤，wrapper tool 固定能力边界，context pipeline 负责冻结、切片和按预算注入上下文。
 - MCP 暂不作为本项目内部 GitLab 能力提供方式。
 
@@ -67,6 +67,8 @@
    - 最终复审遗留的 specialist 资源快照、逐 POST HEAD 校验、claim 前完整发布预算和项目档案逐表示无损校验实施与收口记录。
 24. [24-gitlab-cli-platform-tools-migration.md](./24-gitlab-cli-platform-tools-migration.md)
    - 基于平台注册机制选择性迁移 GitLab CLI wrapper、引导 skill、页面映射、权限边界、稳定性措施和后续真实联调计划。
+25. [25-pr52-review-follow-up-fixes.md](./25-pr52-review-follow-up-fixes.md)
+   - PR #52 最新 review 的 allowlist、瞬时 attempt 恢复、冻结仓库 wrapper、canonical MR URL 和 CI 调用顺序修复记录。
 
 ## 当前交付目标
 
@@ -85,6 +87,7 @@
   -> frozen ReviewRun attempt + context pipeline
   -> allowlisted review agents and skill workflow
   -> bounded gitlab_ci_inspect REST wrapper (on demand)
+  -> bounded gitlab_repository_inspect frozen Git wrapper (on demand)
   -> optional review publish
 ```
 
@@ -92,7 +95,7 @@
 
 大 diff 由 context pipeline 按文件、风险和预算切片，Review finding 只能引用冻结 diff。CI 只作为补充上下文：仅接受与当前 MR/source HEAD 可证明关联的 source、detached、merged-result、merge-train 或 integrated pipeline；找不到可信 CI 时返回稳定诊断并继续 Review，绝不退化到项目最新流水线。CI list 最终成功 DTO 的严格序列化合同为 `< 32 KiB`。
 
-配置型拒绝修复后必须调用显式 retry 接口创建新 attempt。原 run、错误、时间和审计信息保持不变，旧异步请求不能覆盖新 attempt。
+配置型拒绝修复后必须调用显式 retry 接口创建新 attempt。发布前的明确瞬时 `load_changes` 失败可在 GitLab 重发同一 webhook 时创建关联 attempt；原 run、错误、时间和审计信息保持不变，旧异步请求不能覆盖新 attempt。
 
 ## 收口状态
 

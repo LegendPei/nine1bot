@@ -91,6 +91,7 @@ describe("tool.registry", () => {
         const defaultIds = await ToolRegistry.ids()
         expect(defaultIds).not.toContain("browser_status")
         expect(defaultIds).toContain("gitlab_ci_inspect")
+        expect(defaultIds).toContain("gitlab_repository_inspect")
 
         setBridgeServer({} as any)
         const ids = await ToolRegistry.ids()
@@ -111,10 +112,13 @@ describe("tool.registry", () => {
       fn: async () => {
         const tools = await ToolRegistry.tools({ providerID: "test", modelID: "test" })
         const gitlab = tools.find((tool) => tool.id === "gitlab_ci_inspect")
+        const repository = tools.find((tool) => tool.id === "gitlab_repository_inspect")
         const read = tools.find((tool) => tool.id === "read")
 
         expect(gitlab?.requireExplicitEnable).toBe(true)
+        expect(repository?.requireExplicitEnable).toBe(true)
         expect(gitlab && toolSelectionAllows(gitlab, undefined)).toBe(false)
+        expect(repository && toolSelectionAllows(repository, undefined)).toBe(false)
         expect(gitlab && toolSelectionAllows(gitlab, { gitlab_ci_inspect: true })).toBe(true)
         expect(read && toolSelectionAllows(read, { "*": false })).toBe(false)
         expect(read && toolSelectionAllows(read, { "*": false, read: true })).toBe(true)
@@ -127,8 +131,14 @@ describe("tool.registry", () => {
           "*": "deny",
           task: "allow",
           gitlab_ci_inspect: "allow",
+          gitlab_repository_inspect: "allow",
         })
         expect(gitlab && toolSelectionAllows(gitlab, { gitlab_ci_inspect: true }, coordinatorPermissions)).toBe(true)
+        expect(repository && toolSelectionAllows(
+          repository,
+          { gitlab_repository_inspect: true },
+          coordinatorPermissions,
+        )).toBe(true)
         expect(toolSelectionAllows({ id: "task" }, { task: true }, coordinatorPermissions)).toBe(true)
         expect(read && toolSelectionAllows(read, { read: true }, coordinatorPermissions)).toBe(false)
       },

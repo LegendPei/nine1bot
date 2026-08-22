@@ -47,6 +47,7 @@ export type GitLabCliPlatformToolsOptions = {
   runner?: GitLabCliRunner
   statusCacheTtlMs?: number
   allowedHosts?: string[]
+  allowedHostsInvalid?: boolean
 }
 
 export function createGitLabCliPlatformTools(
@@ -54,6 +55,7 @@ export function createGitLabCliPlatformTools(
 ): AnyPlatformToolDefinition[] {
   const statusProbe = createStatusProbe(options)
   const allowedHosts = normalizeAllowedHosts(options.allowedHosts)
+  const denyAllHosts = options.allowedHostsInvalid === true
   const cliAvailability = (ctx: { directory: string }) => statusProbe.availability(ctx.directory)
 
   return [
@@ -107,7 +109,7 @@ export function createGitLabCliPlatformTools(
           return failure('failed', 'gitlab-target-invalid', 'The resolved GitLab target is invalid.', false)
         }
         try {
-          assertAllowedHost(target, allowedHosts)
+          assertAllowedHost(target, allowedHosts, denyAllHosts)
         } catch {
           return failure('failed', 'gitlab-target-not-allowed', 'The resolved GitLab host is outside the configured allowlist.', false)
         }
@@ -121,7 +123,7 @@ export function createGitLabCliPlatformTools(
       inputSchema: objectSchema({ target: projectTargetSchema }, ['target']),
       parse(input) {
         const record = strictRecord(input, ['target'])
-        return { target: parseTarget(record.target, 'project', allowedHosts) }
+        return { target: parseTarget(record.target, 'project', allowedHosts, denyAllHosts) }
       },
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
@@ -137,7 +139,7 @@ export function createGitLabCliPlatformTools(
       inputSchema: objectSchema({ target: mergeRequestTargetSchema }, ['target']),
       parse(input) {
         const record = strictRecord(input, ['target'])
-        return { target: parseTarget(record.target, 'merge_request', allowedHosts) }
+        return { target: parseTarget(record.target, 'merge_request', allowedHosts, denyAllHosts) }
       },
       permission: (input) => permission('gitlab_cli_read', targetPattern(input.target)),
       availability: cliAvailability,
@@ -154,7 +156,7 @@ export function createGitLabCliPlatformTools(
       parse(input) {
         const record = strictRecord(input, ['target', 'maxFiles', 'maxBytes', 'includeDiff'])
         return {
-          target: parseTarget(record.target, 'merge_request', allowedHosts),
+          target: parseTarget(record.target, 'merge_request', allowedHosts, denyAllHosts),
           maxFiles: optionalInteger(record.maxFiles, 'maxFiles', 1, maxDiffFiles) ?? defaultDiffFiles,
           maxBytes: optionalInteger(record.maxBytes, 'maxBytes', 1, maxDiffBytes) ?? defaultDiffBytes,
           includeDiff: optionalBoolean(record.includeDiff, 'includeDiff') ?? false,
@@ -175,7 +177,7 @@ export function createGitLabCliPlatformTools(
       parse(input) {
         const record = strictRecord(input, ['target', 'maxFiles', 'maxBytes', 'includeDiff'])
         return {
-          target: parseTarget(record.target, 'commit', allowedHosts),
+          target: parseTarget(record.target, 'commit', allowedHosts, denyAllHosts),
           maxFiles: optionalInteger(record.maxFiles, 'maxFiles', 1, maxDiffFiles) ?? defaultDiffFiles,
           maxBytes: optionalInteger(record.maxBytes, 'maxBytes', 1, maxDiffBytes) ?? defaultDiffBytes,
           includeDiff: optionalBoolean(record.includeDiff, 'includeDiff') ?? false,
@@ -206,7 +208,7 @@ export function createGitLabCliPlatformTools(
       parse(input) {
         const record = strictRecord(input, ['target', 'ref', 'maxFiles', 'maxBytes', 'paths'])
         return {
-          target: parseTarget(record.target, 'project', allowedHosts),
+          target: parseTarget(record.target, 'project', allowedHosts, denyAllHosts),
           ref: optionalString(record.ref, 'ref', 512),
           maxFiles: optionalInteger(record.maxFiles, 'maxFiles', 1, maxRepositoryFiles) ?? defaultRepositoryFiles,
           maxBytes: optionalInteger(record.maxBytes, 'maxBytes', 1, maxRepositoryBytes) ?? defaultRepositoryBytes,
@@ -231,7 +233,7 @@ export function createGitLabCliPlatformTools(
       }, ['target', 'body']),
       parse(input) {
         const record = strictRecord(input, ['target', 'body', 'dryRun'])
-        const target = parseReviewTarget(record.target, allowedHosts)
+        const target = parseReviewTarget(record.target, allowedHosts, denyAllHosts)
         const body = requiredString(record.body, 'body', 20_000)
         assertValidGitLabReviewBody(body)
         return {
@@ -267,7 +269,7 @@ export function createGitLabCliPlatformTools(
         assertValidGitLabReviewBody(body)
         assertValidGitLabInlinePosition(position)
         return {
-          target: parseTarget(record.target, 'merge_request', allowedHosts),
+          target: parseTarget(record.target, 'merge_request', allowedHosts, denyAllHosts),
           body,
           position,
           dryRun: optionalBoolean(record.dryRun, 'dryRun') ?? false,
@@ -495,6 +497,7 @@ function parseTarget<K extends GitLabTarget['kind']>(
   input: unknown,
   kind: K,
   allowedHosts: ReadonlySet<string>,
+  denyAllHosts = false,
 ): Extract<GitLabTarget, { kind: K }> {
   const record = strictRecord(input, kind === 'project'
     ? ['kind', 'host', 'projectPath']
@@ -510,17 +513,18 @@ function parseTarget<K extends GitLabTarget['kind']>(
     ...(kind === 'commit' ? { sha: requiredString(record.sha, 'target.sha', 64) } : {}),
   } as Extract<GitLabTarget, { kind: K }>
   assertValidGitLabTarget(target)
-  assertAllowedHost(target, allowedHosts)
+  assertAllowedHost(target, allowedHosts, denyAllHosts)
   return target
 }
 
 function parseReviewTarget(
   input: unknown,
   allowedHosts: ReadonlySet<string>,
+  denyAllHosts = false,
 ): Extract<GitLabTarget, { kind: 'merge_request' | 'commit' }> {
   const record = recordOnly(input)
-  if (record.kind === 'merge_request') return parseTarget(input, 'merge_request', allowedHosts)
-  if (record.kind === 'commit') return parseTarget(input, 'commit', allowedHosts)
+  if (record.kind === 'merge_request') return parseTarget(input, 'merge_request', allowedHosts, denyAllHosts)
+  if (record.kind === 'commit') return parseTarget(input, 'commit', allowedHosts, denyAllHosts)
   throw new Error('target.kind must be merge_request or commit')
 }
 
@@ -528,7 +532,8 @@ function normalizeAllowedHosts(input: string[] | undefined) {
   return new Set((input ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean))
 }
 
-function assertAllowedHost(target: GitLabTarget, allowedHosts: ReadonlySet<string>) {
+function assertAllowedHost(target: GitLabTarget, allowedHosts: ReadonlySet<string>, denyAllHosts = false) {
+  if (denyAllHosts) throw new Error('GitLab host allowlist configuration is invalid')
   if (allowedHosts.size === 0) return
   if (!target.host || !allowedHosts.has(target.host.toLowerCase())) {
     throw new Error('GitLab target host is outside the configured allowlist')

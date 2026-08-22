@@ -384,6 +384,13 @@ describe("webhook status URL selection", () => {
         diagnostics: ["failed_jobs_detected"],
         trace: "must never reach the browser",
       },
+      repository: {
+        directoryFingerprint: "a".repeat(64),
+        queryCount: 4,
+        readCount: 2,
+        searchCount: 2,
+        outputBytes: 1024,
+      },
     } as any)).toEqual({
       id: "run_1",
       rootRunId: "run_1",
@@ -1068,6 +1075,19 @@ describe("webhook status URL selection", () => {
       trigger: { objectType: "mr" },
       ci: { diagnostics: [], queryCount: 1 },
     })).toBeUndefined()
+    expect(gitLabReviewCiNotQueriedPatch({
+      id: "run_legacy_log",
+      rootRunId: "run_legacy_log",
+      attempt: 1,
+      triggerKey: "trigger_legacy_log",
+      generation: "generation_legacy_log",
+      platform: "gitlab",
+      status: "succeeded",
+      createdAt: 1,
+      updatedAt: 2,
+      trigger: { objectType: "mr" },
+      ci: { diagnostics: [], jobLogReadCount: 1 },
+    })).toBeUndefined()
   })
 
   test("maps a lost publication claim directly to HTTP 409", () => {
@@ -1075,25 +1095,34 @@ describe("webhook status URL selection", () => {
     expect(gitLabReviewPublishStatus("gitlab_review_publication_legacy_ambiguous")).toBe(409)
   })
 
-  test("enables only the bounded GitLab CI tool in the automated review message", () => {
+  test("enables only bounded ReviewRun tools in the automated review message", () => {
     expect(gitLabReviewRuntimeTools("mr")).toEqual({
       "*": false,
       task: true,
       gitlab_ci_inspect: true,
+      gitlab_repository_inspect: true,
     })
     expect(gitLabReviewRuntimeTools("commit")).toEqual({
       "*": false,
       task: true,
       gitlab_ci_inspect: false,
+      gitlab_repository_inspect: true,
     })
   })
 
   test("binds a fresh review session before runtime message delivery", () => {
-    expect(gitLabReviewSessionCreatedPatch("session_new")).toEqual({
+    expect(gitLabReviewSessionCreatedPatch("session_new", undefined, "a".repeat(64))).toEqual({
       status: "running",
       sessionId: "session_new",
       turnSnapshotId: undefined,
       error: undefined,
+      repository: {
+        directoryFingerprint: "a".repeat(64),
+        queryCount: 0,
+        readCount: 0,
+        searchCount: 0,
+        outputBytes: 0,
+      },
     })
   })
 

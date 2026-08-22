@@ -14,6 +14,7 @@ import {
   gitLabReviewPublicationMarker,
   GitLabApiError,
   GitLabApiClient,
+  GitLabApiTimeoutError,
   GitLabReviewPublicationBudgetError,
   inspectGitLabCi,
   isGitLabReviewPublicationComplete,
@@ -3625,7 +3626,7 @@ describe('GitLab review foundation', () => {
       })) as typeof fetch,
     })
 
-    await expect(client.getMergeRequestPipelines(3, 2)).rejects.toThrow('timed out')
+    await expect(client.getMergeRequestPipelines(3, 2)).rejects.toBeInstanceOf(GitLabApiTimeoutError)
   })
 
   test('keeps the GitLab API timeout active while reading a stalled response body', async () => {

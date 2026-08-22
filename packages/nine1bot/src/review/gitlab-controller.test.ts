@@ -8,6 +8,7 @@ import {
   gitLabReviewPublicationBudget,
   gitLabReviewFindingKey,
   gitLabReviewPublicationMarker,
+  GitLabApiTimeoutError,
   parseReviewStageResult,
   prepareGitLabReviewPublicationPlan,
   renderReviewSummaryComment,
@@ -520,7 +521,9 @@ describe('GitLab review controller', () => {
     expect(prompt.match(/\+new/g)).toHaveLength(1)
     expect(prompt).toContain('Do not fetch the GitLab web page')
     expect(prompt).toContain('gitlab_ci_inspect')
-    expect(prompt).toContain('MR URL: https://gitlab.example.com/nine1/nine1bot/-/merge_requests/10')
+    expect(prompt).toContain('gitlab_repository_inspect')
+    expect(prompt).toContain('frozen review head')
+    expect(prompt).not.toContain('MR URL:')
     expect(prompt).toContain('Head SHA: abc')
     expect(prompt).toContain('action="list"')
     expect(prompt).toContain('success, failed, running, or any other status')
@@ -561,6 +564,8 @@ describe('GitLab review controller', () => {
 
     expect(prompt).toContain('Object: commit')
     expect(prompt).not.toContain('gitlab_ci_inspect')
+    expect(prompt).toContain('gitlab_repository_inspect')
+    expect(prompt).toContain('frozen review head')
     expect(prompt).not.toContain('MR URL:')
   })
 
@@ -1520,6 +1525,63 @@ describe('GitLab review controller', () => {
       platforms,
       secrets: liveSecrets,
     })).resolves.toMatchObject({ accepted: false, error: 'review_run_already_published', httpStatus: 409 })
+
+    const partial = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'failed',
+      error: 'gitlab_api_publish_failed:502:Bad Gateway',
+      recoverable: true,
+      trigger,
+      publication: {
+        state: 'partial',
+        payloadHash: 'a'.repeat(64),
+        updatedAt: Date.now(),
+        summaryMarker: gitLabReviewPublicationMarker({ runId: 'partial', kind: 'summary' }),
+        completedMarkers: [],
+      },
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: partial.id,
+      platforms,
+      secrets: liveSecrets,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_publication_started', httpStatus: 409 })
+
+    const notifiedTransient = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'failed',
+      error: 'gitlab_api_load_changes_failed:502:Bad Gateway',
+      rejectionKind: 'transient',
+      recoverable: true,
+      failureNotifiedAt: Date.now(),
+      trigger,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: notifiedTransient.id,
+      platforms,
+      secrets: liveSecrets,
+      fetch: (async () => Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'concurrent-head' },
+        changes: [],
+      })) as unknown as typeof fetch,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_publication_started', httpStatus: 409 })
+
+    const unrelatedFailure = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'failed',
+      error: 'gitlab_api_publish_failed:502:Bad Gateway',
+      rejectionKind: 'transient',
+      recoverable: true,
+      trigger,
+    })
+    await expect(retryGitLabReviewAttempt({
+      runId: unrelatedFailure.id,
+      platforms,
+      secrets: liveSecrets,
+      fetch: (async () => Response.json({
+        diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'concurrent-head' },
+        changes: [],
+      })) as unknown as typeof fetch,
+    })).resolves.toMatchObject({ accepted: false, error: 'review_run_not_recoverable', httpStatus: 409 })
 
     const invalidTrigger = ReviewRunStore.create({
       platform: 'gitlab',
@@ -3343,6 +3405,147 @@ describe('GitLab review controller', () => {
     expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
       status: 'failed',
       error: 'gitlab_api_load_changes_failed:403:Forbidden',
+      recoverable: false,
+    })
+  })
+
+  test('creates a linked retry attempt when GitLab resends after a transient changes failure', async () => {
+    let recovered = false
+    let failurePosts = 0
+    const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/changes') && !recovered) {
+        return new Response('Temporary upstream failure', {
+          status: 502,
+          statusText: 'Bad Gateway',
+        })
+      }
+      if (url.includes('/changes')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'transient-head' },
+          changes: [{
+            old_path: 'src/app.ts',
+            new_path: 'src/app.ts',
+            diff: '@@ -1 +1 @@\n-old\n+new\n',
+          }],
+        })
+      }
+      if (url.endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'transient-head' },
+        })
+      }
+      if (requestMethod(init) === 'POST') {
+        failurePosts += 1
+        return Response.json({ id: 1 })
+      }
+      throw new Error(`unexpected request after recovery: ${url}`)
+    }) as typeof fetch
+    const input = {
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'transient-head' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.executionMode': 'runtime',
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    }
+
+    const first = await handleGitLabReviewWebhook(input)
+    expect(first).toMatchObject({
+      accepted: false,
+      error: 'gitlab_api_load_changes_failed:502:Bad Gateway',
+      attempt: 1,
+    })
+    if (first.accepted || !first.runId) throw new Error('expected failed first attempt')
+    expect(ReviewRunStore.get(first.runId)).toMatchObject({
+      status: 'failed',
+      rejectionKind: 'transient',
+      recoverable: true,
+    })
+    expect(ReviewRunStore.get(first.runId)?.failureNotifiedAt).toBeUndefined()
+    expect(failurePosts).toBe(0)
+
+    recovered = true
+    const replay = await handleGitLabReviewWebhook(input)
+
+    expect(replay).toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      rootRunId: first.runId,
+      retryOf: first.runId,
+      attempt: 2,
+    })
+    if (!replay.accepted) throw new Error('expected recovered retry attempt')
+    expect(replay.runId).not.toBe(first.runId)
+    expect(ReviewRunStore.get(first.runId)).toMatchObject({
+      status: 'failed',
+      error: 'gitlab_api_load_changes_failed:502:Bad Gateway',
+      attempt: 1,
+    })
+    expect(ReviewRunStore.list()).toHaveLength(2)
+    expect(failurePosts).toBe(0)
+  })
+
+  test('marks GitLab API request timeouts during changes loading as recoverable', async () => {
+    const result = await handleGitLabReviewWebhook({
+      payload: {
+        object_kind: 'merge_request',
+        project: {
+          id: 123,
+          path_with_namespace: 'nine1/nine1bot',
+          web_url: 'https://gitlab.example.com/nine1/nine1bot',
+        },
+        object_attributes: {
+          iid: 10,
+          last_commit: { id: 'timeout-head' },
+        },
+      },
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: {
+        gitlab: {
+          enabled: true,
+          settings: {
+            ...platforms.gitlab?.settings,
+            'review.dryRun': false,
+            'review.executionMode': 'runtime',
+            'review.baseUrl': 'https://gitlab.example.com',
+          },
+        },
+      },
+      secrets: liveSecrets,
+      fetch: (async () => {
+        throw new GitLabApiTimeoutError(25)
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      accepted: false,
+      error: 'gitlab_api_load_changes_failed:GitLab API request timed out after 25ms',
+    })
+    expect(result.runId ? ReviewRunStore.get(result.runId) : undefined).toMatchObject({
+      status: 'failed',
+      rejectionKind: 'transient',
+      recoverable: true,
     })
   })
 

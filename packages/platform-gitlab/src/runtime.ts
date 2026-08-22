@@ -290,9 +290,13 @@ export const gitlabPlatformContribution = {
         },
       ],
     }),
-    tools: (ctx: PlatformAdapterContext) => createGitLabCliPlatformTools({
-      allowedHosts: normalizeGitLabReviewSettings(ctx.settings).allowedHosts,
-    }),
+    tools: (ctx: PlatformAdapterContext) => {
+      const settings = normalizeGitLabReviewSettings(ctx.settings)
+      return createGitLabCliPlatformTools({
+        allowedHosts: settings.allowedHosts,
+        allowedHostsInvalid: settings.configurationErrors.includes('allowed_hosts_invalid'),
+      })
+    },
   },
   getStatus: getGitLabPlatformStatus,
   validateConfig: validateGitLabPlatformConfig,
@@ -409,15 +413,16 @@ async function validateGitLabPlatformConfig(settingsInput: unknown): Promise<Pla
   const settings = normalizeGitLabReviewSettings(settingsInput)
   const fieldErrors: Record<string, string> = {}
 
+  if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
+    fieldErrors.allowedHosts = 'Allowed GitLab hosts must contain only valid host or host:port values.'
+  }
+
   if (settings.enabled) {
     if (!settings.tokenSecretRef) fieldErrors['review.tokenSecretRef'] = 'GitLab API token is required when code review is enabled.'
     if (settings.baseUrl && !isHttpUrl(settings.baseUrl)) fieldErrors['review.baseUrl'] = 'GitLab base URL must be an http(s) URL.'
     if (!settings.botMention.trim().startsWith('@')) fieldErrors['review.botMention'] = 'Bot mention must start with @.'
     if (settings.modelProviderId && !settings.modelId) fieldErrors['review.modelId'] = 'Review model is required when a review model provider is set.'
     if (!settings.modelProviderId && settings.modelId) fieldErrors['review.modelProviderId'] = 'Review model provider is required when a review model is set.'
-    if (settings.configurationErrors.includes('allowed_hosts_invalid')) {
-      fieldErrors.allowedHosts = 'Allowed GitLab hosts must contain only valid host or host:port values.'
-    }
     if (!hasUsableGitLabReviewProjectProfile(settings)) {
       fieldErrors['review.projects'] = [
         'At least one GitLab review profile must be enabled, use a valid host,',

@@ -159,8 +159,136 @@ describe('GitLab CI session inspector', () => {
     expect(fetchCalls).toBe(0)
   })
 
+  test('requires list before a job-log read without resolving a token or calling GitLab', async () => {
+    const run = createReviewRun('session-a', 3, 10, 'head-a')
+    let secretReads = 0
+    let fetchCalls = 0
+    const observedSecrets: PlatformSecretAccess = {
+      ...secrets,
+      async get() {
+        secretReads += 1
+        return 'server-side-token'
+      },
+    }
+
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets: observedSecrets,
+      fetch: (async () => {
+        fetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_list_required',
+    })
+    expect(secretReads).toBe(0)
+    expect(fetchCalls).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.ci).toBeUndefined()
+  })
+
+  test('does not let an unfinished list reservation unlock job-log reads', async () => {
+    createReviewRun('session-sequenced', 3, 10, 'head-a')
+    const firstPipelineResponse = deferred<Response>()
+    const firstPipelineStarted = deferred<void>()
+    let pipelineCalls = 0
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/merge_requests/10/pipelines')) {
+        pipelineCalls += 1
+        if (pipelineCalls === 1) {
+          firstPipelineStarted.resolve()
+          return await firstPipelineResponse.promise
+        }
+        return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+      }
+      const mergeRequest = currentMergeRequestMetadataResponse(url)
+      if (mergeRequest) return mergeRequest
+      if (url.includes('/pipelines/55/jobs')) {
+        return Response.json([{ id: 56, name: 'test', status: 'success' }])
+      }
+      if (url.includes('/jobs/56/trace')) return new Response('trace')
+      throw new Error(`unexpected request: ${url}`)
+    }) as typeof fetch
+
+    const list = inspectGitLabCiForSession({
+      sessionId: 'session-sequenced',
+      request: { action: 'list' },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    await firstPipelineStarted.promise
+    const earlyLog = await inspectGitLabCiForSession({
+      sessionId: 'session-sequenced',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets,
+      fetch: fetchMock,
+    })
+    firstPipelineResponse.resolve(Response.json([{ id: 55, sha: 'head-a', status: 'success' }]))
+
+    expect(earlyLog).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_list_required',
+    })
+    await expect(list).resolves.toMatchObject({ ok: true, action: 'list' })
+  })
+
+  test('returns the canonical MR URL from the configured protocol and GitLab base path', async () => {
+    createReviewRun('session-prefixed', 3, 10, 'head-a')
+    const calls: string[] = []
+    const prefixedPlatforms = {
+      gitlab: {
+        enabled: true,
+        settings: {
+          ...platforms.gitlab.settings,
+          'review.baseUrl': 'http://gitlab.example.com/gitlab',
+        },
+      },
+    } satisfies PlatformManagerConfig
+    const result = await inspectGitLabCiForSession({
+      sessionId: 'session-prefixed',
+      request: { action: 'list' },
+      platforms: prefixedPlatforms,
+      secrets,
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        calls.push(url)
+        if (url.includes('/merge_requests/10/pipelines')) {
+          return Response.json([{ id: 55, sha: 'head-a', status: 'success' }])
+        }
+        if (url.endsWith('/merge_requests/10')) {
+          return Response.json({
+            iid: 10,
+            project_id: 3,
+            diff_refs: { head_sha: 'head-a' },
+          })
+        }
+        if (url.includes('/pipelines/55/jobs')) return Response.json([])
+        throw new Error(`unexpected request: ${url}`)
+      }) as typeof fetch,
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'list',
+      target: {
+        mrUrl: 'http://gitlab.example.com/gitlab/root/uftest/-/merge_requests/10',
+      },
+    })
+    expect(calls.every((url) => url.startsWith('http://gitlab.example.com/gitlab/api/v4/'))).toBe(true)
+  })
+
   test('does not reserve job-log quota when the configured token is missing', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     let fetchCalls = 0
     const missingSecrets: PlatformSecretAccess = {
       ...secrets,
@@ -223,6 +351,7 @@ describe('GitLab CI session inspector', () => {
 
   test('does not reserve job-log quota when the token resolver throws', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     let fetchCalls = 0
     const throwingSecrets: PlatformSecretAccess = {
       ...secrets,
@@ -507,6 +636,7 @@ describe('GitLab CI session inspector', () => {
 
   test('enforces hard job-log count and byte limits even when project settings are huge', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     ReviewRunStore.update(run.id, {
       project: {
         ...run.project!,
@@ -564,6 +694,7 @@ describe('GitLab CI session inspector', () => {
 
   test('reserves job-log quota before GitLab access for stale attempts', async () => {
     const beforeTraceRun = createReviewRun('session-before-trace', 3, 10, 'head-a')
+    markCiListed(beforeTraceRun.id)
     const jobsStarted = deferred<void>()
     const jobsResponse = deferred<Response>()
     let beforeTraceJobsCalls = 0
@@ -607,12 +738,15 @@ describe('GitLab CI session inspector', () => {
     expect(beforeTraceCalls).toBe(0)
     expect(ReviewRunStore.get(beforeTraceRun.id)?.ci).toEqual({
       diagnostics: [],
+      queryCount: 1,
+      listCompletedAt: 1,
       jobLogReadCount: 1,
       queriedJobIds: [56],
     })
     expect(ReviewRunStore.get(beforeTraceRetry.id)?.ci).toBeUndefined()
 
     const afterTraceRun = createReviewRun('session-after-trace', 3, 10, 'head-a')
+    markCiListed(afterTraceRun.id)
     const traceStarted = deferred<void>()
     const traceResponse = deferred<Response>()
     let afterTraceCalls = 0
@@ -651,6 +785,8 @@ describe('GitLab CI session inspector', () => {
     expect(afterTraceCalls).toBe(1)
     expect(ReviewRunStore.get(afterTraceRun.id)?.ci).toEqual({
       diagnostics: [],
+      queryCount: 1,
+      listCompletedAt: 1,
       jobLogReadCount: 1,
       queriedJobIds: [56],
     })
@@ -704,10 +840,30 @@ describe('GitLab CI session inspector', () => {
       diagnostic: 'ci_tool_output_limit_exceeded',
     })
     expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThan(32 * 1024)
+
+    let readFetchCalls = 0
+    const read = await inspectGitLabCiForSession({
+      sessionId: 'session-a',
+      request: { action: 'read_job_log', jobId: 56 },
+      platforms,
+      secrets,
+      fetch: (async () => {
+        readFetchCalls += 1
+        return Response.json([])
+      }) as unknown as typeof fetch,
+    })
+    expect(read).toEqual({
+      ok: false,
+      action: 'read_job_log',
+      diagnostic: 'ci_list_required',
+    })
+    expect(readFetchCalls).toBe(0)
+    expect(ReviewRunStore.get(run.id)?.ci?.listCompletedAt).toBeUndefined()
   })
 
   test('exhausts job-log quota for repeated invalid job IDs before any further GitLab endpoint access', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     const calls: string[] = []
     const fetchMock = (async (input: string | URL | Request) => {
       const url = String(input)
@@ -757,6 +913,7 @@ describe('GitLab CI session inspector', () => {
 
   test('consumes one job-log quota attempt when no pipeline exists', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     const calls: string[] = []
     const result = await inspectGitLabCiForSession({
       sessionId: 'session-a',
@@ -787,6 +944,7 @@ describe('GitLab CI session inspector', () => {
 
   test('allows exactly two concurrent authenticated job-log reservations', async () => {
     const run = createReviewRun('session-a', 3, 10, 'head-a')
+    markCiListed(run.id)
     const calls: string[] = []
     const jobIds = [200, 201, 202, 203, 204]
     const fetchMock = (async (input: string | URL | Request) => {
@@ -998,6 +1156,13 @@ function createReviewRun(sessionId: string, projectId: number, mrIid: number, he
       matchedAt: 1,
     },
   })
+}
+
+function markCiListed(runId: string) {
+  const updated = ReviewRunStore.update(runId, {
+    ci: { diagnostics: [], queryCount: 1, listCompletedAt: 1 },
+  })
+  if (!updated) throw new Error('expected review run')
 }
 
 function currentMergeRequestMetadataResponse(url: string) {
