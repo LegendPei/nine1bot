@@ -17,6 +17,9 @@ import { SessionRuntimeProfile } from "@/runtime/session/profile"
 import { ulid } from "ulid"
 
 const GITLAB_REVIEW_SPECIALIST_TEMPLATE = "gitlab-review-specialist"
+const GITLAB_REVIEW_COORDINATOR = "platform.gitlab.pm-coordinator"
+const GITLAB_REVIEW_AGENT_SOURCE = "gitlab-review-agents"
+const GITLAB_REVIEW_READ_ONLY_TOOLS = ["gitlab_ci_inspect", "gitlab_repository_inspect"]
 const GITLAB_REVIEW_SPECIALISTS = new Set([
   "platform.gitlab.developer",
   "platform.gitlab.frontend-designer",
@@ -35,10 +38,18 @@ const parameters = z.object({
 })
 
 export const TaskTool = Tool.define("task", async (ctx) => {
-  const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
+  const caller = ctx?.agent
+  const gitLabReviewCoordinator = hasGitLabReviewAgentProvenance(caller, GITLAB_REVIEW_COORDINATOR)
+  const agents = await Agent.list(
+    gitLabReviewCoordinator ? { includeRecommendable: true } : undefined,
+  ).then((items) => items.filter((agent) => {
+    if (agent.mode === "primary") return false
+    if (!gitLabReviewCoordinator) return true
+    return GITLAB_REVIEW_SPECIALISTS.has(agent.name)
+      && hasGitLabReviewAgentProvenance(agent, agent.name)
+  }))
 
   // Filter agents by permissions if agent provided
-  const caller = ctx?.agent
   const accessibleAgents = caller
     ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
     : agents
@@ -62,14 +73,29 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const callerSession = await Session.get(ctx.sessionID).catch(() => undefined)
       const gitLabReviewRoot = Boolean(
         callerSession
-        && ctx.agent === "platform.gitlab.pm-coordinator"
         && callerSession.client?.source === "webhook"
         && callerSession.client.platform === "gitlab"
         && callerSession.client.mode === "gitlab-code-review"
-        && callerSession.runtime?.agent === "platform.gitlab.pm-coordinator",
       )
-      if (gitLabReviewRoot && (!GITLAB_REVIEW_SPECIALISTS.has(agent.name) || agent.mode === "primary")) {
-        throw new Error("gitlab_review_task_specialist_not_allowed")
+      if (gitLabReviewRoot) {
+        const coordinator = await Agent.get(GITLAB_REVIEW_COORDINATOR, {
+          includeDeclaredOnly: true,
+          includeRecommendable: true,
+        })
+        if (
+          ctx.agent !== GITLAB_REVIEW_COORDINATOR
+          || callerSession!.runtime?.agent !== GITLAB_REVIEW_COORDINATOR
+          || !hasGitLabReviewAgentProvenance(coordinator, GITLAB_REVIEW_COORDINATOR)
+          || !await hasGitLabReviewOwnerRuntimeProvenance(callerSession!)
+        ) {
+          throw new Error("gitlab_review_task_owner_provenance_invalid")
+        }
+        if (!GITLAB_REVIEW_SPECIALISTS.has(agent.name) || agent.mode === "primary") {
+          throw new Error("gitlab_review_task_specialist_not_allowed")
+        }
+        if (!hasGitLabReviewAgentProvenance(agent, agent.name)) {
+          throw new Error("gitlab_review_task_specialist_provenance_invalid")
+        }
       }
 
       // Skip permission check when user explicitly invoked via @ or command subtask
@@ -258,7 +284,13 @@ function taskSessionPermission(input: {
         }))),
   ]
   return input.gitLabReviewBoundary
-    ? PermissionNext.merge(taskRules, input.agentPermission)
+    ? PermissionNext.merge(
+      input.agentPermission,
+      [{ permission: "*", pattern: "*", action: "deny" }],
+      GITLAB_REVIEW_READ_ONLY_TOOLS
+        .filter((permission) => PermissionNext.evaluate(permission, "*", input.agentPermission).action === "allow")
+        .map((permission) => ({ permission, pattern: "*", action: "allow" as const })),
+    )
     : taskRules
 }
 
@@ -268,12 +300,7 @@ async function gitLabReviewSpecialistRuntime(input: {
   permission: PermissionNext.Ruleset
 }) {
   const ownerProfile = await SessionRuntimeProfile.read(input.owner)
-  if (
-    !ownerProfile
-    || ownerProfile.id !== input.owner.runtime?.profileSnapshotId
-    || ownerProfile.sessionId !== input.owner.id
-    || ownerProfile.agent.name !== "platform.gitlab.pm-coordinator"
-  ) {
+  if (!ownerProfile || !isGitLabReviewOwnerRuntimeProfile(input.owner, ownerProfile)) {
     throw new Error("gitlab_review_task_owner_provenance_invalid")
   }
   const model = input.agent.model ?? input.owner.runtime?.currentModel ?? ownerProfile.defaultModel
@@ -333,6 +360,7 @@ async function isOwnedGitLabReviewSpecialistSession(input: {
     || profile.id !== input.session.runtime.profileSnapshotId
     || profile.sessionId !== input.session.id
     || profile.agent.name !== input.agentName
+    || profile.agent.source !== "internal-runtime"
     || profile.permissions.mergeMode !== "strict"
     || !sameStrings(profile.sourceTemplateIds, gitLabReviewSpecialistTemplateIds(input.owner.id))
     || !sameStrings(profile.permissions.source, [GITLAB_REVIEW_SPECIALIST_TEMPLATE, ownerMarker])
@@ -358,6 +386,31 @@ function gitLabReviewSpecialistTemplateIds(ownerSessionID: string) {
     gitLabReviewSpecialistOwnerMarker(ownerSessionID),
     RuntimeResourceResolver.resourceTemplateId(),
   ]
+}
+
+async function hasGitLabReviewOwnerRuntimeProvenance(session: Session.Info) {
+  const profile = await SessionRuntimeProfile.read(session)
+  return Boolean(profile && isGitLabReviewOwnerRuntimeProfile(session, profile))
+}
+
+function isGitLabReviewOwnerRuntimeProfile(session: Session.Info, profile: SessionProfileSnapshot) {
+  const templates = new Set(profile.sourceTemplateIds)
+  return profile.id === session.runtime?.profileSnapshotId
+    && profile.sessionId === session.id
+    && profile.agent.name === GITLAB_REVIEW_COORDINATOR
+    && profile.agent.source === "internal-runtime"
+    && templates.has("browser-gitlab")
+    && (templates.has("gitlab-mr") || templates.has("gitlab-commit"))
+    && templates.has(RuntimeResourceResolver.resourceTemplateId())
+    && (profile.resources.builtinTools.enabledGroups ?? []).includes("gitlab-context")
+}
+
+function hasGitLabReviewAgentProvenance(agent: Agent.Info | undefined, name: string) {
+  return agent?.name === name
+    && agent.source?.owner.id === "gitlab"
+    && agent.source.owner.kind === "platform"
+    && agent.source.sourceID === GITLAB_REVIEW_AGENT_SOURCE
+    && agent.source.visibility === "recommendable"
 }
 
 function sameClient(left: Session.Client | undefined, right: Session.Client | undefined) {

@@ -3,6 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { Hono } from "hono"
 import { tmpdir } from "os"
 import { join } from "path"
+import { Instance } from "../../src/project/instance"
+import { Webhook } from "../../src/webhook/webhook"
+import { tmpdir as projectTmpdir } from "../fixture/fixture"
 import {
   rejectGitLabReviewRuntimeConfiguration,
   reportGitLabReviewRunFailure,
@@ -22,6 +25,7 @@ import {
   gitLabReviewPublishStatus,
   gitLabReviewCiNotQueriedPatch,
   gitLabReviewControllerResponsePatch,
+  createWebhookPublicRoutes,
   gitLabReviewRuntimePatch,
   gitLabReviewRuntimeTools,
   gitLabReviewRuntimeFailure,
@@ -177,6 +181,60 @@ function exactSizeJsonBody(bytes: number) {
 }
 
 describe("webhook status URL selection", () => {
+  test("keeps a generic webhook run terminal when completion beats the controller response", async () => {
+    await using project = await projectTmpdir({ git: true })
+
+    await Instance.provide({
+      directory: project.path,
+      fn: async () => {
+        const created = await Webhook.createSource({
+          name: "Fast completion source",
+          projectID: Instance.project.id,
+          requestGuards: {
+            dedupe: { enabled: false, ttlSeconds: 3600 },
+            rateLimit: { enabled: false, maxRequests: 20, windowSeconds: 60 },
+            cooldown: { enabled: false, seconds: 0 },
+            replayProtection: { enabled: false, maxSkewSeconds: 300 },
+          },
+        })
+        const app = createWebhookPublicRoutes({
+          runner: async (input) => {
+            const response = {
+              accepted: true,
+              sessionID: "session-fast-webhook",
+              turnSnapshotId: "turn-fast-webhook",
+              status: 202,
+              response: { accepted: true, turnSnapshotId: "turn-fast-webhook" },
+            } as any
+            await input.onFinished?.({ status: "succeeded" })
+            await input.onControllerResponse?.(response)
+            return response
+          },
+        })
+
+        const response = await app.request(
+          `http://localhost/${created.source.id}/${created.secret}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ event: "push" }),
+          },
+        )
+
+        expect(response.status).toBe(202)
+        const [run] = await Webhook.listRuns({ sourceID: created.source.id })
+        expect(run).toMatchObject({
+          status: "succeeded",
+          sessionID: "session-fast-webhook",
+          turnSnapshotId: "turn-fast-webhook",
+        })
+        expect(run?.time.started).toBeNumber()
+        expect(run?.time.finished).toBeNumber()
+        expect(run!.time.finished!).toBeGreaterThanOrEqual(run!.time.started!)
+      },
+    })
+  })
+
   test("does not move a terminal GitLab review run back to running", () => {
     const response = {
       accepted: true,

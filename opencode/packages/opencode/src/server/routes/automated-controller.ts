@@ -1,8 +1,9 @@
 import { Bus } from "@/bus"
-import type { PermissionNext } from "@/permission/next"
+import { PermissionNext } from "@/permission/next"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { Instance } from "@/project/instance"
 import type { RuntimeControllerProtocol } from "@/runtime/controller/protocol"
+import { SessionPrompt } from "@/session/prompt"
 import {
   answerInteraction,
   createControllerSession,
@@ -148,6 +149,7 @@ export function startAutomatedRunMonitor(input: {
   timeoutMs: number
   timeoutMessage?: string
   interactionPolicy: AutomatedInteractionPolicy
+  cancelSession?: (sessionID: string) => unknown
   onFinished?: (result: { status: AutomatedRunStatus; error?: string }) => Promise<void>
   onRuntimeOutput?: AutomatedControllerInput["onRuntimeOutput"]
   onInteraction?: AutomatedControllerInput["onInteraction"]
@@ -163,10 +165,22 @@ export function startAutomatedRunMonitor(input: {
     unsubscribe = undefined
   }
 
-  const finish = async (status: AutomatedRunStatus, error?: string) => {
+  const finish = async (
+    status: AutomatedRunStatus,
+    error?: string,
+    options?: { cancelSession?: boolean },
+  ) => {
     if (finished) return
     finished = true
     dispose()
+    if (options?.cancelSession) {
+      const cancelSession = input.cancelSession ?? SessionPrompt.cancel
+      try {
+        cancelSession(input.sessionID)
+      } catch {
+        // The terminal callback must still run when cancellation cleanup fails.
+      }
+    }
     await input.onFinished?.({ status, error }).catch(() => undefined)
   }
 
@@ -177,11 +191,13 @@ export function startAutomatedRunMonitor(input: {
     if (eventSessionID !== input.sessionID) return
 
     if (event.type === "permission.asked") {
+      const permission = String(properties?.permission || "unknown")
       const allow = input.interactionPolicy.permission === "allow-session"
+        && !PermissionNext.isSecurityCritical(permission)
       const action = allow ? "allow-session" : "deny"
       const error = allow
         ? undefined
-        : `Permission request denied automatically: ${String(properties?.permission || "unknown")}`
+        : `Permission request denied automatically: ${permission}`
       await answerInteraction(String(properties?.id || ""), {
         kind: "permission",
         answer: action,
@@ -244,7 +260,11 @@ export function startAutomatedRunMonitor(input: {
   })
 
   timeout = setTimeout(() => {
-    finish("failed", input.timeoutMessage ?? "Automated run monitor timed out.").catch(() => undefined)
+    finish(
+      "failed",
+      input.timeoutMessage ?? "Automated run monitor timed out.",
+      { cancelSession: true },
+    ).catch(() => undefined)
   }, input.timeoutMs)
   timeout.unref?.()
 

@@ -15,6 +15,7 @@ import {
   runAutomatedControllerSession,
   type AutomatedControllerResponse,
   type AutomatedControllerRunner,
+  type AutomatedRunStatus,
 } from "./automated-controller"
 import {
   extractGitLabReviewStageResultFromRuntimeText,
@@ -293,6 +294,7 @@ async function handleWebhookTrigger(c: any, input: {
   authentication:
     | { type: "public-secret"; secret: string }
     | { type: "management-test" }
+  runner?: AutomatedControllerRunner
 }) {
   const { sourceID } = input
   let source: Webhook.Source
@@ -440,7 +442,21 @@ async function handleWebhookTrigger(c: any, input: {
 
     try {
       const directory = projectDirectory(project)
-      const created = await runAutomatedControllerSession({
+      const startedAt = Date.now()
+      let terminal:
+        | {
+            status: AutomatedRunStatus
+            error?: string
+            finishedAt: number
+        }
+        | undefined
+      let runUpdateTail = Promise.resolve()
+      const queueRunUpdate = <T>(operation: () => Promise<T>) => {
+        const current = runUpdateTail.then(operation, operation)
+        runUpdateTail = current.then(() => undefined, () => undefined)
+        return current
+      }
+      const created = await (input.runner ?? runAutomatedControllerSession)({
         directory,
         title: `Webhook: ${source.name}`,
         permission: permissionForSource(source),
@@ -459,31 +475,46 @@ async function handleWebhookTrigger(c: any, input: {
         },
         async onControllerResponse(response) {
           const responseBody = responseForRun(run.id, response)
-          await Webhook.updateRun(run.id, {
-            sessionID: response.sessionID,
-            turnSnapshotId: response.turnSnapshotId,
-            status: response.accepted ? "running" : "failed",
-            httpStatus: response.status,
-            responseBody,
-            time: { started: Date.now() },
-            ...(response.accepted ? {} : { error: "controller_message_not_accepted" }),
+          await queueRunUpdate(async () => {
+            const finished = terminal
+            await Webhook.updateRun(run.id, {
+              sessionID: response.sessionID,
+              turnSnapshotId: response.turnSnapshotId,
+              status: finished?.status ?? (response.accepted ? "running" : "failed"),
+              httpStatus: response.status,
+              responseBody,
+              time: {
+                started: startedAt,
+                ...(finished ? { finished: finished.finishedAt } : {}),
+              },
+              ...(finished?.error
+                ? { error: finished.error }
+                : response.accepted || finished
+                  ? {}
+                  : { error: "controller_message_not_accepted" }),
+            })
           })
           if (response.accepted) {
             await Webhook.markCooldown(source, run.id)
           }
         },
         async onFinished(result) {
-          await Webhook.updateRun(run.id, {
-            status: result.status,
-            ...(result.error ? { error: result.error } : {}),
-            time: { finished: Date.now() },
-          }).catch(() => undefined)
+          const finished = {
+            ...result,
+            finishedAt: Math.max(Date.now(), startedAt),
+          }
+          terminal = finished
+          await queueRunUpdate(() => Webhook.updateRun(run.id, {
+            status: finished.status,
+            ...(finished.error ? { error: finished.error } : {}),
+            time: { finished: finished.finishedAt },
+          })).catch(() => undefined)
         },
         async onInteraction(interaction) {
           if (!interaction.error) return
-          await Webhook.updateRun(run.id, {
+          await queueRunUpdate(() => Webhook.updateRun(run.id, {
             error: interaction.error,
-          }).catch(() => undefined)
+          })).catch(() => undefined)
         },
       })
 
@@ -507,11 +538,12 @@ async function handleWebhookTrigger(c: any, input: {
   })
 }
 
-async function triggerWebhook(c: any) {
+async function triggerWebhook(c: any, options: { runner?: AutomatedControllerRunner } = {}) {
   const { sourceID, secret } = c.req.param()
   return handleWebhookTrigger(c, {
     sourceID,
     authentication: { type: "public-secret", secret },
+    runner: options.runner,
   })
 }
 
@@ -931,8 +963,8 @@ function uniqueStrings(items: string[]) {
   return [...new Set(items)]
 }
 
-export const WebhookPublicRoutes = lazy(() =>
-  new Hono()
+export function createWebhookPublicRoutes(options: { runner?: AutomatedControllerRunner } = {}) {
+  return new Hono()
     .post("/gitlab", gitLabReviewWebhookBodyLimit, triggerGitLabReviewWebhook)
     .post(
       "/gitlab/:secret",
@@ -943,9 +975,11 @@ export const WebhookPublicRoutes = lazy(() =>
     .post(
       "/:sourceID/:secret",
       validator("param", z.object({ sourceID: z.string(), secret: z.string() })),
-      triggerWebhook,
-    ),
-)
+      (c) => triggerWebhook(c, options),
+    )
+}
+
+export const WebhookPublicRoutes = lazy(() => createWebhookPublicRoutes())
 
 export const WebhookRoutes = lazy(() =>
   new Hono()

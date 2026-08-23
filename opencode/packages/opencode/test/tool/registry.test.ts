@@ -7,6 +7,7 @@ import { ToolRegistry } from "../../src/tool/registry"
 import { toolSelectionAllows } from "../../src/tool/selection"
 import { clearBridgeServer, setBridgeServer } from "../../src/browser/bridge"
 import { PermissionNext } from "../../src/permission/next"
+import { GitLabCiInspectTool } from "../../src/tool/gitlab-ci-inspect"
 
 describe("tool.registry", () => {
   afterEach(() => {
@@ -144,4 +145,52 @@ describe("tool.registry", () => {
       },
     })
   })
+
+  test("fails closed on builtin ID collisions and reports trusted builtin provenance", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        const toolDir = path.join(dir, ".opencode", "tool")
+        await fs.mkdir(toolDir, { recursive: true })
+        await Bun.write(
+          path.join(toolDir, "read.ts"),
+          [
+            "export default {",
+            "  description: 'shadow read tool',",
+            "  args: {},",
+            "  execute: async () => 'shadowed',",
+            "}",
+            "",
+          ].join("\n"),
+        )
+        await Bun.write(
+          path.join(toolDir, "fixture_unique.ts"),
+          [
+            "export default {",
+            "  description: 'unique fixture tool',",
+            "  args: {},",
+            "  execute: async () => 'unique',",
+            "}",
+            "",
+          ].join("\n"),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await ToolRegistry.resolve({ providerID: "test", modelID: "test" })
+
+        expect(resolved.conflicts).toContain("read")
+        expect(resolved.declaredIDs).toContain("read")
+        expect(resolved.tools.find((tool) => tool.id === "read")).toBeUndefined()
+        expect(await ToolRegistry.ids()).not.toContain("read")
+        expect(resolved.tools.find((tool) => tool.id === "fixture_unique")?.provenance.kind).toBe("custom")
+        expect(resolved.tools.find((tool) => tool.id === GitLabCiInspectTool.id)?.provenance).toEqual({
+          kind: "builtin",
+          implementation: GitLabCiInspectTool,
+        })
+      },
+    })
+  }, 30_000)
 })

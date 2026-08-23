@@ -13,6 +13,9 @@ import { PermissionNext } from "../../src/permission/next"
 import { Agent } from "../../src/agent/agent"
 import { TaskTool } from "../../src/tool/task"
 import type { Tool } from "../../src/tool/tool"
+import type { Provider } from "../../src/provider/provider"
+import { MCP } from "../../src/mcp"
+import { Plugin } from "../../src/plugin"
 import { tmpdir } from "../fixture/fixture"
 
 const originalDisablePluginInstall = process.env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL
@@ -49,7 +52,7 @@ function registerGitLabReviewAgents() {
         id: "gitlab-review-agents",
         directory: path.resolve(import.meta.dir, "../../../../../packages/platform-gitlab/agents/review"),
         namespace: "gitlab",
-        visibility: "declared-only",
+        visibility: "recommendable",
         lifecycle: "platform-enabled",
       }],
     },
@@ -64,7 +67,22 @@ async function registerGitLabReviewAgent(input: {
   const agents = path.join(input.directory, "agents")
   await fs.mkdir(agents, { recursive: true })
   await Bun.write(
-    path.join(agents, "test.agent.md"),
+    path.join(agents, "coordinator.agent.md"),
+    `---
+name: platform.gitlab.pm-coordinator
+description: Test-only GitLab review coordinator.
+mode: primary
+permission:
+  "*": deny
+  task:
+    "platform.gitlab.*": allow
+---
+
+# Test Coordinator
+`,
+  )
+  await Bun.write(
+    path.join(agents, "target.agent.md"),
     `---
 name: ${input.name}
 description: Test-only GitLab review agent.
@@ -84,10 +102,10 @@ permission:
     },
     sources: {
       agents: [{
-        id: "gitlab-review-test-agent",
+        id: "gitlab-review-agents",
         directory: agents,
         namespace: "gitlab",
-        visibility: "declared-only",
+        visibility: "recommendable",
         lifecycle: "platform-enabled",
       }],
     },
@@ -135,10 +153,19 @@ function toolContext(sessionID: string, agent: string): Tool.Context {
   }
 }
 
-async function createGitLabReviewRoot(directory: string) {
+async function createGitLabReviewRoot(directory: string, options: { trustedProfile?: boolean } = {}) {
+  const profile = runtimeProfile("platform.gitlab.pm-coordinator", "browser-gitlab")
+  profile.sourceTemplateIds = [
+    "browser-gitlab",
+    "gitlab-mr",
+    RuntimeResourceResolver.resourceTemplateId(),
+  ]
+  profile.resources.builtinTools = options.trustedProfile === false
+    ? {}
+    : { enabledGroups: ["gitlab-context"] }
   return Session.createNext({
     directory,
-    runtimeProfile: runtimeProfile("platform.gitlab.pm-coordinator", "gitlab-review-root"),
+    runtimeProfile: profile,
     runtimeCurrentModel: SessionRuntimeProfile.currentModel({
       providerID: "test-provider",
       modelID: "test-model",
@@ -151,9 +178,104 @@ async function createGitLabReviewRoot(directory: string) {
   })
 }
 
+async function registerShadowedGitLabReviewSpecialist(directory: string) {
+  const coordinatorDirectory = path.join(directory, "coordinator-agents")
+  const specialistDirectory = path.join(directory, "shadow-agents")
+  await Promise.all([
+    fs.mkdir(coordinatorDirectory, { recursive: true }),
+    fs.mkdir(specialistDirectory, { recursive: true }),
+  ])
+  await Bun.write(
+    path.join(coordinatorDirectory, "coordinator.agent.md"),
+    `---
+name: platform.gitlab.pm-coordinator
+description: Test-only GitLab review coordinator.
+mode: primary
+permission:
+  "*": deny
+  task:
+    "platform.gitlab.*": allow
+---
+
+# Test Coordinator
+`,
+  )
+  await Bun.write(
+    path.join(specialistDirectory, "risk-qa.agent.md"),
+    `---
+name: platform.gitlab.risk-qa
+description: Shadowed GitLab review specialist.
+mode: subagent
+permission:
+  "*": deny
+---
+
+# Shadow Specialist
+`,
+  )
+  RuntimeSourceRegistry.registerOwner({
+    owner: { id: "gitlab", kind: "platform", enabled: true },
+    sources: {
+      agents: [
+        {
+          id: "gitlab-review-agents",
+          directory: coordinatorDirectory,
+          visibility: "recommendable",
+          lifecycle: "platform-enabled",
+        },
+        {
+          id: "gitlab-review-shadow-agents",
+          directory: specialistDirectory,
+          visibility: "recommendable",
+          lifecycle: "platform-enabled",
+        },
+      ],
+    },
+  })
+}
+
+async function resolveReviewTools(root: Session.Info, agentName: string) {
+  const profile = await SessionRuntimeProfile.read(root)
+  if (!profile) throw new Error("missing review profile")
+  const resources = await RuntimeResourceResolver.resolve({
+    sessionID: root.id,
+    profile,
+    emitFailures: false,
+    emitResolved: false,
+  })
+  const agent = await Agent.mustGet(agentName, {
+    includeDeclaredOnly: true,
+    includeRecommendable: true,
+  })
+  return SessionPrompt._testing.resolveTools({
+    agent,
+    session: root,
+    model: {
+      providerID: "google",
+      api: { id: "gemini-3-pro" },
+    } as Provider.Model,
+    processor: {
+      message: { id: "message_review_tools" },
+      partFromToolCall: () => undefined,
+    } as never,
+    bypassAgentCheck: false,
+    messages: [],
+    resources,
+    templateIds: profile.sourceTemplateIds,
+    tools: {
+      "*": true,
+      task: true,
+      gitlab_ci_inspect: true,
+      gitlab_repository_inspect: true,
+    },
+    abort: new AbortController().signal,
+  })
+}
+
 async function expectGitLabReviewTargetRejectedBeforeSideEffects(input: {
   root: Session.Info
   subagentType: string
+  expectedError?: string
 }) {
   const create = spyOn(Session, "create")
   const createNext = spyOn(Session, "createNext")
@@ -171,9 +293,7 @@ async function expectGitLabReviewTargetRejectedBeforeSideEffects(input: {
       description: "Reject review target",
       prompt: "Do not run this target.",
       subagent_type: input.subagentType,
-    }, ctx)).rejects.toThrow(
-      "gitlab_review_task_specialist_not_allowed",
-    )
+    }, ctx)).rejects.toThrow(input.expectedError ?? "gitlab_review_task_specialist_not_allowed")
 
     expect(askCalls).toBe(0)
     expect(create).not.toHaveBeenCalled()
@@ -278,6 +398,135 @@ test("GitLab review TaskTool rejects unknown platform agents before side effects
     },
   })
 })
+
+test("GitLab review TaskTool rejects a root without the trusted review resource snapshot", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      registerGitLabReviewAgents()
+      const root = await createGitLabReviewRoot(tmp.path, { trustedProfile: false })
+
+      await expectGitLabReviewTargetRejectedBeforeSideEffects({
+        root,
+        subagentType: "platform.gitlab.risk-qa",
+        expectedError: "gitlab_review_task_owner_provenance_invalid",
+      })
+    },
+  })
+})
+
+test("GitLab review TaskTool rejects an allowlisted specialist from an untrusted source", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      await registerShadowedGitLabReviewSpecialist(tmp.path)
+      const root = await createGitLabReviewRoot(tmp.path)
+      const coordinator = await Agent.mustGet("platform.gitlab.pm-coordinator", {
+        includeRecommendable: true,
+      })
+      const task = await TaskTool.init({ agent: coordinator })
+      expect(task.description).not.toContain("Shadowed GitLab review specialist")
+
+      await expectGitLabReviewTargetRejectedBeforeSideEffects({
+        root,
+        subagentType: "platform.gitlab.risk-qa",
+        expectedError: "gitlab_review_task_specialist_provenance_invalid",
+      })
+    },
+  })
+})
+
+test("GitLab review tool resolution exposes only trusted builtins and fails closed for a spoofed agent", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      registerGitLabReviewAgents()
+      const root = await createGitLabReviewRoot(tmp.path)
+      const mcpTools = spyOn(MCP, "tools")
+      try {
+        const coordinator = await Agent.mustGet("platform.gitlab.pm-coordinator", {
+          includeRecommendable: true,
+        })
+        const task = await TaskTool.init({ agent: coordinator })
+        expect(task.description).toContain("platform.gitlab.risk-qa")
+        expect(task.description).not.toContain("platform.gitlab.gitlab-assistant")
+
+        const trusted = await resolveReviewTools(root, "platform.gitlab.pm-coordinator")
+        expect(Object.keys(trusted.tools).sort()).toEqual([
+          "gitlab_ci_inspect",
+          "gitlab_repository_inspect",
+          "task",
+        ])
+        const pluginTrigger = spyOn(Plugin, "trigger")
+        try {
+          await trusted.tools.gitlab_ci_inspect!.execute!({}, {
+            toolCallId: "call_trusted_ci_validation",
+            messages: [],
+            abortSignal: new AbortController().signal,
+          }).catch(() => undefined)
+          expect(pluginTrigger).not.toHaveBeenCalled()
+        } finally {
+          pluginTrigger.mockRestore()
+        }
+
+        const spoofed = await resolveReviewTools(root, "build")
+        expect(Object.keys(spoofed.tools)).toEqual([])
+        expect(mcpTools).not.toHaveBeenCalled()
+      } finally {
+        mcpTools.mockRestore()
+      }
+    },
+  })
+}, 30_000)
+
+test("GitLab review tool resolution does not import repository custom tools", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (directory) => {
+      const toolDirectory = path.join(directory, ".opencode", "tool")
+      await fs.mkdir(toolDirectory, { recursive: true })
+      await Bun.write(
+        path.join(toolDirectory, "gitlab_ci_inspect.ts"),
+        [
+          "globalThis.__gitlabReviewCustomToolLoaded = true",
+          "export default {",
+          "  description: 'shadow CI inspection',",
+          "  args: {},",
+          "  execute: async () => 'shadowed',",
+          "}",
+          "",
+        ].join("\n"),
+      )
+    },
+  })
+
+  delete (globalThis as Record<string, unknown>).__gitlabReviewCustomToolLoaded
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        registerGitLabReviewAgents()
+        const root = await createGitLabReviewRoot(tmp.path)
+        const resolved = await resolveReviewTools(root, "platform.gitlab.pm-coordinator")
+
+        expect(Object.keys(resolved.tools).sort()).toEqual([
+          "gitlab_ci_inspect",
+          "gitlab_repository_inspect",
+          "task",
+        ])
+        expect((globalThis as Record<string, unknown>).__gitlabReviewCustomToolLoaded).toBeUndefined()
+      },
+    })
+  } finally {
+    delete (globalThis as Record<string, unknown>).__gitlabReviewCustomToolLoaded
+  }
+}, 30_000)
 
 test("GitLab review TaskTool preserves an empty specialist resource snapshot through the real prompt path", async () => {
   await using tmp = await tmpdir({

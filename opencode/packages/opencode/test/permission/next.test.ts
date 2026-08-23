@@ -549,6 +549,49 @@ test("ask - resolves immediately when action is allow", async () => {
   })
 })
 
+test("ask - autonomous mode does not auto-allow GitLab publication permissions", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    config: {
+      autonomous: {
+        enabled: true,
+        maxRetries: 3,
+        askAfterRetries: true,
+        allowDoomLoop: true,
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      await expect(PermissionNext.ask({
+        sessionID: "session_autonomous_read",
+        permission: "gitlab_cli_read",
+        patterns: ["gitlab.example.com/group/project"],
+        metadata: {},
+        always: [],
+        ruleset: [{ permission: "gitlab_cli_read", pattern: "*", action: "ask" }],
+      })).resolves.toBeUndefined()
+
+      const publication = PermissionNext.ask({
+        id: "permission_gitlab_publish_test",
+        sessionID: "session_autonomous_publish",
+        permission: "gitlab_cli_publish_review_note",
+        patterns: ["gitlab.example.com/group/project"],
+        metadata: {},
+        always: [],
+        ruleset: [{ permission: "gitlab_cli_publish_review_note", pattern: "*", action: "ask" }],
+      })
+      await waitForPendingPermission("permission_gitlab_publish_test")
+      await PermissionNext.reply({ requestID: "permission_gitlab_publish_test", reply: "reject" })
+
+      await expect(publication).rejects.toBeInstanceOf(PermissionNext.RejectedError)
+      expect(PermissionNext.isSecurityCritical("gitlab_cli_publish_review_discussion")).toBe(true)
+      expect(PermissionNext.isSecurityCritical("gitlab_cli_read")).toBe(false)
+    },
+  })
+})
+
 test("ask - throws RejectedError when action is deny", async () => {
   await using tmp = await tmpdir({ git: true })
   await Instance.provide({
