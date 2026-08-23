@@ -105,4 +105,4 @@
 
 Plan 21 的首轮最终修复已形成 `6dc1c7d`、`1c291de`、`ca7c3ff`、`509eb44` 四个提交，并普通推送到 `origin/feat/gitlab-review-workflow-v2`。fresh 根测试为 `571 pass / 0 fail`，根与 OpenCode typecheck、Web build 均通过。后续 scoped 复审仍确认 4 组架构性遗留，已由 Plan 23 接管；在 Plan 23 的生产任务、独立复审和最终验证完成前，分支不宣称达到最终合并条件。
 
-2026-08-23 的 PR #52 follow-up 又完成五个加固提交：`d54759d`、`ac70d87`、`4ae1f78`、`6f52b5a`、`a9067f1`。新增覆盖 CLI 可执行文件信任、统一 host 策略、配置停用、ReviewRun claim/lease/terminal 原子性、自动 Review 工具实现 provenance、custom/MCP/plugin 隔离、monitor 取消和通用 Webhook 终态竞争；最终自动化与 live-integration 状态以 Plan 25 为准。
+2026-08-23 的 PR #52 follow-up 又完成六个加固提交：`d54759d`、`ac70d87`、`4ae1f78`、`6f52b5a`、`a9067f1`、`305d3f8`。新增覆盖 CLI 可执行文件及仓库目录树信任、统一 host 策略、配置停用、ReviewRun claim/lease/terminal 原子性、自动 Review 工具实现 provenance、custom/MCP/plugin 隔离、monitor 取消和通用 Webhook 终态竞争；最终自动化与 live-integration 状态以 Plan 25 为准。

@@ -79,7 +79,7 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 
 ### Batch 6：CLI 执行可信化与 diff 覆盖诊断
 
-完成项（提交 `d54759d`）：
+完成项（提交 `d54759d`、`305d3f8`）：
 
 - `glab` 只从受信任的进程 `PATH` 解析一次，不允许仓库根目录及其任意子目录（包括 `node_modules/.bin`、`tools`）中的同名程序覆盖可执行文件。
 - 缓存后的 `glab` 真实路径会按每次调用的仓库目录树再次校验，拒绝在切换项目后落入新仓库边界的路径。
