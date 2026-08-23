@@ -13,15 +13,16 @@ import {
 } from '../src/cli'
 
 describe('GitLab CLI capability layer', () => {
-  test('resolves glab once from trusted PATH without selecting the repository cwd', async () => {
+  test('resolves glab once from trusted PATH without selecting the repository tree', async () => {
     const root = await mkdtemp(join(tmpdir(), 'nine1bot-glab-path-'))
     const repository = join(root, 'repository')
+    const repositoryBin = join(repository, 'node_modules', '.bin')
     const trustedBin = join(root, 'trusted-bin')
     const executableName = process.platform === 'win32' ? 'glab.exe' : 'glab'
-    const repositoryCandidate = join(repository, executableName)
+    const repositoryCandidate = join(repositoryBin, executableName)
     const trustedCandidate = join(trustedBin, executableName)
     try {
-      await mkdir(repository)
+      await mkdir(repositoryBin, { recursive: true })
       await mkdir(trustedBin)
       await copyFile(process.execPath, repositoryCandidate)
       await copyFile(process.execPath, trustedCandidate)
@@ -32,7 +33,7 @@ describe('GitLab CLI capability layer', () => {
       const trustedExecutable = await realpath(trustedCandidate)
       const executions: Array<{ executable: string; cwd?: string }> = []
       const runner = createGlabRunner({
-        env: { PATH: [repository, trustedBin].join(delimiter) },
+        env: { PATH: [repositoryBin, trustedBin].join(delimiter) },
         execute: async (request) => {
           executions.push({ executable: request.executable, cwd: request.cwd })
           return { stdout: 'glab version 1.45.0', stderr: '', exitCode: 0 }
@@ -55,25 +56,26 @@ describe('GitLab CLI capability layer', () => {
   test('rejects a cached glab path when a later repository cwd contains it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'nine1bot-glab-cached-cwd-'))
     const repository = join(root, 'repository')
-    const trustedBin = join(root, 'trusted-bin')
+    const repositoryBin = join(repository, 'tools')
+    const otherRepository = join(root, 'other-repository')
     const executableName = process.platform === 'win32' ? 'glab.exe' : 'glab'
-    const trustedCandidate = join(trustedBin, executableName)
+    const repositoryCandidate = join(repositoryBin, executableName)
     try {
-      await mkdir(repository)
-      await mkdir(trustedBin)
-      await copyFile(process.execPath, trustedCandidate)
-      if (process.platform !== 'win32') await chmod(trustedCandidate, 0o755)
+      await mkdir(repositoryBin, { recursive: true })
+      await mkdir(otherRepository)
+      await copyFile(process.execPath, repositoryCandidate)
+      if (process.platform !== 'win32') await chmod(repositoryCandidate, 0o755)
       const executions: string[] = []
       const runner = createGlabRunner({
-        env: { PATH: trustedBin },
+        env: { PATH: repositoryBin },
         execute: async (request) => {
           executions.push(request.executable)
           return { stdout: 'glab version 1.45.0', stderr: '', exitCode: 0 }
         },
       })
 
-      const first = await runner(['--version'], { cwd: repository })
-      const second = await runner(['--version'], { cwd: trustedBin })
+      const first = await runner(['--version'], { cwd: otherRepository })
+      const second = await runner(['--version'], { cwd: repository })
 
       expect(first.exitCode).toBe(0)
       expect(second).toMatchObject({

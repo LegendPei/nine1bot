@@ -81,8 +81,8 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 
 完成项（提交 `d54759d`）：
 
-- `glab` 只从受信任的进程 `PATH` 解析一次，不允许仓库工作目录中的同名程序覆盖可执行文件。
-- 缓存后的 `glab` 路径会再次校验，拒绝后来落入仓库目录的路径。
+- `glab` 只从受信任的进程 `PATH` 解析一次，不允许仓库根目录及其任意子目录（包括 `node_modules/.bin`、`tools`）中的同名程序覆盖可执行文件。
+- 缓存后的 `glab` 真实路径会按每次调用的仓库目录树再次校验，拒绝在切换项目后落入新仓库边界的路径。
 - 子进程使用受控环境，不继承 GitLab token、CI 凭证、代理和可改变认证目标的变量。
 - 认证状态按显式目标 host 检查，不再依赖当前目录或 `glab` 默认 host。
 - MR/commit diff 获取采用 `maxFiles + 1` 的有界探测，并把“仍有更多文件”和 GitLab 自身截断状态写入 coverage 诊断，避免把不完整 diff 当作完整审查范围。
@@ -149,6 +149,7 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - CI 日志读取前置 list、token 零读取和 GitLab 零请求。
 - self-managed GitLab 的协议与 base path 在 canonical MR URL 中保持不变。
 - ReviewRun 状态机定向测试：132 pass / 0 fail。
+- GitLab CLI client 与 wrapper tools：39 pass / 0 fail。
 - OpenCode 权限、工具注册、TaskTool、monitor、Webhook 状态和真实 profile 路径：128 pass / 0 fail。
 - 仓库定义的 OpenCode runtime CI：194 pass / 0 fail；registry 补充用例：1 pass / 0 fail。
 - 根仓库 `ci:test`：746 pass / 0 fail，3283 次断言。

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
 import { access, realpath, stat } from 'node:fs/promises'
-import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { delimiter, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path'
 import { sanitizeGitLabSecrets } from '../review/sanitizer'
 import type { GitLabCliRunner, GitLabCliRunOptions, GitLabCliRunResult, GitLabCliStatus } from './types'
 
@@ -59,7 +59,7 @@ export function createGlabRunner(dependencies: GlabRunnerDependencies = {}): Git
     try {
       executable ??= resolveGlabExecutable(env, options.cwd)
       const executablePath = await executable
-      if (options.cwd && samePath(dirname(executablePath), await canonicalDirectory(options.cwd))) {
+      if (options.cwd && isPathWithin(await canonicalDirectory(options.cwd), executablePath)) {
         throw executableNotFoundError()
       }
       const result = await execute({
@@ -134,12 +134,12 @@ async function resolveGlabExecutable(env: NodeJS.ProcessEnv, cwd?: string) {
     if (!entry || !isAbsolute(entry)) continue
 
     const directory = await realpath(entry).catch(() => undefined)
-    if (!directory || (excludedDirectory && samePath(directory, excludedDirectory))) continue
+    if (!directory || (excludedDirectory && isPathWithin(excludedDirectory, directory))) continue
     for (const name of names) {
       const candidate = join(directory, name)
       if (!await isExecutableFile(candidate)) continue
       const executable = await realpath(candidate)
-      if (excludedDirectory && samePath(dirname(executable), excludedDirectory)) continue
+      if (excludedDirectory && isPathWithin(excludedDirectory, executable)) continue
       return executable
     }
   }
@@ -177,6 +177,14 @@ function samePath(left: string, right: string) {
   return process.platform === 'win32'
     ? left.toLowerCase() === right.toLowerCase()
     : left === right
+}
+
+function isPathWithin(directory: string, candidate: string) {
+  if (samePath(directory, candidate)) return true
+  const relation = relative(directory, candidate)
+  return relation !== '..'
+    && !relation.startsWith(`..${sep}`)
+    && !isAbsolute(relation)
 }
 
 function executableNotFoundError() {
