@@ -68,7 +68,7 @@
 24. [24-gitlab-cli-platform-tools-migration.md](./24-gitlab-cli-platform-tools-migration.md)
    - 基于平台注册机制选择性迁移 GitLab CLI wrapper、引导 skill、页面映射、权限边界、稳定性措施和后续真实联调计划。
 25. [25-pr52-review-follow-up-fixes.md](./25-pr52-review-follow-up-fixes.md)
-   - PR #52 最新 review 的 allowlist、瞬时 attempt 恢复、冻结仓库 wrapper、canonical MR URL 和 CI 调用顺序修复记录。
+   - PR #52 最新 review 的 allowlist、CLI/host 边界、冻结仓库 wrapper、ReviewRun 原子状态机、可信运行时工具和竞态修复记录。
 
 ## 当前交付目标
 
@@ -104,3 +104,5 @@
 真实 self-managed GitLab 的 webhook、可信 CI、远端 marker 对账与评论回写尚未在本批次执行，全部为 **待人工联调**；自动化测试不构成 live-integration 证据。
 
 Plan 21 的首轮最终修复已形成 `6dc1c7d`、`1c291de`、`ca7c3ff`、`509eb44` 四个提交，并普通推送到 `origin/feat/gitlab-review-workflow-v2`。fresh 根测试为 `571 pass / 0 fail`，根与 OpenCode typecheck、Web build 均通过。后续 scoped 复审仍确认 4 组架构性遗留，已由 Plan 23 接管；在 Plan 23 的生产任务、独立复审和最终验证完成前，分支不宣称达到最终合并条件。
+
+2026-08-23 的 PR #52 follow-up 又完成五个加固提交：`d54759d`、`ac70d87`、`4ae1f78`、`6f52b5a`、`a9067f1`。新增覆盖 CLI 可执行文件信任、统一 host 策略、配置停用、ReviewRun claim/lease/terminal 原子性、自动 Review 工具实现 provenance、custom/MCP/plugin 隔离、monitor 取消和通用 Webhook 终态竞争；最终自动化与 live-integration 状态以 Plan 25 为准。

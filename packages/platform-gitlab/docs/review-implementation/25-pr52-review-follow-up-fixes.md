@@ -1,6 +1,6 @@
 # PR #52 Review 跟进修复记录
 
-日期：2026-08-22
+日期：2026-08-23
 
 ## 1. 目标
 
@@ -77,6 +77,64 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - `ci_not_queried` 继续以 list 为正常协议依据，同时兼容历史上已存在 `jobLogReadCount` 的持久化记录，避免错误补记诊断。
 - CI 缺失、读取失败或任意 job 状态仍不阻断 Review 发布。
 
+### Batch 6：CLI 执行可信化与 diff 覆盖诊断
+
+完成项（提交 `d54759d`）：
+
+- `glab` 只从受信任的进程 `PATH` 解析一次，不允许仓库工作目录中的同名程序覆盖可执行文件。
+- 缓存后的 `glab` 路径会再次校验，拒绝后来落入仓库目录的路径。
+- 子进程使用受控环境，不继承 GitLab token、CI 凭证、代理和可改变认证目标的变量。
+- 认证状态按显式目标 host 检查，不再依赖当前目录或 `glab` 默认 host。
+- MR/commit diff 获取采用 `maxFiles + 1` 的有界探测，并把“仍有更多文件”和 GitLab 自身截断状态写入 coverage 诊断，避免把不完整 diff 当作完整审查范围。
+- 所有 CLI wrapper 继续使用固定参数和结构化输入；模型没有裸 `glab`、shell 或任意 API 调用能力。
+
+### Batch 7：统一 host 策略与配置可停用性
+
+完成项（提交 `ac70d87`、`4ae1f78`）：
+
+- 配置页、页面上下文、CLI URL 解析和浏览器目标共用同一套有效 host 策略。
+- host 优先从有效 `allowedHosts`、`baseUrl` 推导，最后才回退到 `gitlab.com`；非法 allowlist 保持 fail-closed。
+- 显式 URL 指向禁用 host 时不会被低优先级文本 URL 或裸项目简写绕过。
+- hostless 简写只在唯一有效 host 可确定时解析。
+- 页面跳转使用 host-aware 目标，支持 self-managed GitLab 协议和 base path。
+- 平台或自动 Review 被关闭时，陈旧项目绑定和 profile 诊断不再阻止保存；一旦重新开启，活动配置仍执行严格校验。
+- runtime 发布前重新读取实时配置；平台、Review 或 publication 模式已关闭时不再发布结果或失败通知。
+
+### Batch 8：ReviewRun 发布状态机原子化
+
+完成项（提交 `6f52b5a`）：
+
+- runtime 结果只接受严格、闭合的结构化 envelope，解析失败在任何 GitLab 访问前拒绝。
+- 结果发布与失败通知使用互斥 claim，同一 attempt 最多只有一个发布所有者。
+- 迟到的 runtime、失败通知和普通 store update 不能覆盖 terminal、published、partial 或 rejected 状态。
+- 活动 attempt 只有在租约明确过期后才允许创建关联 retry；重复 webhook 也必须证明旧租约失效。
+- retry 保留 `rootRunId`、`retryOf` 和递增 attempt，且每条 trigger lineage 有明确上限。
+- 进程重启后可降级遗留 publishing owner 并恢复 partial publication，不会把旧记录直接改写成新 attempt。
+- marker、失败记录和最终发布状态持久化失败时执行有界回滚；最终保存失败返回可恢复 partial，不伪装成 published。
+- store 裁剪按完整 attempt lineage 处理，并在超过上限时优先删除最老 attempt，避免孤立关系和无界增长。
+
+### Batch 9：自动 Review 运行时可信工具边界
+
+完成项（提交 `a9067f1`）：
+
+- GitLab 自动 Review 会话只暴露实现身份匹配的内置 `task`、`gitlab_ci_inspect` 和 `gitlab_repository_inspect`。
+- 工具冲突按 ID fail-closed：内置、自定义、MCP 和平台注册工具任意重复时，冲突实现全部不进入模型上下文。
+- 自动 Review 不扫描或导入仓库 `.opencode/tool*`，不枚举 MCP，也不加载平台注册工具；可信工具执行前后的仓库 plugin hook 同样不运行。
+- coordinator 同时校验会话 client、冻结 agent、agent source provenance、profile snapshot、对象模板、资源快照模板和 `gitlab-context` 组；只伪造 agent 名称无法获得工具。
+- `TaskTool` 只允许固定 GitLab specialist，并校验 specialist 的平台 owner、source 和 visibility；外部 session 不能把上下文、目录、资源、权限或 grant 带入 Review 子会话。
+- specialist profile 使用空 context、空 MCP、空 skill 和严格 deny 权限；恢复子会话时重新校验 parent、project、directory、client、profile、权限和 owner marker。
+- 自动模式不再自动批准 `gitlab_cli_publish_*` 权限；monitor 的 `allow-session` 策略也会拒绝这些安全关键写权限。
+
+### Batch 10：monitor 与通用 Webhook 终态竞争
+
+完成项（包含于 `a9067f1`）：
+
+- monitor 超时会主动取消对应 session，清理订阅，并保证 terminal callback 只执行一次。
+- 快速 `session.idle`、首消息失败和超时通过同一幂等 finish 路径收口。
+- 通用 Webhook 的 controller response、runtime finish 和 interaction 更新进入单一串行队列。
+- runtime 先完成、controller response 后返回时，持久化状态仍保持 succeeded/failed，不会回退到 running。
+- 真实 controller 创建路径测试确认 GitLab profile 包含 `browser-gitlab`、MR/commit 对象模板、资源快照标记、`internal-runtime` agent 来源和 `gitlab-context`。
+
 ## 3. 测试覆盖
 
 已完成聚焦红绿测试：
@@ -90,18 +148,27 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - 仓库查询次数、内容、累计输出和最终 tool DTO 均受限。
 - CI 日志读取前置 list、token 零读取和 GitLab 零请求。
 - self-managed GitLab 的协议与 base path 在 canonical MR URL 中保持不变。
-- CI inspector：25 pass / 0 fail。
-- 根仓库全量测试：712 pass / 0 fail。
-- OpenCode 相关工具、registry、webhook DTO 和 agent source 测试：53 pass / 0 fail。
-- 根仓库全部 package typecheck：通过。
+- ReviewRun 状态机定向测试：132 pass / 0 fail。
+- OpenCode 权限、工具注册、TaskTool、monitor、Webhook 状态和真实 profile 路径：128 pass / 0 fail。
+- 仓库定义的 OpenCode runtime CI：194 pass / 0 fail；registry 补充用例：1 pass / 0 fail。
+- 根仓库 `ci:test`：746 pass / 0 fail，3283 次断言。
+- 根仓库全部 package `ci:typecheck`：通过。
+- Web production build：通过（1869 modules transformed）。
 - OpenCode `tsgo --noEmit`：通过。
 
 全量测试曾在 Windows 上暴露仓库预算用例接近 Bun 默认 5 秒时限的问题。测试改为直接预置到查询额度临界值，只运行最后一次允许查询和一次拒绝查询；行为覆盖不变，预算用例耗时由约 3.9 秒降至约 1.3 秒。
 
-## 4. 尚未执行
+## 4. 后续计划
 
-- 未在真实 self-managed GitLab 上执行本批次新增仓库 wrapper 的联调。
-- 未替用户回复或 resolve GitHub review thread。
-- 未提交、未推送本批次本地修改。
+### 待部署联调
 
-上述远端动作需要单独确认；自动化通过不等于真实 GitLab 联调完成。
+- 在真实 self-managed GitLab 上复测 webhook、可信 CI 关联、仓库 wrapper、summary/discussion 回写和 partial publication 恢复。
+- 验证有 CI、无 CI、失败 CI、merge-result、merge-train、MR 更新和重复 webhook 场景。
+- 验证大 MR 的 diff 截断诊断、按需仓库上下文、输出预算和长上下文切片效果。
+
+### 待远端协作
+
+- 推送当前 PR 分支并等待 GitHub CI。
+- 根据最新提交回复或 resolve 对应 review thread；远端 thread 状态不由本地测试代替。
+
+自动化通过不等于真实 GitLab 联调完成。MCP 仍不在本项目方案内；对外能力继续由 skill 固定流程、wrapper tool 固定边界、context pipeline 控制注入。
