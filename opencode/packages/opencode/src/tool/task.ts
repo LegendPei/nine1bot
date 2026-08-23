@@ -205,7 +205,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       }
       ctx.abort.addEventListener("abort", cancel)
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
+      const promptParts: SessionPrompt.PromptInput["parts"] = gitLabReviewBoundary
+        ? [{ type: "text", text: params.prompt }]
+        : await SessionPrompt.resolvePromptParts(params.prompt)
 
       const result = await SessionPrompt.prompt({
         messageID,

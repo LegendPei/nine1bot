@@ -443,7 +443,6 @@ describe("webhook status URL selection", () => {
         trace: "must never reach the browser",
       },
       repository: {
-        directoryFingerprint: "a".repeat(64),
         queryCount: 4,
         readCount: 2,
         searchCount: 2,
@@ -563,7 +562,7 @@ describe("webhook status URL selection", () => {
     const failedRun = createRun(11, "management-failed-head")
     const malformedRun = createRun(12, "management-malformed-head")
     const fallbackStageResult = {
-      stage: "pm",
+      stage: "closed",
       status: "ok" as const,
       summary: "Review complete.",
       findings: [{
@@ -827,7 +826,7 @@ describe("webhook status URL selection", () => {
     const baseBodyCodeUnits = Math.floor(totalBodyCodeUnits / findingCount)
     const longerBodyCount = totalBodyCodeUnits % findingCount
     const stageResult = {
-      stage: "s",
+      stage: "closed",
       status: "ok",
       summary: "",
       findings: Array.from({ length: findingCount }, (_, index) => {
@@ -955,7 +954,7 @@ describe("webhook status URL selection", () => {
       },
     })
     const stageResult = {
-      stage: "s",
+      stage: "closed",
       status: "ok" as const,
       summary: "",
       findings: Array.from({ length: 60 }, (_, index) => ({
@@ -1169,13 +1168,12 @@ describe("webhook status URL selection", () => {
   })
 
   test("binds a fresh review session before runtime message delivery", () => {
-    expect(gitLabReviewSessionCreatedPatch("session_new", undefined, "a".repeat(64))).toEqual({
+    expect(gitLabReviewSessionCreatedPatch("session_new", undefined)).toEqual({
       status: "running",
       sessionId: "session_new",
       turnSnapshotId: undefined,
       error: undefined,
       repository: {
-        directoryFingerprint: "a".repeat(64),
         queryCount: 0,
         readCount: 0,
         searchCount: 0,

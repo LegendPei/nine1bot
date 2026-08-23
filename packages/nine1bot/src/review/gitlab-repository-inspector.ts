@@ -1,7 +1,14 @@
-import { spawn } from 'child_process'
-import { createHash } from 'crypto'
-import { realpathSync } from 'fs'
-import { resolve } from 'path'
+import {
+  decideGitLabReviewPathAccess,
+  GitLabApiClient,
+  GitLabApiError,
+  normalizeGitLabAuthority,
+  normalizeGitLabReviewSettings,
+  resolveGitLabApiBaseUrl,
+  type GitLabRepositoryTreeEntry,
+} from '@nine1bot/platform-gitlab/review'
+import type { PlatformSecretAccess, PlatformSecretRef } from '@nine1bot/platform-protocol'
+import type { PlatformManagerConfig } from '../platform/manager'
 import {
   ReviewRunStore,
   type ReviewRunIdentity,
@@ -57,6 +64,12 @@ export type GitLabRepositoryToolOutput =
       diagnostic: string
     }
 
+type GitLabRepositoryTarget = {
+  host: string
+  projectId: string | number
+  headSha: string
+}
+
 const MAX_REPOSITORY_QUERIES = 12
 const MAX_REPOSITORY_OUTPUT_BYTES = 128 * 1024
 const MAX_TOOL_CONTENT_BYTES = 20 * 1024
@@ -64,52 +77,20 @@ const MAX_FILE_BLOB_BYTES = 256 * 1024
 const MAX_READ_LINES = 200
 const DEFAULT_READ_LINES = 120
 const MAX_SEARCH_MATCHES = 50
+const MAX_SEARCH_MATCH_TEXT_BYTES = 2 * 1024
+const MAX_SEARCH_TREE_ENTRIES = 200
+const MAX_SEARCH_FILES = 32
+const MAX_SEARCH_FILE_BYTES = 64 * 1024
+const MAX_SEARCH_SOURCE_BYTES = 512 * 1024
 const MAX_GIT_PATH_BYTES = 1_024
 const MAX_SEARCH_QUERY_BYTES = 256
-const GIT_COMMAND_TIMEOUT_MS = 5_000
-const GIT_SUBPROCESS_ENVIRONMENT_KEYS = new Set([
-  'path',
-  'pathext',
-  'systemroot',
-  'windir',
-  'comspec',
-  'temp',
-  'tmp',
-  'tmpdir',
-])
-
-export function gitLabReviewRepositoryDirectoryFingerprint(directory: string) {
-  const canonical = realpathSync.native(resolve(directory))
-  const normalized = process.platform === 'win32' ? canonical.toLowerCase() : canonical
-  return createHash('sha256').update(normalized).digest('hex')
-}
-
-export function gitLabReviewRepositoryGitEnvironment(
-  environment: Record<string, string | undefined>,
-): Record<string, string> {
-  const sanitized: Record<string, string> = {}
-  for (const [key, value] of Object.entries(environment)) {
-    if (value !== undefined && GIT_SUBPROCESS_ENVIRONMENT_KEYS.has(key.toLowerCase())) {
-      sanitized[key] = value
-    }
-  }
-  return {
-    ...sanitized,
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_PAGER: 'cat',
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_NO_LAZY_FETCH: '1',
-    GIT_NO_REPLACE_OBJECTS: '1',
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-    GIT_ALLOW_PROTOCOL: '',
-  }
-}
 
 export async function inspectGitLabRepositoryForSession(input: {
   sessionId: string
-  directory: string
   request: GitLabRepositorySessionRequest
+  platforms: PlatformManagerConfig
+  secrets: PlatformSecretAccess
+  fetch?: typeof fetch
   signal?: AbortSignal
 }): Promise<GitLabRepositoryToolOutput> {
   const action = input.request.action
@@ -123,136 +104,100 @@ export async function inspectGitLabRepositoryForSession(input: {
   const lifecycleFailure = repositoryLifecycleFailure(identity, input.signal)
   if (lifecycleFailure) return failure(action, lifecycleFailure)
 
-  const headSha = reviewHeadSha(run)
-  if (!headSha) return failure(action, 'gitlab_review_head_identity_missing')
-  if (!projectSnapshotMatches(run)) {
+  const target = repositoryTargetForRun(run)
+  if (!target) return failure(action, 'gitlab_review_head_identity_missing')
+  if (!projectSnapshotMatches(run, target)) {
     return failure(action, 'gitlab_review_project_snapshot_missing')
   }
-  const binding = run.repository?.directoryFingerprint
-  if (!binding || !/^[a-f0-9]{64}$/.test(binding)) {
-    return failure(action, 'repository_directory_not_bound')
-  }
 
-  let directoryFingerprint: string
-  try {
-    directoryFingerprint = gitLabReviewRepositoryDirectoryFingerprint(input.directory)
-  } catch {
-    return failure(action, 'repository_directory_unavailable')
-  }
-  if (directoryFingerprint !== binding) {
-    return failure(action, 'repository_directory_binding_mismatch')
-  }
-
-  const validatedRequest = validateRequest(input.request)
+  const validatedRequest = validateRequest(input.request, run)
   if (!validatedRequest.ok) return failure(action, validatedRequest.diagnostic)
+
+  const platform = input.platforms.gitlab
+  const settings = normalizeGitLabReviewSettings(platform?.settings)
+  if (!platform?.enabled || !settings.enabled) {
+    return failure(action, 'gitlab_review_not_configured')
+  }
+  const resolvedBaseUrl = resolveGitLabApiBaseUrl({
+    configuredBaseUrl: settings.baseUrl,
+    triggerHost: target.host,
+  })
+  if (!resolvedBaseUrl.ok) return failure(action, resolvedBaseUrl.reason)
+
+  let token: string | undefined
+  try {
+    token = await resolveSecret(settings.tokenSecretRef, input.secrets)
+  } catch (error) {
+    const interrupted = repositoryLifecycleFailure(identity, input.signal)
+    if (interrupted) return failure(action, interrupted)
+    return failure(action, `repository_token_unavailable:${errorName(error)}`)
+  }
+  const tokenLifecycleFailure = repositoryLifecycleFailure(identity, input.signal)
+  if (tokenLifecycleFailure) return failure(action, tokenLifecycleFailure)
+  if (!token) return failure(action, 'repository_token_missing')
 
   const reservation = reserveRepositoryQuery(identity, action)
   if (!reservation.ok) return failure(action, reservation.diagnostic)
 
-  const repositoryFailure = await verifyBoundRepository({
-    directory: input.directory,
-    directoryFingerprint,
-    headSha,
-    signal: input.signal,
+  const client = new GitLabApiClient({
+    baseUrl: resolvedBaseUrl.baseUrl,
+    token,
+    fetch: input.fetch,
   })
-  if (repositoryFailure) return failure(action, repositoryFailure)
+  const requestState: GitLabRepositoryRequestState = {}
+  const requestGuard = repositoryRequestGuard(identity, input.signal, requestState)
 
   if (validatedRequest.request.action === 'read_file') {
     return await readFrozenFile({
       identity,
-      directory: input.directory,
-      headSha,
+      client,
+      target,
       request: validatedRequest.request,
       maxOutputBytes: reservation.maxOutputBytes,
+      requestGuard,
+      requestState,
       signal: input.signal,
     })
   }
   return await searchFrozenRepository({
     identity,
-    directory: input.directory,
-    headSha,
+    client,
+    target,
+    run,
     request: validatedRequest.request,
     maxOutputBytes: reservation.maxOutputBytes,
+    requestGuard,
+    requestState,
     signal: input.signal,
   })
-}
-
-async function verifyBoundRepository(input: {
-  directory: string
-  directoryFingerprint: string
-  headSha: string
-  signal?: AbortSignal
-}) {
-  const root = await runGit({
-    directory: input.directory,
-    args: ['rev-parse', '--show-toplevel'],
-    maxOutputBytes: 4_096,
-    signal: input.signal,
-  })
-  const rootFailure = gitCommandFailure(root)
-  if (rootFailure) return rootFailure
-  const rootPath = decodeUtf8(root.stdout)?.trim()
-  if (!rootPath) return 'repository_git_root_unavailable'
-  try {
-    if (gitLabReviewRepositoryDirectoryFingerprint(rootPath) !== input.directoryFingerprint) {
-      return 'repository_git_root_mismatch'
-    }
-  } catch {
-    return 'repository_git_root_unavailable'
-  }
-
-  const commit = await runGit({
-    directory: input.directory,
-    args: ['cat-file', '-e', `${input.headSha}^{commit}`],
-    maxOutputBytes: 1,
-    signal: input.signal,
-  })
-  const commitFailure = gitCommandFailure(commit)
-  if (commitFailure === 'repository_git_command_failed') return 'repository_head_unavailable'
-  return commitFailure
 }
 
 async function readFrozenFile(input: {
   identity: ReviewRunIdentity
-  directory: string
-  headSha: string
+  client: GitLabApiClient
+  target: GitLabRepositoryTarget
   request: Extract<GitLabRepositorySessionRequest, { action: 'read_file' }>
   maxOutputBytes: number
+  requestGuard: () => void
+  requestState: GitLabRepositoryRequestState
   signal?: AbortSignal
 }): Promise<GitLabRepositoryToolOutput> {
-  const object = `${input.headSha}:${input.request.path}`
-  const type = await runGit({
-    directory: input.directory,
-    args: ['cat-file', '-t', object],
-    maxOutputBytes: 64,
-    signal: input.signal,
-  })
-  const typeFailure = gitCommandFailure(type)
-  if (typeFailure === 'repository_git_command_failed') return failure('read_file', 'repository_file_not_found')
-  if (typeFailure) return failure('read_file', typeFailure)
-  if (decodeUtf8(type.stdout)?.trim() !== 'blob') return failure('read_file', 'repository_path_not_file')
-
-  const sizeResult = await runGit({
-    directory: input.directory,
-    args: ['cat-file', '-s', object],
-    maxOutputBytes: 64,
-    signal: input.signal,
-  })
-  const sizeFailure = gitCommandFailure(sizeResult)
-  if (sizeFailure) return failure('read_file', sizeFailure)
-  const size = Number.parseInt(decodeUtf8(sizeResult.stdout)?.trim() ?? '', 10)
-  if (!Number.isSafeInteger(size) || size < 0) return failure('read_file', 'repository_file_size_invalid')
-  if (size > MAX_FILE_BLOB_BYTES) return failure('read_file', 'repository_file_too_large')
-
-  const blob = await runGit({
-    directory: input.directory,
-    args: ['cat-file', 'blob', object],
-    maxOutputBytes: size + 1,
-    signal: input.signal,
-  })
-  const blobFailure = gitCommandFailure(blob)
-  if (blobFailure) return failure('read_file', blobFailure)
-  const source = decodeUtf8(blob.stdout)
+  let raw
+  try {
+    raw = await input.client.getRepositoryFileRaw(
+      input.target.projectId,
+      input.request.path,
+      input.target.headSha,
+      MAX_FILE_BLOB_BYTES + 1,
+      { signal: input.signal, requestGuard: input.requestGuard },
+    )
+  } catch (error) {
+    return failure('read_file', repositoryApiDiagnostic('read_file', error, input.requestState, input.identity, input.signal))
+  }
+  if (raw.truncated || raw.content.byteLength > MAX_FILE_BLOB_BYTES) {
+    return failure('read_file', 'repository_file_too_large')
+  }
+  const source = decodeUtf8(raw.content)
   if (source === undefined || source.includes('\0')) return failure('read_file', 'repository_file_binary')
 
   const startLine = input.request.startLine ?? 1
@@ -268,9 +213,7 @@ async function readFrozenFile(input: {
     ? 0
     : content.split('\n').length - (content.endsWith('\n') ? 1 : 0)
   const endLine = returnedLineCount > 0 ? startLine + returnedLineCount - 1 : startLine - 1
-  const truncated = startLine > 1
-    || !selectedThroughEnd
-    || bounded.truncated
+  const truncated = startLine > 1 || !selectedThroughEnd || bounded.truncated
   const bytes = utf8Bytes(content)
   const persistenceFailure = recordRepositoryOutput(input.identity, bytes)
   if (persistenceFailure) return failure('read_file', persistenceFailure)
@@ -278,7 +221,7 @@ async function readFrozenFile(input: {
   return {
     ok: true,
     action: 'read_file',
-    headSha: input.headSha,
+    headSha: input.target.headSha,
     path: input.request.path,
     content,
     startLine,
@@ -291,40 +234,79 @@ async function readFrozenFile(input: {
 
 async function searchFrozenRepository(input: {
   identity: ReviewRunIdentity
-  directory: string
-  headSha: string
+  client: GitLabApiClient
+  target: GitLabRepositoryTarget
+  run: ReviewRunRecord
   request: Extract<GitLabRepositorySessionRequest, { action: 'search_text' }>
   maxOutputBytes: number
+  requestGuard: () => void
+  requestState: GitLabRepositoryRequestState
   signal?: AbortSignal
 }): Promise<GitLabRepositoryToolOutput> {
-  const args = [
-    '--literal-pathspecs',
-    'grep',
-    '--full-name',
-    '-n',
-    '-z',
-    '-I',
-    '-F',
-    '-e',
-    input.request.query,
-    input.headSha,
-    '--',
-    ...(input.request.pathPrefix ? [input.request.pathPrefix] : []),
-  ]
-  const result = await runGit({
-    directory: input.directory,
-    args,
-    maxOutputBytes: input.maxOutputBytes,
-    signal: input.signal,
-  })
-  const commandFailure = gitCommandFailure(result, { allowNoMatches: true, allowTruncated: true })
-  if (commandFailure) return failure('search_text', commandFailure)
-  const output = decodeUtf8(result.stdout)
-  if (output === undefined) return failure('search_text', 'repository_search_output_invalid')
+  let tree: GitLabRepositoryTreeEntry[]
+  try {
+    tree = await input.client.getRepositoryTree(input.target.projectId, input.target.headSha, {
+      ...(input.request.pathPrefix ? { path: input.request.pathPrefix } : {}),
+      recursive: true,
+      maxItems: MAX_SEARCH_TREE_ENTRIES,
+      signal: input.signal,
+      requestGuard: input.requestGuard,
+    })
+  } catch (error) {
+    return failure('search_text', repositoryApiDiagnostic('search_text', error, input.requestState, input.identity, input.signal))
+  }
 
-  const parsed = parseGitGrepOutput(output, input.headSha)
-  let matches = parsed.matches.slice(0, MAX_SEARCH_MATCHES)
-  let truncated = result.truncated || parsed.invalid || parsed.matches.length > matches.length
+  const candidates = prioritizedSearchCandidates(tree, input.run)
+    .filter((entry) => searchCandidateAllowed(entry.path, input.run, input.request.pathPrefix))
+  const selectedCandidates = candidates.slice(0, MAX_SEARCH_FILES)
+  const matches: GitLabRepositoryMatch[] = []
+  let inspectedBytes = 0
+  let truncated = tree.length >= MAX_SEARCH_TREE_ENTRIES || candidates.length > selectedCandidates.length
+
+  for (const entry of selectedCandidates) {
+    if (matches.length >= MAX_SEARCH_MATCHES || inspectedBytes >= MAX_SEARCH_SOURCE_BYTES) {
+      truncated = true
+      break
+    }
+    const remainingBytes = MAX_SEARCH_SOURCE_BYTES - inspectedBytes
+    const maxBytes = Math.min(MAX_SEARCH_FILE_BYTES, remainingBytes)
+    let raw
+    try {
+      raw = await input.client.getRepositoryFileRaw(
+        input.target.projectId,
+        entry.path,
+        input.target.headSha,
+        maxBytes + 1,
+        { signal: input.signal, requestGuard: input.requestGuard },
+      )
+    } catch (error) {
+      return failure('search_text', repositoryApiDiagnostic('search_text', error, input.requestState, input.identity, input.signal))
+    }
+
+    let content = raw.content
+    if (content.byteLength > maxBytes) content = content.slice(0, maxBytes)
+    inspectedBytes += content.byteLength
+    if (raw.truncated || raw.content.byteLength > maxBytes) truncated = true
+    const source = decodeUtf8Prefix(content, raw.truncated || raw.content.byteLength > maxBytes)
+    if (source === undefined || source.includes('\0')) continue
+
+    const lines = logicalLines(source)
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index]!.includes(input.request.query)) continue
+      const access = decideGitLabReviewPathAccess(entry.path, {
+        excludePathPatterns: input.run.project?.excludePathPatterns,
+      })
+      if (!access.allowed) continue
+      const boundedText = boundedUtf8Prefix(lines[index]!, MAX_SEARCH_MATCH_TEXT_BYTES)
+      matches.push({ path: entry.path, line: index + 1, text: boundedText.value })
+      if (boundedText.truncated) truncated = true
+      if (matches.length >= MAX_SEARCH_MATCHES) {
+        truncated = true
+        break
+      }
+    }
+  }
+
   while (matches.length > 0 && utf8Bytes(JSON.stringify(matches)) > input.maxOutputBytes) {
     matches.pop()
     truncated = true
@@ -336,7 +318,7 @@ async function searchFrozenRepository(input: {
   return {
     ok: true,
     action: 'search_text',
-    headSha: input.headSha,
+    headSha: input.target.headSha,
     query: input.request.query,
     ...(input.request.pathPrefix ? { pathPrefix: input.request.pathPrefix } : {}),
     matches,
@@ -346,33 +328,45 @@ async function searchFrozenRepository(input: {
   }
 }
 
-function reviewHeadSha(run: ReviewRunRecord) {
+function repositoryTargetForRun(run: ReviewRunRecord): GitLabRepositoryTarget | undefined {
   const trigger = run.trigger
-  const candidate = trigger?.objectType === 'mr'
+  if (!trigger || typeof trigger.host !== 'string') return undefined
+  const host = normalizeGitLabAuthority(trigger.host)
+  if (!host || !isId(trigger.projectId)) return undefined
+  const candidate = trigger.objectType === 'mr'
     ? trigger.headSha
-    : trigger?.objectType === 'commit'
+    : trigger.objectType === 'commit'
       ? trigger.commitSha
       : undefined
-  return typeof candidate === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(candidate)
-    ? candidate.toLowerCase()
-    : undefined
+  if (typeof candidate !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(candidate)) {
+    return undefined
+  }
+  return {
+    host,
+    projectId: trigger.projectId,
+    headSha: candidate.toLowerCase(),
+  }
 }
 
-function projectSnapshotMatches(run: ReviewRunRecord) {
-  const triggerProjectId = run.trigger?.projectId
+function projectSnapshotMatches(run: ReviewRunRecord, target: GitLabRepositoryTarget) {
   return Boolean(
-    run.project
-    && run.project.nine1botProjectID
-    && (typeof triggerProjectId === 'string' || typeof triggerProjectId === 'number')
-    && String(run.project.projectId) === String(triggerProjectId),
+    run.project?.nine1botProjectID
+    && String(run.project.projectId) === String(target.projectId)
+    && run.project.host
+    && normalizeGitLabAuthority(run.project.host) === target.host,
   )
 }
 
-function validateRequest(request: GitLabRepositorySessionRequest):
+function validateRequest(
+  request: GitLabRepositorySessionRequest,
+  run: ReviewRunRecord,
+):
   | { ok: true; request: GitLabRepositorySessionRequest }
   | { ok: false; diagnostic: string } {
   if (request.action === 'read_file') {
     if (!validGitPath(request.path)) return { ok: false, diagnostic: 'repository_path_invalid' }
+    const policyDiagnostic = repositoryPathPolicyDiagnostic(request.path, run)
+    if (policyDiagnostic) return { ok: false, diagnostic: policyDiagnostic }
     if (request.startLine !== undefined && !boundedPositiveInteger(request.startLine, 100_000)) {
       return { ok: false, diagnostic: 'repository_line_range_invalid' }
     }
@@ -388,10 +382,46 @@ function validateRequest(request: GitLabRepositorySessionRequest):
   ) {
     return { ok: false, diagnostic: 'repository_search_query_invalid' }
   }
-  if (request.pathPrefix !== undefined && !validGitPath(request.pathPrefix)) {
-    return { ok: false, diagnostic: 'repository_path_invalid' }
+  if (request.pathPrefix !== undefined) {
+    if (!validGitPath(request.pathPrefix)) return { ok: false, diagnostic: 'repository_path_invalid' }
+    const policyDiagnostic = repositoryPathPrefixPolicyDiagnostic(request.pathPrefix, run)
+    if (policyDiagnostic) return { ok: false, diagnostic: policyDiagnostic }
   }
   return { ok: true, request }
+}
+
+function repositoryPathPolicyDiagnostic(path: string, run: ReviewRunRecord) {
+  const decision = decideGitLabReviewPathAccess(path, {
+    excludePathPatterns: run.project?.excludePathPatterns,
+  })
+  if (decision.allowed) return undefined
+  return decision.reason === 'profile-excluded'
+    ? 'repository_path_excluded'
+    : 'repository_path_blacklisted'
+}
+
+function repositoryPathPrefixPolicyDiagnostic(pathPrefix: string, run: ReviewRunRecord) {
+  return repositoryPathPolicyDiagnostic(pathPrefix, run)
+    ?? repositoryPathPolicyDiagnostic(`${pathPrefix}/__nine1bot_path_probe__`, run)
+}
+
+function searchCandidateAllowed(path: string, run: ReviewRunRecord, pathPrefix?: string) {
+  if (!validGitPath(path)) return false
+  if (pathPrefix && path !== pathPrefix && !path.startsWith(`${pathPrefix}/`)) return false
+  return !repositoryPathPolicyDiagnostic(path, run)
+}
+
+function prioritizedSearchCandidates(tree: GitLabRepositoryTreeEntry[], run: ReviewRunRecord) {
+  const includePathPrefixes = run.project?.includePathPrefixes ?? []
+  return tree
+    .map((entry, index) => ({
+      entry,
+      index,
+      priority: includePathPrefixes.some((prefix) => prefix && entry.path.startsWith(prefix)) ? 0 : 1,
+    }))
+    .filter(({ entry }) => entry.type === 'blob')
+    .sort((left, right) => left.priority - right.priority || left.index - right.index)
+    .map(({ entry }) => entry)
 }
 
 function validGitPath(path: string) {
@@ -405,14 +435,17 @@ function boundedPositiveInteger(value: number, maximum: number) {
   return Number.isInteger(value) && value > 0 && value <= maximum
 }
 
-function reserveRepositoryQuery(identity: ReviewRunIdentity, action: GitLabRepositorySessionRequest['action']):
+function reserveRepositoryQuery(
+  identity: ReviewRunIdentity,
+  action: GitLabRepositorySessionRequest['action'],
+):
   | { ok: true; maxOutputBytes: number }
   | { ok: false; diagnostic: string } {
   const currentResult = currentActiveReviewRun(identity)
   if ('diagnostic' in currentResult) return { ok: false, diagnostic: currentResult.diagnostic }
   const current = currentResult.run
   const repository = current.repository
-  if (!repository) return { ok: false, diagnostic: 'repository_directory_not_bound' }
+  if (!repository) return { ok: false, diagnostic: 'repository_inspection_not_initialized' }
   const queryCount = normalizedCounter(repository.queryCount)
   const outputBytes = normalizedCounter(repository.outputBytes)
   if (queryCount >= MAX_REPOSITORY_QUERIES) {
@@ -439,7 +472,7 @@ function recordRepositoryOutput(identity: ReviewRunIdentity, bytes: number) {
   const currentResult = currentActiveReviewRun(identity)
   if ('diagnostic' in currentResult) return currentResult.diagnostic
   const repository = currentResult.run.repository
-  if (!repository) return 'repository_directory_not_bound'
+  if (!repository) return 'repository_inspection_not_initialized'
   const currentBytes = normalizedCounter(repository.outputBytes)
   if (bytes > MAX_REPOSITORY_OUTPUT_BYTES - currentBytes) return 'repository_output_limit_reached'
   return ReviewRunStore.updateIfCurrent(identity, {
@@ -458,6 +491,50 @@ type RepositoryLifecycleDiagnostic =
   | 'repository_review_attempt_stale'
   | 'repository_review_run_not_active'
   | 'repository_request_aborted'
+
+type GitLabRepositoryRequestState = {
+  diagnostic?: RepositoryLifecycleDiagnostic
+}
+
+class GitLabRepositoryLifecycleError extends Error {
+  constructor(readonly diagnostic: RepositoryLifecycleDiagnostic) {
+    super(diagnostic)
+    this.name = 'GitLabRepositoryLifecycleError'
+  }
+}
+
+function repositoryRequestGuard(
+  identity: ReviewRunIdentity,
+  signal: AbortSignal | undefined,
+  state: GitLabRepositoryRequestState,
+) {
+  return () => {
+    const diagnostic = repositoryLifecycleFailure(identity, signal)
+    if (!diagnostic) return
+    state.diagnostic ??= diagnostic
+    throw new GitLabRepositoryLifecycleError(state.diagnostic)
+  }
+}
+
+function repositoryApiDiagnostic(
+  action: GitLabRepositorySessionRequest['action'],
+  error: unknown,
+  state: GitLabRepositoryRequestState,
+  identity: ReviewRunIdentity,
+  signal?: AbortSignal,
+) {
+  const interrupted = state.diagnostic
+    ?? repositoryLifecycleFailure(identity, signal)
+    ?? (error instanceof Error && error.name === 'AbortError' ? 'repository_request_aborted' : undefined)
+  if (interrupted) return interrupted
+  if (error instanceof GitLabApiError && error.status === 404) {
+    return action === 'read_file' ? 'repository_file_not_found' : 'repository_search_path_not_found'
+  }
+  if (error instanceof GitLabApiError && (error.status === 401 || error.status === 403)) {
+    return 'repository_access_denied'
+  }
+  return `repository_api_unavailable:${errorName(error)}`
+}
 
 function repositoryLifecycleFailure(
   identity: ReviewRunIdentity,
@@ -491,32 +568,6 @@ function logicalLines(source: string) {
   const lines = source.split('\n')
   if (source.endsWith('\n')) lines.pop()
   return lines
-}
-
-function parseGitGrepOutput(output: string, headSha: string) {
-  const matches: GitLabRepositoryMatch[] = []
-  let cursor = 0
-  let invalid = false
-  while (cursor < output.length) {
-    const pathEnd = output.indexOf('\0', cursor)
-    const lineEnd = pathEnd >= 0 ? output.indexOf('\0', pathEnd + 1) : -1
-    const textEnd = lineEnd >= 0 ? output.indexOf('\n', lineEnd + 1) : -1
-    if (pathEnd < 0 || lineEnd < 0) {
-      invalid = true
-      break
-    }
-    const rawPath = output.slice(cursor, pathEnd)
-    const lineValue = output.slice(pathEnd + 1, lineEnd)
-    const text = output.slice(lineEnd + 1, textEnd >= 0 ? textEnd : output.length).replace(/\r$/, '')
-    const prefix = `${headSha}:`
-    const path = rawPath.startsWith(prefix) ? rawPath.slice(prefix.length) : ''
-    const line = Number.parseInt(lineValue, 10)
-    if (!validGitPath(path) || !Number.isSafeInteger(line) || line <= 0) invalid = true
-    else matches.push({ path, line, text })
-    if (textEnd < 0) break
-    cursor = textEnd + 1
-  }
-  return { matches, invalid }
 }
 
 function boundedUtf8Prefix(value: string, maxBytes: number) {
@@ -556,120 +607,35 @@ function decodeUtf8(value: Uint8Array) {
   }
 }
 
+function decodeUtf8Prefix(value: Uint8Array, mayEndMidCharacter: boolean) {
+  const attempts = mayEndMidCharacter ? Math.min(3, value.byteLength) : 0
+  for (let removed = 0; removed <= attempts; removed += 1) {
+    const decoded = decodeUtf8(removed === 0 ? value : value.slice(0, value.byteLength - removed))
+    if (decoded !== undefined) return decoded
+  }
+  return undefined
+}
+
 function utf8Bytes(value: string) {
   return new TextEncoder().encode(value).byteLength
 }
 
-type GitCommandResult = {
-  exitCode: number | null
-  stdout: Uint8Array
-  truncated: boolean
-  timedOut: boolean
-  aborted: boolean
-  spawnFailed: boolean
-}
-
-function runGit(input: {
-  directory: string
-  args: string[]
-  maxOutputBytes: number
-  signal?: AbortSignal
-}): Promise<GitCommandResult> {
-  if (input.signal?.aborted) {
-    return Promise.resolve(emptyGitResult({ aborted: true }))
-  }
-  return new Promise((resolveResult) => {
-    let settled = false
-    let timedOut = false
-    let aborted = false
-    let spawnFailed = false
-    let truncated = false
-    let outputBytes = 0
-    const chunks: Uint8Array[] = []
-    let child: ReturnType<typeof spawn>
-    const finish = (exitCode: number | null) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      input.signal?.removeEventListener('abort', abort)
-      const stdout = new Uint8Array(outputBytes)
-      let offset = 0
-      for (const chunk of chunks) {
-        stdout.set(chunk, offset)
-        offset += chunk.byteLength
-      }
-      resolveResult({ exitCode, stdout, truncated, timedOut, aborted, spawnFailed })
-    }
-    const stop = () => {
-      if (!child.killed) child.kill()
-    }
-    const abort = () => {
-      aborted = true
-      stop()
-    }
-    const timer = setTimeout(() => {
-      timedOut = true
-      stop()
-    }, GIT_COMMAND_TIMEOUT_MS)
-
-    try {
-      child = spawn('git', input.args, {
-        cwd: input.directory,
-        env: gitLabReviewRepositoryGitEnvironment(process.env),
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-    } catch {
-      spawnFailed = true
-      finish(null)
-      return
-    }
-    input.signal?.addEventListener('abort', abort, { once: true })
-    child.stderr?.resume()
-    child.stdout?.on('data', (chunk: Uint8Array) => {
-      const remaining = Math.max(0, input.maxOutputBytes - outputBytes)
-      if (remaining > 0) {
-        const included = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining)
-        chunks.push(new Uint8Array(included))
-        outputBytes += included.byteLength
-      }
-      if (chunk.byteLength > remaining) {
-        truncated = true
-        stop()
-      }
-    })
-    child.once('error', () => {
-      spawnFailed = true
-    })
-    child.once('close', (exitCode) => finish(exitCode))
-  })
-}
-
-function emptyGitResult(patch: Partial<GitCommandResult> = {}): GitCommandResult {
-  return {
-    exitCode: null,
-    stdout: new Uint8Array(),
-    truncated: false,
-    timedOut: false,
-    aborted: false,
-    spawnFailed: false,
-    ...patch,
-  }
-}
-
-function gitCommandFailure(
-  result: GitCommandResult,
-  options: { allowNoMatches?: boolean; allowTruncated?: boolean } = {},
+async function resolveSecret(
+  ref: string | PlatformSecretRef | undefined,
+  secrets: PlatformSecretAccess,
 ) {
-  if (result.aborted) return 'repository_request_aborted'
-  if (result.timedOut) return 'repository_git_timeout'
-  if (result.spawnFailed) return 'repository_git_unavailable'
-  if (result.truncated && !options.allowTruncated) return 'repository_git_output_limit_reached'
-  if (result.exitCode === 0) return undefined
-  if (options.allowNoMatches && result.exitCode === 1 && !result.truncated) return undefined
-  if (options.allowTruncated && result.truncated) return undefined
-  return 'repository_git_command_failed'
+  if (!ref) return undefined
+  if (typeof ref === 'string') return ref
+  return await secrets.get(ref)
+}
+
+function isId(input: unknown): input is string | number {
+  return (typeof input === 'string' && input.length > 0)
+    || (typeof input === 'number' && Number.isFinite(input))
+}
+
+function errorName(error: unknown) {
+  return error instanceof Error ? error.name : 'unknown'
 }
 
 function failure(

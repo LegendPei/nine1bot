@@ -1,13 +1,8 @@
 import type { GitLabDiffManifest, GitLabRawChange, GitLabRawChangesResponse, GitLabSkippedFile } from './types'
-
-const BLACKLISTED_PATH_PATTERNS = [
-  /(^|\/)(package-lock|npm-shrinkwrap)\.json$/i,
-  /(^|\/)(yarn|pnpm-lock|bun)\.lock$/i,
-  /(^|\/)(dist|build|coverage|\.next|\.nuxt|vendor)\//i,
-  /\.min\.(js|css)$/i,
-  /\.(map|svg|png|jpe?g|gif|webp|avif|ico|pdf|zip|tar|gz|mp4|mov|mp3|wav|woff2?|ttf|otf)$/i,
-  /(^|\/)generated\//i,
-]
+import {
+  decideGitLabReviewPathAccess,
+  isBlacklistedReviewPath,
+} from './path-policy'
 
 export type BuildGitLabDiffManifestOptions = {
   maxDiffBytes?: number
@@ -39,7 +34,8 @@ export function buildGitLabDiffManifest(
 
   for (const change of prioritizedChanges(changes, options.includePathPrefixes ?? [])) {
     const path = displayPath(change)
-    if (matchesAnyGlob(path, options.excludePathPatterns ?? [])) {
+    const pathAccess = decideGitLabReviewPathAccess(path, options)
+    if (!pathAccess.allowed && pathAccess.reason === 'profile-excluded') {
       skipped.push({ path, reason: 'profile-excluded' })
       continue
     }
@@ -104,38 +100,6 @@ function pathPriority(path: string, includePathPrefixes: string[]) {
   if (includePathPrefixes.some((prefix) => prefix && path.startsWith(prefix))) return 0
   if (/(^|\/)(auth|security|permissions?|rbac|database|migrations?|config|ci|\.gitlab)(\/|\.|$)/i.test(path)) return 1
   return 2
-}
-
-function matchesAnyGlob(path: string, patterns: string[]) {
-  return patterns.some((pattern) => globRegExp(pattern).test(path))
-}
-
-function globRegExp(pattern: string) {
-  const normalized = pattern.trim().replace(/\\/g, '/')
-  let source = ''
-  for (let index = 0; index < normalized.length; index += 1) {
-    const char = normalized[index]
-    if (char === '*' && normalized[index + 1] === '*') {
-      if (normalized[index + 2] === '/') {
-        source += '(?:.*/)?'
-        index += 2
-      } else {
-        source += '.*'
-        index += 1
-      }
-    } else if (char === '*') {
-      source += '[^/]*'
-    } else if (char === '?') {
-      source += '[^/]'
-    } else {
-      source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
-    }
-  }
-  return new RegExp(`^${source}$`)
-}
-
-export function isBlacklistedReviewPath(path: string) {
-  return BLACKLISTED_PATH_PATTERNS.some((pattern) => pattern.test(path))
 }
 
 function blockedManifest(

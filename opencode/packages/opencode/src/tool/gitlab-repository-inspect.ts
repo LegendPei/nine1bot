@@ -5,11 +5,12 @@ import {
   type GitLabRepositorySessionRequest,
   type GitLabRepositoryToolOutput,
 } from "../../../../../packages/nine1bot/src/review/gitlab-repository-inspector"
+import { readPlatformManagerConfig } from "../../../../../packages/nine1bot/src/platform/config-store"
+import { FilePlatformSecretStore } from "../../../../../packages/nine1bot/src/platform/secrets"
 
 type GitLabRepositoryInspectDependencies = {
   inspect: (
     sessionId: string,
-    directory: string,
     request: GitLabRepositorySessionRequest,
     signal: AbortSignal,
   ) => Promise<GitLabRepositoryToolOutput>
@@ -48,7 +49,7 @@ export function createGitLabRepositoryInspectTool(
       async execute(args, context) {
         let result: GitLabRepositoryToolOutput
         try {
-          result = await dependencies.inspect(context.sessionID, context.cwd, args, context.abort)
+          result = await dependencies.inspect(context.sessionID, args, context.abort)
         } catch (error) {
           result = {
             ok: false,
@@ -187,11 +188,12 @@ function outputBytes(value: string) {
 }
 
 export const GitLabRepositoryInspectTool = createGitLabRepositoryInspectTool({
-  async inspect(sessionId, directory, request, signal) {
+  async inspect(sessionId, request, signal) {
     return await inspectGitLabRepositoryForSession({
       sessionId,
-      directory,
       request,
+      platforms: await readPlatformManagerConfig(),
+      secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
       signal,
     })
   },

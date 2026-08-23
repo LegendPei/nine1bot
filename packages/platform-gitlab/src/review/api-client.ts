@@ -10,6 +10,8 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const MAX_CI_TEXT_LENGTH = 512
 const MAX_CI_URL_LENGTH = 4_096
 const MAX_COMMIT_PARENTS = 64
+const MAX_REPOSITORY_PATH_LENGTH = 4_096
+const MAX_REPOSITORY_OBJECT_ID_LENGTH = 128
 const SAFE_HTTP_STATUS_TEXT = new Map<number, string>([
   [400, 'Bad Request'],
   [401, 'Unauthorized'],
@@ -137,6 +139,24 @@ export type GitLabPipelineJob = {
   started_at?: string | null
   finished_at?: string | null
   duration?: number | null
+}
+
+export type GitLabRepositoryFileRaw = {
+  content: Uint8Array
+  truncated: boolean
+}
+
+export type GitLabRepositoryTreeEntry = {
+  id: string
+  name: string
+  type: 'blob' | 'tree'
+  path: string
+  mode?: string
+}
+
+export type GitLabRepositoryTreeOptions = GitLabRequestOptions & {
+  path?: string
+  recursive?: boolean
 }
 
 export type GitLabProjectSummary = {
@@ -330,6 +350,40 @@ export class GitLabApiClient {
       { signal: options.signal },
       maxBytes,
     )
+  }
+
+  async getRepositoryFileRaw(
+    projectId: string | number,
+    filePath: string,
+    ref: string,
+    maxBytes: number,
+    options: GitLabRequestOptions = {},
+  ): Promise<GitLabRepositoryFileRaw> {
+    const params = new URLSearchParams({ ref })
+    return await this.requestBytes(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/files/${encodeURIComponent(filePath)}/raw?${params}`,
+      { signal: options.signal },
+      maxBytes,
+      options.requestGuard,
+    )
+  }
+
+  async getRepositoryTree(
+    projectId: string | number,
+    ref: string,
+    options: GitLabRepositoryTreeOptions = {},
+  ): Promise<GitLabRepositoryTreeEntry[]> {
+    const params = new URLSearchParams({ ref })
+    if (options.path) params.set('path', options.path)
+    if (options.recursive) params.set('recursive', 'true')
+    const values = await this.requestPaginated<unknown>(
+      `/api/v4/projects/${encodeURIComponent(String(projectId))}/repository/tree?${params}`,
+      options,
+    )
+    return values.flatMap((value) => {
+      const projected = projectRepositoryTreeEntry(value)
+      return projected ? [projected] : []
+    })
   }
 
   async getTokenSelf(): Promise<GitLabTokenSelf> {
@@ -595,6 +649,21 @@ export class GitLabApiClient {
     }
   }
 
+  private async requestBytes(
+    path: string,
+    init: RequestInit,
+    maxBytes: number,
+    requestGuard?: () => void,
+  ): Promise<GitLabRepositoryFileRaw> {
+    return await this.withRequest(path, init, async (response) => {
+      if (!response.ok) {
+        const errorBody = await readBoundedText(response, this.maxErrorResponseBytes).catch(() => undefined)
+        throw new GitLabApiError(response.status, response.statusText, errorBody?.text)
+      }
+      return await readBoundedBytes(response, maxBytes)
+    }, requestGuard)
+  }
+
   private async fetchWithSafeRedirects(
     url: string,
     init: RequestInit,
@@ -772,6 +841,22 @@ function projectCommitMetadata(input: unknown): GitLabCommitMetadata | undefined
   }) as GitLabCommitMetadata
 }
 
+function projectRepositoryTreeEntry(input: unknown): GitLabRepositoryTreeEntry | undefined {
+  const record = objectRecord(input)
+  const id = boundedString(record?.id, MAX_REPOSITORY_OBJECT_ID_LENGTH)
+  const name = boundedString(record?.name, MAX_REPOSITORY_PATH_LENGTH)
+  const path = boundedString(record?.path, MAX_REPOSITORY_PATH_LENGTH)
+  const type = record?.type === 'blob' || record?.type === 'tree' ? record.type : undefined
+  if (!id || !name || !path || !type) return undefined
+  return compactObject({
+    id,
+    name,
+    type,
+    path,
+    mode: boundedString(record?.mode, 16),
+  }) as GitLabRepositoryTreeEntry
+}
+
 function projectPipelineJob(input: unknown): GitLabPipelineJob | undefined {
   const record = objectRecord(input)
   const id = finiteNumber(record?.id)
@@ -844,11 +929,19 @@ function redirectedRequestInit(init: RequestInit, status: number): RequestInit {
 }
 
 async function readBoundedText(response: Response, maxBytes?: number) {
+  const result = await readBoundedBytes(response, maxBytes)
+  return {
+    text: truncateUtf8(new TextDecoder().decode(result.content), maxBytes ?? 0),
+    truncated: result.truncated,
+  }
+}
+
+async function readBoundedBytes(response: Response, maxBytes?: number): Promise<GitLabRepositoryFileRaw> {
   if (!maxBytes || maxBytes <= 0) {
     await response.body?.cancel().catch(() => undefined)
-    return { text: '', truncated: Boolean(response.body) }
+    return { content: new Uint8Array(), truncated: Boolean(response.body) }
   }
-  if (!response.body) return { text: '', truncated: false }
+  if (!response.body) return { content: new Uint8Array(), truncated: false }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let used = 0
@@ -887,7 +980,7 @@ async function readBoundedText(response: Response, maxBytes?: number) {
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return { text: truncateUtf8(new TextDecoder().decode(bytes), maxBytes), truncated }
+  return { content: bytes, truncated }
 }
 
 function projectHookBody(input: GitLabProjectHookInput) {

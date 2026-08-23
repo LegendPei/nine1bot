@@ -21,7 +21,6 @@ export type ReviewRunCiSummary = {
 }
 
 export type ReviewRunRepositorySummary = {
-  directoryFingerprint: string
   queryCount?: number
   readCount?: number
   searchCount?: number
@@ -1216,9 +1215,30 @@ function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunReco
     generation: typeof input.generation === 'string' && input.generation
       ? input.generation
       : `legacy-${id}`,
+    repository: normalizeStoredRepositorySummary(input.repository),
     publication: normalizeStoredPublication(input.publication, id, updatedAt),
     failureNotification: normalizeStoredFailureNotification(input.failureNotification, updatedAt),
   } as ReviewRunRecord
+}
+
+function normalizeStoredRepositorySummary(input: unknown): ReviewRunRepositorySummary | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const repository = input as Record<string, unknown>
+  return {
+    ...storedRepositoryCounter('queryCount', repository.queryCount),
+    ...storedRepositoryCounter('readCount', repository.readCount),
+    ...storedRepositoryCounter('searchCount', repository.searchCount),
+    ...storedRepositoryCounter('outputBytes', repository.outputBytes),
+  }
+}
+
+function storedRepositoryCounter(
+  key: keyof ReviewRunRepositorySummary,
+  value: unknown,
+): Partial<ReviewRunRepositorySummary> {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? { [key]: value }
+    : {}
 }
 
 function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt: number): ReviewRunPublication | undefined {

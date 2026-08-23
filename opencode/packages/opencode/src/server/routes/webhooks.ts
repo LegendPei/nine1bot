@@ -31,7 +31,6 @@ import {
 } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { buildGitLabReviewRuntimePrompt } from "../../../../../../packages/nine1bot/src/review/gitlab-controller"
 import { ReviewRunStore, type ReviewRunRecord } from "../../../../../../packages/nine1bot/src/review/run-store"
-import { gitLabReviewRepositoryDirectoryFingerprint } from "../../../../../../packages/nine1bot/src/review/gitlab-repository-inspector"
 import { readPlatformManagerConfig } from "../../../../../../packages/nine1bot/src/platform/config-store"
 import { FilePlatformSecretStore } from "../../../../../../packages/nine1bot/src/platform/secrets"
 import { registerBuiltinPlatformAdapters } from "../../../../../../packages/nine1bot/src/platform/builtin"
@@ -752,7 +751,6 @@ export async function startGitLabReviewRuntimeRun(
       const patch = gitLabReviewSessionCreatedPatch(
         sessionID,
         run,
-        gitLabReviewRepositoryDirectoryFingerprint(directory),
       )
       if (patch) ReviewRunStore.update(result.runId, patch)
     },
@@ -842,22 +840,18 @@ async function failGitLabReviewRuntimeRun(
 export function gitLabReviewSessionCreatedPatch(
   sessionID: string,
   run?: ReviewRunRecord,
-  directoryFingerprint?: string,
 ) {
   const patch = {
     status: "running" as const,
     sessionId: sessionID,
     turnSnapshotId: undefined,
     error: undefined,
-    ...(directoryFingerprint && /^[a-f0-9]{64}$/.test(directoryFingerprint) ? {
-      repository: {
-        directoryFingerprint,
-        queryCount: 0,
-        readCount: 0,
-        searchCount: 0,
-        outputBytes: 0,
-      },
-    } : {}),
+    repository: {
+      queryCount: 0,
+      readCount: 0,
+      searchCount: 0,
+      outputBytes: 0,
+    },
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
   return run ? gitLabReviewRuntimePatch(run, patch) : patch
 }

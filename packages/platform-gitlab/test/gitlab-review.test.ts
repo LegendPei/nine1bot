@@ -9,6 +9,7 @@ import {
   buildInitialGitLabReviewSubagentTasks,
   compileSubagentStageResults,
   defaultGitLabReviewSettings,
+  decideGitLabReviewPathAccess,
   gitLabReviewFindingKey,
   gitLabReviewPublicationBudget,
   gitLabReviewPublicationMarker,
@@ -53,6 +54,24 @@ function deferred() {
 }
 
 describe('GitLab review foundation', () => {
+  test('uses one server-side access decision for profile exclusions and hard blacklists', () => {
+    const options = { excludePathPatterns: ['secrets/**', '**/*.private.ts'] }
+
+    expect(decideGitLabReviewPathAccess('src/app.ts', options)).toEqual({ allowed: true })
+    expect(decideGitLabReviewPathAccess('secrets/token.txt', options)).toEqual({
+      allowed: false,
+      reason: 'profile-excluded',
+    })
+    expect(decideGitLabReviewPathAccess('src/auth.private.ts', options)).toEqual({
+      allowed: false,
+      reason: 'profile-excluded',
+    })
+    expect(decideGitLabReviewPathAccess('dist/bundle.js', options)).toEqual({
+      allowed: false,
+      reason: 'blacklisted',
+    })
+  })
+
   test('resolves GitLab API base URLs only for the trigger authority', () => {
     expect(resolveGitLabApiBaseUrl({
       configuredBaseUrl: 'https://gitlab-a.example.com',
@@ -2494,6 +2513,50 @@ describe('GitLab review foundation', () => {
       'https://gitlab.example.com/api/v4/projects/3/pipelines/7/jobs?per_page=100&page=1',
       'https://gitlab.example.com/api/v4/projects/3/jobs/8/trace',
     ])
+  })
+
+  test('reads repository files and trees only at the caller-provided frozen ref', async () => {
+    const requests: Array<{ url: URL; token: string | null }> = []
+    const frozenHead = 'a'.repeat(40)
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com/gitlab',
+      token: 'server-side-token',
+      fetch: (async (input, init) => {
+        const url = new URL(String(input))
+        requests.push({ url, token: new Headers(init?.headers).get('private-token') })
+        if (url.pathname.endsWith('/repository/tree')) {
+          return Response.json([
+            { id: 'blob-a', name: 'app.ts', type: 'blob', path: 'src/app.ts', mode: '100644', secret: 'drop-me' },
+            { id: 'tree-a', name: 'nested', type: 'tree', path: 'src/nested', mode: '040000' },
+          ])
+        }
+        return new Response('abcdef', { status: 200 })
+      }) as typeof fetch,
+    })
+
+    const file = await client.getRepositoryFileRaw(3, 'src/a b.ts', frozenHead, 5)
+    const tree = await client.getRepositoryTree(3, frozenHead, {
+      path: 'src',
+      recursive: true,
+      maxItems: 2,
+    })
+
+    expect(new TextDecoder().decode(file.content)).toBe('abcde')
+    expect(file.truncated).toBe(true)
+    expect(tree).toEqual([
+      { id: 'blob-a', name: 'app.ts', type: 'blob', path: 'src/app.ts', mode: '100644' },
+      { id: 'tree-a', name: 'nested', type: 'tree', path: 'src/nested', mode: '040000' },
+    ])
+    expect(requests).toHaveLength(2)
+    expect(requests.every((request) => request.token === 'server-side-token')).toBe(true)
+    expect(requests[0]!.url.pathname).toBe('/gitlab/api/v4/projects/3/repository/files/src%2Fa%20b.ts/raw')
+    expect(requests[0]!.url.searchParams.get('ref')).toBe(frozenHead)
+    expect(requests[1]!.url.pathname).toBe('/gitlab/api/v4/projects/3/repository/tree')
+    expect(requests[1]!.url.searchParams.get('ref')).toBe(frozenHead)
+    expect(requests[1]!.url.searchParams.get('path')).toBe('src')
+    expect(requests[1]!.url.searchParams.get('recursive')).toBe('true')
+    expect(requests[1]!.url.searchParams.get('per_page')).toBe('2')
+    expect(requests[1]!.url.searchParams.get('page')).toBe('1')
   })
 
   test('projects GitLab CI API objects before returning them', async () => {

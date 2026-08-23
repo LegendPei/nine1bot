@@ -641,6 +641,52 @@ test("GitLab review TaskTool preserves an empty specialist resource snapshot thr
   }
 })
 
+test("GitLab review TaskTool keeps local @ references literal at the specialist boundary", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (directory) => {
+      await fs.mkdir(path.join(directory, "private-source"), { recursive: true })
+      await Bun.write(path.join(directory, "private-source", "secret.ts"), "export const secret = true\n")
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      registerGitLabReviewAgents()
+      const root = await createGitLabReviewRoot(tmp.path)
+      const message = spyOn(MessageV2, "get").mockResolvedValue({
+        info: {
+          role: "assistant",
+          modelID: "test-model",
+          providerID: "test-provider",
+        },
+        parts: [],
+      } as any)
+      let promptedParts: SessionPrompt.PromptInput["parts"] | undefined
+      const prompt = spyOn(SessionPrompt, "prompt").mockImplementation((async (input) => {
+        promptedParts = input.parts
+        return { parts: [] } as any
+      }) as typeof SessionPrompt.prompt)
+
+      try {
+        const task = await TaskTool.init()
+        const taskPrompt = "Inspect @private-source only through the review tools."
+        await task.execute({
+          description: "Check local reference boundary",
+          prompt: taskPrompt,
+          subagent_type: "platform.gitlab.risk-qa",
+        }, toolContext(root.id, "platform.gitlab.pm-coordinator"))
+
+        expect(promptedParts).toEqual([{ type: "text", text: taskPrompt }])
+      } finally {
+        prompt.mockRestore()
+        message.mockRestore()
+      }
+    },
+  })
+})
+
 test("generic TaskTool callers retain legitimate child-session reuse", async () => {
   await using tmp = await tmpdir({ git: true })
 
@@ -657,18 +703,22 @@ test("generic TaskTool callers retain legitimate child-session reuse", async () 
         runtimeProfile: runtimeProfile("general", "generic-task"),
       })
       const restorePrompt = promptTaskWithoutReply()
+      const resolvePromptParts = spyOn(SessionPrompt, "resolvePromptParts")
 
       try {
         const task = await TaskTool.init()
+        const taskPrompt = "Continue the existing task with @README.md."
         const result = await task.execute({
           description: "Continue generic task",
-          prompt: "Continue the existing task.",
+          prompt: taskPrompt,
           subagent_type: "general",
           session_id: child.id,
         }, toolContext(root.id, "build"))
 
         expect(result.metadata.sessionId).toBe(child.id)
+        expect(resolvePromptParts).toHaveBeenCalledWith(taskPrompt)
       } finally {
+        resolvePromptParts.mockRestore()
         restorePrompt()
       }
     },

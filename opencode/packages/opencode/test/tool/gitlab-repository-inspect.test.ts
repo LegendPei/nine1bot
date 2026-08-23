@@ -15,11 +15,11 @@ const context: Tool.Context = {
 }
 
 describe("gitlab_repository_inspect tool", () => {
-  test("derives the repository binding from the current review session and cwd", async () => {
-    const calls: Array<{ sessionId: string; directory: string; request: unknown; signal: AbortSignal }> = []
+  test("derives the repository target from the current review session without exposing cwd", async () => {
+    const calls: Array<{ sessionId: string; request: unknown; signal: AbortSignal }> = []
     const tool = createGitLabRepositoryInspectTool({
-      async inspect(sessionId, directory, request, signal) {
-        calls.push({ sessionId, directory, request, signal })
+      async inspect(sessionId, request, signal) {
+        calls.push({ sessionId, request, signal })
         return {
           ok: true,
           action: "read_file",
@@ -40,7 +40,6 @@ describe("gitlab_repository_inspect tool", () => {
 
     expect(calls).toEqual([{
       sessionId: context.sessionID,
-      directory: context.cwd,
       request: { action: "read_file", path: "src/app.ts" },
       signal: context.abort,
     }])

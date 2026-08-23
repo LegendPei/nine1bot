@@ -39,21 +39,21 @@
 
 新增 `gitlab_repository_inspect`，支持：
 
-- `search_text`：在冻结 review head 上做固定字符串搜索。
-- `read_file`：读取冻结 review head 中的单个 Git blob，可指定起始行和最大行数。
+- `search_text`：通过 GitLab Repository Tree API 有界枚举候选文件，并在冻结 review head 上做固定字符串搜索。
+- `read_file`：通过 GitLab Repository Files API 读取冻结 review head 中的单个文件，可指定起始行和最大行数。
 
 边界与预算：
 
-- 会话创建时只持久化项目目录 SHA-256 指纹，不向模型暴露本机绝对路径。
-- ReviewRun 对外 DTO 会移除仓库指纹、查询计数等内部状态，浏览器端不可见。
-- 每次调用校验当前 session、最新 attempt、generation、活动状态、目录指纹和 Git 仓库根目录。
+- Nine1Bot Project 只负责 instructions、shared context、environment 和 session 归属，不要求其运行目录是 Git 仓库。
+- 代码来源只取 ReviewRun 冻结的 `trigger host + projectId + headSha/commitSha`；模型不能传入或覆盖目标、ref、token 或 API path。
+- ReviewRun 对外 DTO 会移除仓库查询计数等内部状态，浏览器端不可见。
+- 每次调用校验当前 session、最新 attempt、generation、活动状态和 Project Profile 与 trigger 的 host/projectId 一致性。
 - 只接受 GitLab 提供的 40 或 64 位十六进制 commit SHA，不接受分支名、tag 或模型提供的 ref。
-- 底层仅执行固定参数、无 shell 的 `git rev-parse`、`git cat-file` 和 `git grep`，不 checkout、不 fetch、不访问网络。
-- Git 子进程只继承启动所需的最小系统环境白名单，不传递 token、代理、HOME 或其他服务环境变量。
-- 固定设置 `GIT_NO_LAZY_FETCH=1`、空 `GIT_ALLOW_PROTOCOL`、`GIT_NO_REPLACE_OBJECTS=1`、禁用 system/global Git config，防止 partial clone 隐式联网和 `refs/replace/*` 改写冻结 SHA 内容。
-- 路径拒绝绝对路径、反斜杠、空段、`.`、`..`、`.git` 和控制字符；Git pathspec 强制 literal。
-- Git 符号链接按 blob 文本读取，不跟随到工作区或仓库外部。
-- 单 run 最多 12 次查询，单次内容最多 20 KiB，累计最多 128 KiB，单 blob 最大 256 KiB，搜索最多返回 50 条匹配。
+- GitLab API client 继续执行同 authority 重定向、HTTPS 降级拒绝、请求超时、Token 服务端注入和有界响应读取；不引入 clone、fetch、checkout 或本地 Git 生命周期。
+- 路径拒绝绝对路径、反斜杠、空段、`.`、`..`、`.git` 和控制字符。
+- `excludePathPatterns` 与硬黑名单形成统一服务端访问边界：`read_file` 在请求前拒绝，`search_text` 在 tree 候选读取前和结果返回前双重过滤。
+- `includePathPrefixes` 保持“候选优先级”语义，不被隐式改成访问 allowlist。
+- 单 run 最多 12 次查询，单次内容最多 20 KiB，累计最多 128 KiB，单文件最大 256 KiB，搜索最多枚举 200 个 tree entry、读取 32 个候选文件、扫描 512 KiB 并返回 50 条匹配。
 - 最终工具输出严格小于 32 KiB，并使用 `untrusted-gitlab-repository` fence 隔离提示词注入。
 
 PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少必要上下文时调用该工具。仓库证据只能佐证 diff finding，不能产生仓库级扩展 finding。
@@ -135,24 +135,39 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - runtime 先完成、controller response 后返回时，持久化状态仍保持 succeeded/failed，不会回退到 running。
 - 真实 controller 创建路径测试确认 GitLab profile 包含 `browser-gitlab`、MR/commit 对象模板、资源快照标记、`internal-runtime` agent 来源和 `gitlab-context`。
 
+### Batch 11：Project 领域边界与仓库可见范围收敛
+
+完成项：
+
+- 删除 Project runtime directory fingerprint、Git 子进程和本地仓库根目录校验，不再把 Nine1Bot Project 当成代码仓库。
+- `gitlab_repository_inspect` 与 `gitlab_ci_inspect` 一样，从平台动态配置读取 GitLab base URL，并从 secret store 解析服务端 token。
+- OpenCode tool 不再把 `context.cwd` 传给仓库 inspector；模型 schema 继续拒绝 directory、runId、token 和其他目标字段。
+- ReviewRun 的 repository 字段只保存查询次数和累计输出预算，不保存本机路径或目录派生身份。
+- Diff builder 和 repository inspector 共用 `decideGitLabReviewPathAccess`，排除目录不会因按需搜索或读取重新进入模型上下文。
+- GitLab 文件、目录树和所有最终证据均固定到 ReviewRun 中的 SHA；找不到可信仓库证据时返回稳定诊断，自动 Review 主流程继续运行。
+- GitLab 自动 Review 的 `task` 提示词不再解析 `@file`、`@directory` 或 `@~/...` 本地引用，而是以纯文本传给 specialist，阻断通过通用 prompt 解析器枚举 Project 目录或工作区外路径的旁路；普通 TaskTool 的本地引用能力保持不变。
+
 ## 3. 测试覆盖
 
 已完成聚焦红绿测试：
 
 - allowlist 非法配置在 webhook Review 关闭时仍拒绝 CLI 目标。
 - 502 首次失败后 webhook 重发创建关联 attempt，旧 run 不变。
-- 仓库读取固定在旧 head，即使当前 checkout 已前进。
-- 目录越界、`..`、`.git` 和 pathspec magic 均不能突破边界。
-- Git symlink 只返回链接 blob，不读取仓库外文件。
-- 本地 replacement ref 不能替换冻结 commit 的内容，Git 子进程不继承代理、token 或可重定向仓库的环境变量。
+- 绑定的 Nine1Bot Project 目录不是 Git 仓库时，仍通过 mocked GitLab API 从冻结 head 读取代码。
+- 模型伪造 host、projectId、ref 或 token 不会改变服务端从 ReviewRun 解析的目标。
+- `..`、`.git`、绝对路径和控制字符在任何 GitLab 请求前被拒绝。
+- `excludePathPatterns` 和硬黑名单同时约束直接读取、搜索前候选和搜索结果；排除路径不会发起 raw file 请求。
+- GitLab API 同 authority 重定向、响应字节限制和服务端 token 注入继续适用于仓库读取。
 - 仓库查询次数、内容、累计输出和最终 tool DTO 均受限。
+- MR 与 commit review 分别固定使用 `headSha` 和 `commitSha`；模型不能覆盖任一 ref。
+- GitLab 自动 Review 的 specialist 任务中，本地 `@` 引用保持为字面文本且不会生成 `file://` part；普通 TaskTool 仍执行原有引用解析。
 - CI 日志读取前置 list、token 零读取和 GitLab 零请求。
 - self-managed GitLab 的协议与 base path 在 canonical MR URL 中保持不变。
 - ReviewRun 状态机定向测试：132 pass / 0 fail。
 - GitLab CLI client 与 wrapper tools：39 pass / 0 fail。
-- OpenCode 权限、工具注册、TaskTool、monitor、Webhook 状态和真实 profile 路径：128 pass / 0 fail。
+- OpenCode GitLab TaskTool 边界聚焦测试：10 pass / 0 fail。
 - 仓库定义的 OpenCode runtime CI：194 pass / 0 fail；registry 补充用例：1 pass / 0 fail。
-- 根仓库 `ci:test`：746 pass / 0 fail，3283 次断言。
+- 根仓库 `ci:test`：751 pass / 0 fail，3324 次断言。
 - 根仓库全部 package `ci:typecheck`：通过。
 - Web production build：通过（1869 modules transformed）。
 - OpenCode `tsgo --noEmit`：通过。

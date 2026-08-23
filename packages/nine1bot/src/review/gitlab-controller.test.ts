@@ -2564,6 +2564,40 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('drops legacy repository directory fingerprints while preserving inspection counters', async () => {
+    const legacyPath = join(tempDirs.at(-1)!, 'legacy-repository-summary-runs.json')
+    await writeFile(legacyPath, JSON.stringify({
+      version: 2,
+      sequence: 1,
+      runs: [{
+        id: 'review_legacy_repository_1',
+        rootRunId: 'review_legacy_repository_1',
+        attempt: 1,
+        triggerKey: 'legacy-repository-trigger',
+        generation: 'legacy-repository-generation',
+        platform: 'gitlab',
+        status: 'failed',
+        createdAt: 10,
+        updatedAt: 20,
+        repository: {
+          directoryFingerprint: 'a'.repeat(64),
+          queryCount: 4,
+          readCount: 2,
+          searchCount: 2,
+          outputBytes: 1024,
+        },
+      }],
+    }))
+    ReviewRunStore.setPathForTesting(legacyPath)
+
+    expect(ReviewRunStore.get('review_legacy_repository_1')?.repository).toEqual({
+      queryCount: 4,
+      readCount: 2,
+      searchCount: 2,
+      outputBytes: 1024,
+    })
+  })
+
   test('deep copies JSON write inputs and every returned review run record', () => {
     const input: CreateReviewRunInput = {
       platform: 'gitlab',
