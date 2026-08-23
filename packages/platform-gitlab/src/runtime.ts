@@ -1374,13 +1374,18 @@ function withGitLabCliResolutionPage(input: unknown, hostPolicy: GitLabHostPolic
 
   const explicitUrl = stringValue(record.url)
   if (explicitUrl) {
-    const parsed = parseGitLabUrl(explicitUrl, hostPolicy)
+    const parsed = parseGitLabCliTargetUrl(explicitUrl)
     return parsed ? gitLabCliResolutionInputWithPage(record, explicitUrl, parsed) : input
   }
 
   const page = asRecord(record.page)
+  const pageUrl = stringValue(page?.url)
+  if (pageUrl) {
+    const parsed = parseGitLabCliTargetUrl(pageUrl)
+    if (parsed) return gitLabCliResolutionInputWithPage(record, pageUrl, parsed)
+  }
   const rawGitLab = asRecord(asRecord(page?.raw)?.gitlab)
-  if (parseGitLabUrl(stringValue(page?.url)) || stringValue(rawGitLab?.projectPath)) return input
+  if (stringValue(rawGitLab?.projectPath)) return input
 
   const text = stringValue(record.text)
   for (const url of gitLabUrlsFromText(text)) {
@@ -1397,6 +1402,15 @@ function withGitLabCliResolutionPage(input: unknown, hostPolicy: GitLabHostPolic
   const url = `https://${hostPolicy.allowedHosts[0]}/${projectPath}/-/merge_requests/${iid}`
   const parsed = parseGitLabUrl(url, hostPolicy)
   return parsed ? gitLabCliResolutionInputWithPage(record, url, parsed) : input
+}
+
+function parseGitLabCliTargetUrl(input: string) {
+  try {
+    const url = new URL(input)
+    return parseGitLabUrl(input, { allowedHosts: [url.host] })
+  } catch {
+    return undefined
+  }
 }
 
 function gitLabCliResolutionInputWithPage(

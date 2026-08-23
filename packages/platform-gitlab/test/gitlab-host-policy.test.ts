@@ -130,6 +130,24 @@ describe('GitLab effective host policy', () => {
     })
   })
 
+  test('resolves a configured self-managed host from page URL context without raw metadata', async () => {
+    const tools = runtimeTools({ allowedHosts: ['code.company.example'] })
+    const resolveTarget = requiredTool(tools, gitLabCliToolIds.resolveTarget)
+
+    const result = await resolveTarget.execute(resolveTarget.parse({
+      page: page(companyMrUrl),
+    }), toolCallContext())
+
+    expect(resultData(result)).toMatchObject({
+      target: {
+        kind: 'merge_request',
+        host: 'code.company.example',
+        projectPath: 'group/project',
+        iid: '42',
+      },
+    })
+  })
+
   test('uses the sole effective host for a hostless CLI shorthand target', async () => {
     const tools = runtimeTools({})
     const resolveTarget = requiredTool(tools, gitLabCliToolIds.resolveTarget)
@@ -154,6 +172,21 @@ describe('GitLab effective host policy', () => {
 
     const result = await resolveTarget.execute(resolveTarget.parse({
       url: evilMrUrl,
+      text: `Fallback ${companyMrUrl}`,
+    }), toolCallContext())
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      code: 'gitlab-target-not-allowed',
+    })
+  })
+
+  test('does not let text replace a denied self-managed page URL', async () => {
+    const tools = runtimeTools({ allowedHosts: ['code.company.example'] })
+    const resolveTarget = requiredTool(tools, gitLabCliToolIds.resolveTarget)
+
+    const result = await resolveTarget.execute(resolveTarget.parse({
+      page: page('https://code.evil.example/group/project/-/merge_requests/42'),
       text: `Fallback ${companyMrUrl}`,
     }), toolCallContext())
 

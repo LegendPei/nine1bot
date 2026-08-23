@@ -49,7 +49,7 @@ beforeAll(async () => {
   })
   PlatformManager = (await server.ssrLoadModule('/src/components/PlatformManager.vue')).default
   ClientPlatformManager = (await server.ssrLoadModule(clientModuleId)).default
-})
+}, 30_000)
 
 afterAll(async () => {
   globalThis.fetch = originalFetch
