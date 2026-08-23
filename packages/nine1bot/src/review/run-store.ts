@@ -40,15 +40,21 @@ export type ReviewRunPublication = {
   error?: string
 }
 
+export type ReviewRunFailureNotification = {
+  state: 'notifying' | 'partial' | 'notified'
+  claimId?: string
+  ownerId?: string
+  payloadHash: string
+  startedAt: number
+  updatedAt: number
+  error?: string
+}
+
 export type PublicationClaimResult =
   | { ok: true; claimId: string; resume: boolean; completedMarkers: string[] }
   | {
       ok: false
-      error:
-        | 'review_run_already_published'
-        | 'review_run_publish_in_progress'
-        | 'review_run_publish_payload_mismatch'
-        | 'review_run_not_found'
+      error: string
     }
 
 export type PublicationClaimIdentity = {
@@ -56,7 +62,16 @@ export type PublicationClaimIdentity = {
   claimId: string
   ownerId: string
   payloadHash: string
+  sessionId?: string
+  generation?: string
+  allowTerminalFailure?: boolean
 }
+
+export type FailureNotificationClaimIdentity = PublicationClaimIdentity
+
+export type FailureNotificationClaimResult =
+  | { ok: true; claimId: string }
+  | { ok: false; error: string }
 
 export type ReviewRunRecord = {
   id: string
@@ -70,6 +85,7 @@ export type ReviewRunRecord = {
   status: ReviewRunStatus
   createdAt: number
   updatedAt: number
+  activeLeaseExpiresAt?: number
   error?: string
   trigger?: Record<string, unknown>
   project?: GitLabReviewProjectSnapshot
@@ -80,6 +96,7 @@ export type ReviewRunRecord = {
   publishedAt?: number
   publication?: ReviewRunPublication
   failureNotifiedAt?: number
+  failureNotification?: ReviewRunFailureNotification
   retryCount?: number
   lastRetryAt?: number
   warnings?: string[]
@@ -101,6 +118,10 @@ export type ReviewRunIdentity = {
   generation: string
 }
 
+export type GuardedRetryAttemptResult =
+  | { ok: true; run: ReviewRunRecord }
+  | { ok: false; error: string }
+
 type ReviewRunStoreFile = {
   version: 2
   sequence: number
@@ -109,10 +130,14 @@ type ReviewRunStoreFile = {
 
 const runs = new Map<string, ReviewRunRecord>()
 const activePublicationClaims = new Map<string, PublicationClaimIdentity>()
+const activeFailureNotificationClaims = new Map<string, FailureNotificationClaimIdentity>()
 let sequence = 0
 let loaded = false
 let storePathOverride: string | undefined
 let maxRecordsOverride: number | undefined
+
+const DEFAULT_ACTIVE_LEASE_MS = 35 * 60 * 1_000
+const DEFAULT_MAX_ATTEMPTS = 5
 
 function defaultStorePath() {
   return process.env.NINE1BOT_REVIEW_RUN_STORE_PATH || join(getDataDir(), 'review-runs.json')
@@ -126,6 +151,21 @@ function maxRecords() {
   if (maxRecordsOverride !== undefined) return maxRecordsOverride
   const configured = Number(process.env.NINE1BOT_REVIEW_RUN_STORE_LIMIT)
   return Number.isFinite(configured) && configured > 0 ? configured : 100
+}
+
+function maxAttempts() {
+  const configured = Number(process.env.NINE1BOT_REVIEW_RUN_ATTEMPT_LIMIT)
+  const limit = Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_MAX_ATTEMPTS
+  return Math.max(1, Math.min(limit, maxRecords()))
+}
+
+function activeLeaseMs() {
+  const configured = Number(process.env.NINE1BOT_REVIEW_RUN_ACTIVE_LEASE_MS)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_ACTIVE_LEASE_MS
 }
 
 export namespace ReviewRunStore {
@@ -168,12 +208,16 @@ export namespace ReviewRunStore {
     load()
     const existing = runs.get(id)
     if (!existing) return undefined
+    if (patch.status !== undefined && patch.status !== existing.status && isTerminalReviewRunStatus(existing.status)) {
+      return undefined
+    }
     const runId = persistRunMutation(() => {
-      const next = {
+      const now = Date.now()
+      const next = withActiveLease({
         ...existing,
         ...patch,
-        updatedAt: Date.now(),
-      }
+        updatedAt: now,
+      }, now)
       setStoredReviewRun(next)
       return existing.id
     })
@@ -189,12 +233,16 @@ export namespace ReviewRunStore {
     if (!existing) return false
     if (existing.generation !== identity.generation || existing.sessionId !== identity.sessionId) return false
     if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) return false
+    if (patch.status !== undefined && patch.status !== existing.status && isTerminalReviewRunStatus(existing.status)) {
+      return false
+    }
     persistRunMutation(() => {
-      setStoredReviewRun({
+      const now = Date.now()
+      setStoredReviewRun(withActiveLease({
         ...existing,
         ...patch,
-        updatedAt: Date.now(),
-      })
+        updatedAt: now,
+      }, now))
       return existing.id
     })
     return true
@@ -204,16 +252,27 @@ export namespace ReviewRunStore {
     runId: string
     payloadHash: string
     ownerId: string
+    identity?: ReviewRunIdentity
+    configurationError?: string
   }): PublicationClaimResult {
     load()
     const existing = runs.get(input.runId)
     if (!existing) return { ok: false, error: 'review_run_not_found' }
+    const guardError = input.identity
+      ? resultPublicationGuardError(existing, input.identity, input.configurationError)
+      : input.configurationError
+    if (guardError) return { ok: false, error: guardError }
     const publication = existing.publication
     if (existing.publishedAt || publication?.state === 'published') {
       return { ok: false, error: 'review_run_already_published' }
     }
     if (publication && publication.payloadHash !== input.payloadHash) {
       return { ok: false, error: 'review_run_publish_payload_mismatch' }
+    }
+    if (existing.failureNotification) {
+      return { ok: false, error: existing.failureNotifiedAt
+        ? 'review_run_failure_already_notified'
+        : 'review_run_failure_notification_started' }
     }
     const activeClaim = activePublicationClaims.get(existing.id)
     if (activeClaim && publicationClaimMatches(existing, activeClaim)) {
@@ -223,7 +282,15 @@ export namespace ReviewRunStore {
     const now = Date.now()
     const claimId = randomUUID()
     const completedMarkers = publication ? [...publication.completedMarkers] : []
-    const identity = { runId: existing.id, claimId, ownerId: input.ownerId, payloadHash: input.payloadHash }
+    const identity = {
+      runId: existing.id,
+      claimId,
+      ownerId: input.ownerId,
+      payloadHash: input.payloadHash,
+      sessionId: existing.sessionId,
+      generation: existing.generation,
+      allowTerminalFailure: existing.status === 'failed' && publication?.state === 'partial',
+    }
     persistRunMutation(() => {
       setStoredReviewRun({
         ...existing,
@@ -257,17 +324,13 @@ export namespace ReviewRunStore {
   export function isPublicationClaimCurrent(input: PublicationClaimIdentity): boolean {
     load()
     const existing = runs.get(input.runId)
-    return Boolean(
-      existing
-      && publicationClaimMatches(existing, input)
-      && activePublicationClaimMatches(input),
-    )
+    return Boolean(existing && isCurrentResultPublicationClaim(existing, input))
   }
 
   export function recordPublicationMarker(input: PublicationClaimIdentity & { marker: string }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    if (!existing || !isCurrentResultPublicationClaim(existing, input)) return false
     if (existing.publication!.completedMarkers.includes(input.marker)) return true
     const now = Date.now()
     persistRunMutation(() => {
@@ -288,7 +351,7 @@ export namespace ReviewRunStore {
   export function replacePublicationMarkers(input: PublicationClaimIdentity & { markers: string[] }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    if (!existing || !isCurrentResultPublicationClaim(existing, input)) return false
     const now = Date.now()
     const completedMarkers = [...new Set(input.markers)]
     persistRunMutation(() => {
@@ -311,11 +374,12 @@ export namespace ReviewRunStore {
     const existing = runs.get(input.runId)
     if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
     const now = Date.now()
+    const terminal = terminalReviewRunError(existing, input.allowTerminalFailure)
     persistRunMutation(() => {
       setStoredReviewRun({
         ...existing,
-        status: 'failed',
-        error: input.error,
+        status: terminal ? existing.status : 'failed',
+        error: terminal ? existing.error : input.error,
         updatedAt: now,
         publication: {
           ...existing.publication!,
@@ -325,6 +389,31 @@ export namespace ReviewRunStore {
           updatedAt: now,
           error: input.error,
         },
+      })
+      activePublicationClaims.delete(existing.id)
+      return existing.id
+    })
+    return true
+  }
+
+  export function releasePublicationClaim(input: PublicationClaimIdentity & { preservePartial: boolean }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    const now = Date.now()
+    persistRunMutation(() => {
+      setStoredReviewRun({
+        ...existing,
+        updatedAt: now,
+        publication: input.preservePartial
+          ? {
+              ...existing.publication!,
+              state: 'partial',
+              claimId: undefined,
+              ownerId: undefined,
+              updatedAt: now,
+            }
+          : undefined,
       })
       activePublicationClaims.delete(existing.id)
       return existing.id
@@ -366,29 +455,243 @@ export namespace ReviewRunStore {
   }): boolean {
     load()
     const existing = runs.get(input.runId)
-    if (!existing || !publicationClaimMatches(existing, input) || !activePublicationClaimMatches(input)) return false
+    if (!existing || !isCurrentResultPublicationClaim(existing, input)) return false
+    const now = Date.now()
+    try {
+      persistRunMutation(() => {
+        setStoredReviewRun({
+          ...existing,
+          status: input.status,
+          error: undefined,
+          warnings: [...input.warnings],
+          publishedAt: now,
+          updatedAt: now,
+          publication: {
+            ...existing.publication!,
+            state: 'published',
+            claimId: undefined,
+            ownerId: undefined,
+            updatedAt: now,
+            error: undefined,
+          },
+        })
+        activePublicationClaims.delete(existing.id)
+        return existing.id
+      })
+      return true
+    } catch {
+      const releaseAsPartial = () => {
+        const current = runs.get(input.runId)
+        if (!current || !publicationClaimMatches(current, input)) return input.runId
+        const failedAt = Date.now()
+        setStoredReviewRun({
+          ...current,
+          status: 'failed',
+          error: 'review_run_publication_finalize_failed',
+          publishedAt: undefined,
+          updatedAt: failedAt,
+          publication: {
+            ...current.publication!,
+            state: 'partial',
+            claimId: undefined,
+            ownerId: undefined,
+            updatedAt: failedAt,
+            error: 'review_run_publication_finalize_failed',
+          },
+        })
+        activePublicationClaims.delete(input.runId)
+        return input.runId
+      }
+      try {
+        persistRunMutation(releaseAsPartial)
+      } catch {
+        releaseAsPartial()
+      }
+      return false
+    }
+  }
+
+  export function claimFailureNotification(input: {
+    identity: ReviewRunIdentity
+    payloadHash: string
+    ownerId: string
+    configurationError?: string
+  }): FailureNotificationClaimResult {
+    load()
+    const existing = runs.get(input.identity.runId)
+    if (!existing) return { ok: false, error: 'review_run_not_found' }
+    const guardError = failureNotificationGuardError(existing, input.identity, input.configurationError)
+    if (guardError) return { ok: false, error: guardError }
+
+    const now = Date.now()
+    const claimId = randomUUID()
+    const identity = {
+      runId: existing.id,
+      claimId,
+      ownerId: input.ownerId,
+      payloadHash: input.payloadHash,
+      sessionId: existing.sessionId,
+      generation: existing.generation,
+    }
+    persistRunMutation(() => {
+      setStoredReviewRun({
+        ...existing,
+        updatedAt: now,
+        failureNotification: {
+          state: 'notifying',
+          claimId,
+          ownerId: input.ownerId,
+          payloadHash: input.payloadHash,
+          startedAt: now,
+          updatedAt: now,
+          error: undefined,
+        },
+      })
+      activeFailureNotificationClaims.set(existing.id, identity)
+      return existing.id
+    })
+    return { ok: true, claimId }
+  }
+
+  export function isFailureNotificationClaimCurrent(input: FailureNotificationClaimIdentity): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    return Boolean(existing && isCurrentFailureNotificationClaim(existing, input))
+  }
+
+  export function completeFailureNotification(input: FailureNotificationClaimIdentity): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !isCurrentFailureNotificationClaim(existing, input)) return false
     const now = Date.now()
     persistRunMutation(() => {
       setStoredReviewRun({
         ...existing,
-        status: input.status,
-        error: undefined,
-        warnings: [...input.warnings],
-        publishedAt: now,
+        failureNotifiedAt: now,
         updatedAt: now,
-        publication: {
-          ...existing.publication!,
-          state: 'published',
+        failureNotification: {
+          ...existing.failureNotification!,
+          state: 'notified',
           claimId: undefined,
           ownerId: undefined,
           updatedAt: now,
           error: undefined,
         },
       })
-      activePublicationClaims.delete(existing.id)
+      activeFailureNotificationClaims.delete(existing.id)
       return existing.id
     })
     return true
+  }
+
+  export function failFailureNotification(input: FailureNotificationClaimIdentity & { error: string }): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !failureNotificationClaimMatches(existing, input) || !activeFailureNotificationClaimMatches(input)) {
+      return false
+    }
+    const now = Date.now()
+    persistRunMutation(() => {
+      setStoredReviewRun({
+        ...existing,
+        updatedAt: now,
+        failureNotification: {
+          ...existing.failureNotification!,
+          state: 'partial',
+          claimId: undefined,
+          ownerId: undefined,
+          updatedAt: now,
+          error: input.error,
+        },
+      })
+      activeFailureNotificationClaims.delete(existing.id)
+      return existing.id
+    })
+    return true
+  }
+
+  export function rejectFailureNotificationForPolicy(
+    input: FailureNotificationClaimIdentity & { error: string },
+  ): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !isCurrentFailureNotificationClaim(existing, input)) return false
+    const now = Date.now()
+    persistRunMutation(() => {
+      setStoredReviewRun({
+        ...existing,
+        status: 'rejected',
+        error: input.error,
+        rejectionKind: 'policy',
+        recoverable: false,
+        updatedAt: now,
+        failureNotification: {
+          ...existing.failureNotification!,
+          state: 'partial',
+          claimId: undefined,
+          ownerId: undefined,
+          updatedAt: now,
+          error: input.error,
+        },
+      })
+      activeFailureNotificationClaims.delete(existing.id)
+      return existing.id
+    })
+    return true
+  }
+
+  export function isActiveAttemptStale(run: ReviewRunRecord, at = Date.now()) {
+    return (run.status === 'accepted' || run.status === 'running')
+      && typeof run.activeLeaseExpiresAt === 'number'
+      && Number.isFinite(run.activeLeaseExpiresAt)
+      && at >= run.activeLeaseExpiresAt
+  }
+
+  export function createRetryAttemptGuarded(
+    previous: ReviewRunRecord,
+    input: CreateReviewRunInput,
+    options: { now?: number } = {},
+  ): GuardedRetryAttemptResult {
+    load()
+    const existing = runs.get(previous.id)
+    if (!existing) return { ok: false, error: 'review_run_not_found' }
+    if (existing.generation !== previous.generation || existing.sessionId !== previous.sessionId) {
+      return { ok: false, error: 'review_run_not_current' }
+    }
+    if (findLatestByTriggerKeyInternal(existing.triggerKey)?.id !== existing.id) {
+      return { ok: false, error: 'review_run_not_latest' }
+    }
+    if (existing.attempt >= maxAttempts()) return { ok: false, error: 'review_run_retry_limit_reached' }
+    const at = options.now ?? Date.now()
+    const active = existing.status === 'accepted' || existing.status === 'running'
+    if (active && !isActiveAttemptStale(existing, at)) {
+      return { ok: false, error: 'review_run_already_active' }
+    }
+
+    const runId = persistRunMutation(() => {
+      if (active) {
+        setStoredReviewRun({
+          ...existing,
+          status: 'failed',
+          error: 'review_run_active_lease_expired',
+          rejectionKind: 'transient',
+          recoverable: true,
+          activeLeaseExpiresAt: undefined,
+          updatedAt: at,
+        })
+      }
+      const run = createRecord({
+        ...input,
+        triggerKey: existing.triggerKey,
+      }, {
+        rootRunId: existing.rootRunId,
+        attempt: existing.attempt + 1,
+        retryOf: existing.id,
+      }, at)
+      setStoredReviewRun(run)
+      return run.id
+    })
+    return { ok: true, run: copyReviewRunRecord(requiredStoredReviewRun(runId)) }
   }
 
   export function createRetryAttempt(
@@ -425,6 +728,7 @@ export namespace ReviewRunStore {
   export function clearForTesting() {
     runs.clear()
     activePublicationClaims.clear()
+    activeFailureNotificationClaims.clear()
     sequence = 0
     loaded = true
     if (storePathOverride && existsSync(storePathOverride)) {
@@ -436,6 +740,7 @@ export namespace ReviewRunStore {
     storePathOverride = filepath
     runs.clear()
     activePublicationClaims.clear()
+    activeFailureNotificationClaims.clear()
     sequence = 0
     loaded = false
   }
@@ -447,6 +752,7 @@ export namespace ReviewRunStore {
   export function reloadForTesting() {
     runs.clear()
     activePublicationClaims.clear()
+    activeFailureNotificationClaims.clear()
     sequence = 0
     loaded = false
   }
@@ -455,10 +761,11 @@ export namespace ReviewRunStore {
 function createRecord(
   input: CreateReviewRunInput,
   lineage?: { rootRunId: string; attempt: number; retryOf: string },
+  timestamp = Date.now(),
 ): ReviewRunRecord {
-  const now = Date.now()
+  const now = timestamp
   const id = `review_${now.toString(36)}_${(++sequence).toString(36)}`
-  return {
+  return withActiveLease({
     ...input,
     id,
     rootRunId: lineage?.rootRunId ?? id,
@@ -468,7 +775,14 @@ function createRecord(
     generation: randomUUID(),
     createdAt: now,
     updatedAt: now,
+  }, now)
+}
+
+function withActiveLease(run: ReviewRunRecord, at: number): ReviewRunRecord {
+  if (run.status !== 'accepted' && run.status !== 'running') {
+    return { ...run, activeLeaseExpiresAt: undefined }
   }
+  return { ...run, activeLeaseExpiresAt: at + activeLeaseMs() }
 }
 
 function findLatestByTriggerKeyInternal(triggerKey: string) {
@@ -477,12 +791,95 @@ function findLatestByTriggerKeyInternal(triggerKey: string) {
     .sort(compareLatestAttemptFirst)[0]
 }
 
+function reviewRunIdentityGuardError(run: ReviewRunRecord, identity: ReviewRunIdentity) {
+  if (run.generation !== identity.generation || run.sessionId !== identity.sessionId) {
+    return 'review_run_not_current'
+  }
+  if (findLatestByTriggerKeyInternal(run.triggerKey)?.id !== run.id) return 'review_run_not_latest'
+  return undefined
+}
+
+function terminalReviewRunError(run: ReviewRunRecord, allowTerminalFailure = false) {
+  if (run.status === 'rejected') return run.error ?? 'review_run_rejected'
+  if (run.status === 'failed' && allowTerminalFailure) return undefined
+  if (run.status === 'failed' || run.status === 'blocked' || run.status === 'succeeded') {
+    return `review_run_terminal_${run.status}`
+  }
+  return undefined
+}
+
+function isTerminalReviewRunStatus(status: ReviewRunRecord['status']) {
+  return status === 'failed' || status === 'rejected' || status === 'blocked' || status === 'succeeded'
+}
+
+function resultPublicationGuardError(
+  run: ReviewRunRecord,
+  identity: ReviewRunIdentity,
+  configurationError?: string,
+  allowTerminalFailure = run.publication?.state === 'partial',
+) {
+  if (configurationError) return configurationError
+  const identityError = reviewRunIdentityGuardError(run, identity)
+  if (identityError) return identityError
+  if (run.failureNotifiedAt) return 'review_run_failure_already_notified'
+  if (run.failureNotification) return 'review_run_failure_notification_started'
+  if (run.publishedAt || run.publication?.state === 'published') return 'review_run_already_published'
+  return terminalReviewRunError(run, allowTerminalFailure)
+}
+
+function failureNotificationGuardError(
+  run: ReviewRunRecord,
+  identity: ReviewRunIdentity,
+  configurationError?: string,
+) {
+  if (configurationError) return configurationError
+  const identityError = reviewRunIdentityGuardError(run, identity)
+  if (identityError) return identityError
+  if (run.publishedAt || run.publication?.state === 'published') return 'review_run_already_published'
+  if (run.publication) return 'review_run_publish_in_progress'
+  if (run.failureNotifiedAt || run.failureNotification?.state === 'notified') {
+    return 'review_run_failure_already_notified'
+  }
+  if (run.failureNotification) return 'review_run_failure_notification_started'
+  if (run.status === 'rejected') return run.error ?? 'review_run_rejected'
+  if (run.status === 'blocked' || run.status === 'succeeded') return `review_run_terminal_${run.status}`
+  if (run.status !== 'failed') return 'review_run_not_failed'
+  return undefined
+}
+
+function isCurrentResultPublicationClaim(run: ReviewRunRecord, identity: PublicationClaimIdentity) {
+  return publicationClaimMatches(run, identity)
+    && activePublicationClaimMatches(identity)
+    && resultPublicationGuardError(run, {
+      runId: run.id,
+      sessionId: identity.generation === undefined ? run.sessionId : identity.sessionId,
+      generation: identity.generation ?? run.generation,
+    }, undefined, identity.allowTerminalFailure) === undefined
+}
+
+function isCurrentFailureNotificationClaim(run: ReviewRunRecord, identity: FailureNotificationClaimIdentity) {
+  return failureNotificationClaimMatches(run, identity)
+    && activeFailureNotificationClaimMatches(identity)
+    && reviewRunIdentityGuardError(run, {
+      runId: run.id,
+      sessionId: identity.generation === undefined ? run.sessionId : identity.sessionId,
+      generation: identity.generation ?? run.generation,
+    }) === undefined
+    && run.status === 'failed'
+    && !run.publication
+    && !run.failureNotifiedAt
+}
+
 function publicationClaimMatches(run: ReviewRunRecord, identity: PublicationClaimIdentity) {
   const publication = run.publication
   return publication?.state === 'publishing'
     && publication.claimId === identity.claimId
     && publication.ownerId === identity.ownerId
     && publication.payloadHash === identity.payloadHash
+    && (identity.generation === undefined || (
+      run.generation === identity.generation
+      && run.sessionId === identity.sessionId
+    ))
 }
 
 function activePublicationClaimMatches(identity: PublicationClaimIdentity) {
@@ -490,11 +887,40 @@ function activePublicationClaimMatches(identity: PublicationClaimIdentity) {
   return active?.claimId === identity.claimId
     && active.ownerId === identity.ownerId
     && active.payloadHash === identity.payloadHash
+    && (identity.generation === undefined || (
+      active.generation === identity.generation
+      && active.sessionId === identity.sessionId
+    ))
+    && (identity.generation === undefined || active.allowTerminalFailure === identity.allowTerminalFailure)
+}
+
+function failureNotificationClaimMatches(run: ReviewRunRecord, identity: FailureNotificationClaimIdentity) {
+  const notification = run.failureNotification
+  return notification?.state === 'notifying'
+    && notification.claimId === identity.claimId
+    && notification.ownerId === identity.ownerId
+    && notification.payloadHash === identity.payloadHash
+    && (identity.generation === undefined || (
+      run.generation === identity.generation
+      && run.sessionId === identity.sessionId
+    ))
+}
+
+function activeFailureNotificationClaimMatches(identity: FailureNotificationClaimIdentity) {
+  const active = activeFailureNotificationClaims.get(identity.runId)
+  return active?.claimId === identity.claimId
+    && active.ownerId === identity.ownerId
+    && active.payloadHash === identity.payloadHash
+    && (identity.generation === undefined || (
+      active.generation === identity.generation
+      && active.sessionId === identity.sessionId
+    ))
 }
 
 function copyReviewRunRecord(run: ReviewRunRecord): ReviewRunRecord {
   const copy = copyJsonValue(run)
   copy.publication = copy.publication ?? undefined
+  copy.failureNotification = copy.failureNotification ?? undefined
   return copy
 }
 
@@ -604,6 +1030,9 @@ function snapshotStoreState() {
     activePublicationClaims: new Map(
       [...activePublicationClaims].map(([id, claim]) => [id, copyJsonValue(claim)]),
     ),
+    activeFailureNotificationClaims: new Map(
+      [...activeFailureNotificationClaims].map(([id, claim]) => [id, copyJsonValue(claim)]),
+    ),
     sequence,
   }
 }
@@ -613,6 +1042,10 @@ function restoreStoreState(snapshot: ReturnType<typeof snapshotStoreState>) {
   for (const [id, run] of snapshot.runs) runs.set(id, run)
   activePublicationClaims.clear()
   for (const [id, claim] of snapshot.activePublicationClaims) activePublicationClaims.set(id, claim)
+  activeFailureNotificationClaims.clear()
+  for (const [id, claim] of snapshot.activeFailureNotificationClaims) {
+    activeFailureNotificationClaims.set(id, claim)
+  }
   sequence = snapshot.sequence
 }
 
@@ -633,19 +1066,31 @@ function prune(retainedRunIds: Iterable<string>) {
     const run = runs.get(runId)
     if (run) protectedTriggerKeys.add(run.triggerKey)
   }
+  for (const runId of activeFailureNotificationClaims.keys()) {
+    const run = runs.get(runId)
+    if (run) protectedTriggerKeys.add(run.triggerKey)
+  }
   for (const group of groups) {
     if (!protectedTriggerKeys.has(group.latest.triggerKey)) continue
-    for (const run of group.records) keep.add(run.id)
+    for (const run of group.records) {
+      if (keep.size >= limit) break
+      keep.add(run.id)
+    }
   }
   for (const group of groups) {
     if (protectedTriggerKeys.has(group.latest.triggerKey)) continue
-    if (keep.size === 0 || keep.size + group.records.length <= limit) {
+    if (keep.size + group.records.length <= limit) {
       for (const run of group.records) keep.add(run.id)
+      continue
+    }
+    if (keep.size === 0) {
+      for (const run of group.records.slice(0, limit)) keep.add(run.id)
     }
   }
   for (const id of runs.keys()) {
     if (!keep.has(id)) runs.delete(id)
   }
+  repairRunLineage()
   removeOrphanedPublicationClaims()
 }
 
@@ -654,6 +1099,12 @@ function removeOrphanedPublicationClaims() {
     const run = runs.get(runId)
     if (!run || claim.runId !== runId || !publicationClaimMatches(run, claim)) {
       activePublicationClaims.delete(runId)
+    }
+  }
+  for (const [runId, claim] of activeFailureNotificationClaims) {
+    const run = runs.get(runId)
+    if (!run || claim.runId !== runId || !failureNotificationClaimMatches(run, claim)) {
+      activeFailureNotificationClaims.delete(runId)
     }
   }
 }
@@ -742,13 +1193,19 @@ function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunReco
   const id = input.id as string
   const idempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined
   const updatedAt = input.updatedAt as number
+  const status = input.status as ReviewRunStatus
   return {
     ...input,
     id,
     platform: 'gitlab',
-    status: input.status as ReviewRunStatus,
+    status,
     createdAt: input.createdAt as number,
     updatedAt,
+    activeLeaseExpiresAt: status === 'accepted' || status === 'running'
+      ? typeof input.activeLeaseExpiresAt === 'number' && Number.isFinite(input.activeLeaseExpiresAt)
+        ? input.activeLeaseExpiresAt
+        : updatedAt + activeLeaseMs()
+      : undefined,
     rootRunId: typeof input.rootRunId === 'string' && input.rootRunId ? input.rootRunId : id,
     attempt: typeof input.attempt === 'number' && Number.isInteger(input.attempt) && input.attempt > 0
       ? input.attempt
@@ -760,6 +1217,7 @@ function normalizeStoredReviewRun(input: Record<string, unknown>): ReviewRunReco
       ? input.generation
       : `legacy-${id}`,
     publication: normalizeStoredPublication(input.publication, id, updatedAt),
+    failureNotification: normalizeStoredFailureNotification(input.failureNotification, updatedAt),
   } as ReviewRunRecord
 }
 
@@ -777,11 +1235,7 @@ function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt:
     return undefined
   }
 
-  const claimId = normalizedIdentityField(publication.claimId)
-  const ownerId = normalizedIdentityField(publication.ownerId)
-  const state = publication.state === 'publishing' && (!claimId || !ownerId)
-    ? 'partial'
-    : publication.state
+  const state = publication.state === 'publishing' ? 'partial' : publication.state
   const updatedAt = typeof publication.updatedAt === 'number' && Number.isFinite(publication.updatedAt)
     ? publication.updatedAt
     : runUpdatedAt
@@ -791,14 +1245,48 @@ function normalizeStoredPublication(input: unknown, runId: string, runUpdatedAt:
 
   return {
     state,
-    claimId: state === 'publishing' ? claimId : undefined,
-    ownerId: state === 'publishing' ? ownerId : undefined,
+    claimId: undefined,
+    ownerId: undefined,
     payloadHash: publication.payloadHash,
     startedAt,
     updatedAt,
     summaryMarker: gitLabReviewPublicationMarker({ runId, kind: 'summary' }),
     completedMarkers: [...new Set(publication.completedMarkers)],
     error: typeof publication.error === 'string' ? publication.error : undefined,
+  }
+}
+
+function normalizeStoredFailureNotification(
+  input: unknown,
+  runUpdatedAt: number,
+): ReviewRunFailureNotification | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const notification = input as Record<string, unknown>
+  if (notification.state !== 'notifying' && notification.state !== 'partial' && notification.state !== 'notified') {
+    return undefined
+  }
+  if (typeof notification.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(notification.payloadHash)) {
+    return undefined
+  }
+  const claimId = normalizedIdentityField(notification.claimId)
+  const ownerId = normalizedIdentityField(notification.ownerId)
+  const state = notification.state === 'notifying' && (!claimId || !ownerId)
+    ? 'partial'
+    : notification.state
+  const startedAt = typeof notification.startedAt === 'number' && Number.isFinite(notification.startedAt)
+    ? notification.startedAt
+    : runUpdatedAt
+  const updatedAt = typeof notification.updatedAt === 'number' && Number.isFinite(notification.updatedAt)
+    ? notification.updatedAt
+    : runUpdatedAt
+  return {
+    state,
+    claimId: state === 'notifying' ? claimId : undefined,
+    ownerId: state === 'notifying' ? ownerId : undefined,
+    payloadHash: notification.payloadHash,
+    startedAt,
+    updatedAt,
+    error: typeof notification.error === 'string' ? notification.error : undefined,
   }
 }
 

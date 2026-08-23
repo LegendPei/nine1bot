@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'crypto'
+import { mkdirSync as mkdirStoreSync, rmSync as rmStoreSync } from 'fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -171,7 +172,7 @@ function createPublishableReviewRun(input: {
 
 function publicationStageResult(summary = 'Publication review complete.') {
   return {
-    stage: 'verification',
+    stage: 'closed',
     status: 'ok' as const,
     summary,
     findings: [{
@@ -203,7 +204,7 @@ function publicationStageResultWithTwoInlineFindings(summary = 'Publication revi
 
 function rawValidAggregateOversizedStageResult(runId: string) {
   const findingCount = gitLabReviewPublicationBudget.maxFindings
-  const stage = 's'
+  const stage = 'closed'
   const title = 't'
   const totalBodyCodeUnits = gitLabReviewPublicationBudget.maxTotalCodeUnits
     - runId.length
@@ -225,7 +226,7 @@ function rawValidAggregateOversizedStageResult(runId: string) {
 
 function encodedFormOversizedStageResult() {
   return {
-    stage: 's',
+    stage: 'closed',
     status: 'ok' as const,
     summary: '',
     findings: Array.from({ length: 60 }, (_, index) => ({
@@ -416,26 +417,337 @@ describe('GitLab review controller', () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
   })
 
-  test('extracts runtime review results from fenced output', () => {
-    const extracted = extractGitLabReviewStageResultFromRuntimeText([
-      'Review complete.',
-      '```json',
-      'GITLAB_REVIEW_RESULT:',
-      JSON.stringify({
-        stage: 'verification',
-        status: 'ok',
-        summary: 'No blocking findings.',
-        findings: [],
-      }),
-      '```',
-    ].join('\n'))
-
-    expect(extracted).toEqual({
-      stage: 'verification',
+  test('extracts only a strict closed runtime result envelope', () => {
+    const stageResult = {
+      stage: 'closed',
       status: 'ok',
       summary: 'No blocking findings.',
       findings: [],
+    }
+    const extracted = extractGitLabReviewStageResultFromRuntimeText([
+      '```json',
+      'GITLAB_REVIEW_RESULT:',
+      JSON.stringify(stageResult),
+      '```',
+    ].join('\n'))
+
+    expect(extracted).toEqual(stageResult)
+
+    const closedJson = JSON.stringify(stageResult)
+    const intermediateJson = JSON.stringify({ ...stageResult, stage: 'verification' })
+    for (const text of [
+      closedJson,
+      `GITLAB_REVIEW_RESULT:\n${closedJson}`,
+      `\`\`\`json\n${closedJson}\n\`\`\``,
+      `\`\`\`json\nGITLAB_REVIEW_RESULT:\n${intermediateJson}\n\`\`\``,
+      `Example:\n\`\`\`json\nGITLAB_REVIEW_RESULT:\n${closedJson}\n\`\`\``,
+      [
+        '```json',
+        'GITLAB_REVIEW_RESULT:',
+        intermediateJson,
+        '```',
+        '```json',
+        'GITLAB_REVIEW_RESULT:',
+        closedJson,
+        '```',
+      ].join('\n'),
+    ]) {
+      expect(extractGitLabReviewStageResultFromRuntimeText(text)).toBeUndefined()
+    }
+  })
+
+  test('rejects a non-closed management result before GitLab access', async () => {
+    const run = createPublishableReviewRun({ headSha: 'non-closed-management-head' })
+    const requests: string[] = []
+
+    const result = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: {
+        stage: 'verification',
+        status: 'ok',
+        summary: 'Intermediate result.',
+        findings: [],
+      },
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: (async (url: string | URL | Request) => {
+        requests.push(String(url))
+        throw new Error('GitLab must not be touched for an intermediate result')
+      }) as unknown as typeof fetch,
     })
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'invalid_stage_result',
+    })
+    expect(requests).toEqual([])
+    expect(ReviewRunStore.get(run.id)).toMatchObject({ status: 'running' })
+  })
+
+  test('does not publish after the platform, review, or live publication mode is disabled', async () => {
+    const disabledConfigurations = [
+      {
+        error: 'gitlab_platform_disabled',
+        platforms: {
+          gitlab: { ...publishingPlatforms().gitlab, enabled: false },
+        },
+      },
+      {
+        error: 'gitlab_review_disabled',
+        platforms: {
+          gitlab: {
+            ...publishingPlatforms().gitlab,
+            settings: {
+              ...publishingPlatforms().gitlab.settings,
+              'review.enabled': false,
+            },
+          },
+        },
+      },
+      {
+        error: 'dry_run_enabled',
+        platforms,
+      },
+    ]
+
+    for (const [index, configuration] of disabledConfigurations.entries()) {
+      const run = createPublishableReviewRun({ headSha: `disabled-publication-${index}` })
+      const before = ReviewRunStore.get(run.id)
+      const requests: string[] = []
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult: publicationStageResult(),
+        platforms: configuration.platforms,
+        secrets: liveSecrets,
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          return Response.json({ id: 1 })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: configuration.error,
+      })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.get(run.id)).toEqual(before)
+    }
+  })
+
+  test('does not notify failures after publication configuration is disabled', async () => {
+    const disabledConfigurations = [
+      {
+        error: 'gitlab_platform_disabled',
+        platforms: {
+          gitlab: { ...publishingPlatforms().gitlab, enabled: false },
+        },
+      },
+      {
+        error: 'gitlab_review_disabled',
+        platforms: {
+          gitlab: {
+            ...publishingPlatforms().gitlab,
+            settings: {
+              ...publishingPlatforms().gitlab.settings,
+              'review.enabled': false,
+            },
+          },
+        },
+      },
+      {
+        error: 'dry_run_enabled',
+        platforms,
+      },
+    ]
+
+    for (const [index, configuration] of disabledConfigurations.entries()) {
+      const run = createPublishableReviewRun({ headSha: `disabled-failure-${index}` })
+      ReviewRunStore.update(run.id, { status: 'failed', error: 'runtime_failed' })
+      const before = ReviewRunStore.get(run.id)
+      const requests: string[] = []
+      const result = await reportGitLabReviewRunFailure({
+        runId: run.id,
+        platforms: configuration.platforms,
+        secrets: liveSecrets,
+        phase: 'runtime',
+        error: 'runtime_failed',
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          return Response.json({ id: 1 })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({ notified: false, runId: run.id, error: configuration.error })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.get(run.id)).toEqual(before)
+    }
+  })
+
+  test('does not let delayed results overwrite terminal review attempts', async () => {
+    for (const status of ['failed', 'blocked', 'succeeded'] as const) {
+      const run = createPublishableReviewRun({ headSha: `terminal-result-${status}` })
+      ReviewRunStore.update(run.id, { status, error: status === 'failed' ? 'runtime_failed' : undefined })
+      const before = ReviewRunStore.get(run.id)
+      const requests: string[] = []
+
+      const result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult: publicationStageResult(),
+        platforms: publishingPlatforms(),
+        secrets: liveSecrets,
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          return Response.json({ id: 1 })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        published: false,
+        runId: run.id,
+        error: `review_run_terminal_${status}`,
+      })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.get(run.id)).toEqual(before)
+    }
+  })
+
+  test('does not write failure comments for non-failed terminal attempts', async () => {
+    for (const status of ['blocked', 'succeeded'] as const) {
+      const run = createPublishableReviewRun({ headSha: `terminal-failure-${status}` })
+      ReviewRunStore.update(run.id, { status })
+      const before = ReviewRunStore.get(run.id)
+      const requests: string[] = []
+
+      const result = await reportGitLabReviewRunFailure({
+        runId: run.id,
+        platforms: publishingPlatforms(),
+        secrets: liveSecrets,
+        phase: 'runtime',
+        error: 'late_failure',
+        fetch: (async (url: string | URL | Request) => {
+          requests.push(String(url))
+          return Response.json({ id: 1 })
+        }) as typeof fetch,
+      })
+
+      expect(result).toEqual({
+        notified: false,
+        runId: run.id,
+        error: `review_run_terminal_${status}`,
+      })
+      expect(requests).toEqual([])
+      expect(ReviewRunStore.get(run.id)).toEqual(before)
+    }
+  })
+
+  test('allows only result publication when a failure notification races its live claim', async () => {
+    const run = createPublishableReviewRun({ headSha: 'result-failure-race-head' })
+    const resultPostStarted = deferred()
+    const releaseResultPost = deferred()
+    const postedBodies: string[] = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      if (requestMethod(init) === 'GET' && value.endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'result-failure-race-head' },
+        })
+      }
+      if (requestMethod(init) === 'POST' && value.endsWith('/notes')) {
+        const body = requestFormField(init, 'body') ?? ''
+        postedBodies.push(body)
+        if (!body.includes('Nine1Bot review failed')) {
+          resultPostStarted.resolve()
+          await releaseResultPost.promise
+        }
+        return Response.json({ id: postedBodies.length })
+      }
+      throw new Error(`unexpected result/failure race request: ${requestMethod(init)} ${value}`)
+    }) as typeof fetch
+
+    const publishing = publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: { ...publicationStageResult('Race winner.'), findings: [] },
+      platforms: summaryOnlyPublishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'result-owner',
+    })
+    await resultPostStarted.promise
+
+    ReviewRunStore.update(run.id, { status: 'failed', error: 'runtime_failed' })
+    const notification = await reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms: summaryOnlyPublishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      phase: 'runtime',
+      error: 'runtime_failed',
+    })
+    releaseResultPost.resolve()
+    await publishing
+
+    expect(notification.notified).toBe(false)
+    expect(postedBodies).toHaveLength(1)
+    expect(postedBodies[0]).not.toContain('Nine1Bot review failed')
+    expect(ReviewRunStore.get(run.id)?.failureNotifiedAt).toBeUndefined()
+  })
+
+  test('allows only failure notification when result publication races its live claim', async () => {
+    const run = createPublishableReviewRun({ headSha: 'failure-result-race-head' })
+    ReviewRunStore.update(run.id, { status: 'failed', error: 'runtime_failed' })
+    const failurePostStarted = deferred()
+    const releaseFailurePost = deferred()
+    const postedBodies: string[] = []
+    const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url)
+      if (requestMethod(init) === 'GET' && value.endsWith('/merge_requests/10')) {
+        return Response.json({
+          diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'failure-result-race-head' },
+        })
+      }
+      if (requestMethod(init) === 'POST' && value.endsWith('/notes')) {
+        const body = requestFormField(init, 'body') ?? ''
+        postedBodies.push(body)
+        if (body.includes('Nine1Bot review failed')) {
+          failurePostStarted.resolve()
+          await releaseFailurePost.promise
+        }
+        return Response.json({ id: postedBodies.length })
+      }
+      throw new Error(`unexpected failure/result race request: ${requestMethod(init)} ${value}`)
+    }) as typeof fetch
+
+    const notification = reportGitLabReviewRunFailure({
+      runId: run.id,
+      platforms: summaryOnlyPublishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      phase: 'runtime',
+      error: 'runtime_failed',
+    })
+    await failurePostStarted.promise
+
+    const published = await publishGitLabReviewRunResult({
+      runId: run.id,
+      stageResult: { ...publicationStageResult('Late result.'), findings: [] },
+      platforms: summaryOnlyPublishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      publisherOwnerId: 'result-owner',
+    })
+    releaseFailurePost.resolve()
+    const notified = await notification
+
+    expect(published).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_terminal_failed',
+    })
+    expect(notified).toEqual({ notified: true, runId: run.id })
+    expect(postedBodies).toHaveLength(1)
+    expect(postedBodies[0]).toContain('Nine1Bot review failed')
   })
 
   test('injects mention instructions into runtime prompt as untrusted review focus metadata', () => {
@@ -1476,6 +1788,60 @@ describe('GitLab review controller', () => {
     })
   })
 
+  test('does not rewrite terminal, published, or non-latest runtime attempts as configuration failures', () => {
+    for (const status of ['failed', 'blocked', 'succeeded'] as const) {
+      const run = ReviewRunStore.create({
+        platform: 'gitlab',
+        status,
+        error: status === 'failed' ? 'runtime_failed' : undefined,
+      })
+      const before = ReviewRunStore.get(run.id)
+
+      expect(rejectGitLabReviewRuntimeConfiguration(run.id, 'project_binding_missing')).toMatchObject({
+        accepted: false,
+        runId: run.id,
+        error: `review_run_terminal_${status}`,
+      })
+      expect(ReviewRunStore.get(run.id)).toEqual(before)
+    }
+
+    const published = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'succeeded',
+      publishedAt: Date.now(),
+    })
+    const publishedBefore = ReviewRunStore.get(published.id)
+    expect(rejectGitLabReviewRuntimeConfiguration(published.id, 'project_binding_missing')).toMatchObject({
+      accepted: false,
+      runId: published.id,
+      error: 'review_run_already_published',
+    })
+    expect(ReviewRunStore.get(published.id)).toEqual(publishedBefore)
+
+    const old = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      idempotencyKey: 'non-latest-runtime-configuration',
+      triggerKey: 'non-latest-runtime-configuration',
+    })
+    const latest = ReviewRunStore.createRetryAttempt(old, {
+      platform: 'gitlab',
+      status: 'accepted',
+      idempotencyKey: old.idempotencyKey,
+    })
+    if (!latest) throw new Error('expected newer runtime attempt')
+    const oldBefore = ReviewRunStore.get(old.id)
+    const latestBefore = ReviewRunStore.get(latest.id)
+
+    expect(rejectGitLabReviewRuntimeConfiguration(old.id, 'project_binding_missing')).toMatchObject({
+      accepted: false,
+      runId: old.id,
+      error: 'review_run_not_latest',
+    })
+    expect(ReviewRunStore.get(old.id)).toEqual(oldBefore)
+    expect(ReviewRunStore.get(latest.id)).toEqual(latestBefore)
+  })
+
   test('allows only one concurrent retry attempt and rejects nonrecoverable or active runs', async () => {
     expect(isRecoverableGitLabReviewRejection('project_profile_missing')).toBe(true)
     expect(isRecoverableGitLabReviewRejection('project-not-allowed')).toBe(false)
@@ -1631,6 +1997,160 @@ describe('GitLab review controller', () => {
       expect.objectContaining({ error: 'review_run_not_latest', httpStatus: 409 }),
     ])
     expect(ReviewRunStore.findLatestByTriggerKey(rejected.triggerKey)).toMatchObject({ attempt: 2 })
+  })
+
+  test('creates a linked retry only after an active attempt lease is stale', async () => {
+    const trigger = {
+      host: 'gitlab.example.com',
+      projectId: 123,
+      projectPath: 'nine1/nine1bot',
+      objectType: 'mr' as const,
+      objectIid: 81,
+      headSha: 'stale-explicit-head',
+      eventName: 'merge_request',
+      mode: 'webhook' as const,
+    }
+    const active = ReviewRunStore.create({
+      platform: 'gitlab',
+      status: 'running',
+      idempotencyKey: 'stale-explicit-trigger',
+      triggerKey: 'stale-explicit-trigger',
+      trigger,
+      sessionId: 'stale-session',
+    })
+
+    const result = await retryGitLabReviewAttempt({
+      runId: active.id,
+      platforms,
+      secrets: memorySecrets,
+      now: () => active.createdAt + (36 * 60 * 1_000),
+    } as Parameters<typeof retryGitLabReviewAttempt>[0] & { now: () => number })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      status: 'dry-run',
+      attempt: 2,
+      retryOf: active.id,
+    })
+    expect(ReviewRunStore.get(active.id)).toMatchObject({
+      status: 'failed',
+      error: 'review_run_active_lease_expired',
+      rejectionKind: 'transient',
+      recoverable: true,
+    })
+    expect(ReviewRunStore.findLatestByTriggerKey(active.triggerKey)).toMatchObject({
+      id: result.runId,
+      attempt: 2,
+    })
+  })
+
+  test('creates a linked retry when a duplicate webhook proves the active attempt stale', async () => {
+    const payload = {
+      object_kind: 'merge_request',
+      project: {
+        id: 123,
+        path_with_namespace: 'nine1/nine1bot',
+        web_url: 'https://gitlab.example.com/nine1/nine1bot',
+      },
+      object_attributes: { iid: 82, last_commit: { id: 'stale-webhook-head' } },
+    }
+    const fetchMock = (async () => Response.json({
+      diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'stale-webhook-head' },
+      changes: [{ old_path: 'src/a.ts', new_path: 'src/a.ts', diff: '@@ -1 +1 @@\n-a\n+b\n' }],
+    })) as unknown as typeof fetch
+    const first = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+    })
+    if (!first.accepted) throw new Error('expected first active review')
+    const firstRun = ReviewRunStore.get(first.runId)!
+
+    const retried = await handleGitLabReviewWebhook({
+      payload,
+      headers: { 'x-gitlab-token': 'secret' },
+      platforms: publishingPlatforms(),
+      secrets: liveSecrets,
+      fetch: fetchMock,
+      now: () => firstRun.createdAt + (36 * 60 * 1_000),
+    } as Parameters<typeof handleGitLabReviewWebhook>[0] & { now: () => number })
+
+    expect(retried).toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      attempt: 2,
+      retryOf: first.runId,
+    })
+    expect(retried.runId).not.toBe(first.runId)
+    expect(ReviewRunStore.get(first.runId)).toMatchObject({
+      status: 'failed',
+      error: 'review_run_active_lease_expired',
+    })
+  })
+
+  test('bounds recoverable retry attempts for one trigger lineage', async () => {
+    const previousLimit = process.env.NINE1BOT_REVIEW_RUN_ATTEMPT_LIMIT
+    process.env.NINE1BOT_REVIEW_RUN_ATTEMPT_LIMIT = '3'
+    try {
+      const trigger = {
+        host: 'gitlab.example.com',
+        projectId: 123,
+        projectPath: 'nine1/nine1bot',
+        objectType: 'mr' as const,
+        objectIid: 83,
+        headSha: 'retry-limit-head',
+        eventName: 'merge_request',
+        mode: 'webhook' as const,
+      }
+      const first = ReviewRunStore.create({
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        idempotencyKey: 'retry-limit-trigger',
+        triggerKey: 'retry-limit-trigger',
+        trigger,
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })
+      const second = ReviewRunStore.createRetryAttempt(first, {
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        idempotencyKey: first.idempotencyKey,
+        trigger,
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })!
+      const third = ReviewRunStore.createRetryAttempt(second, {
+        platform: 'gitlab',
+        status: 'rejected',
+        error: 'project_profile_missing',
+        idempotencyKey: first.idempotencyKey,
+        trigger,
+        rejectionKind: 'configuration',
+        recoverable: true,
+      })!
+
+      const result = await retryGitLabReviewAttempt({
+        runId: third.id,
+        platforms,
+        secrets: memorySecrets,
+      })
+
+      expect(result).toMatchObject({
+        accepted: false,
+        error: 'review_run_retry_limit_reached',
+        httpStatus: 409,
+        runId: third.id,
+      })
+      expect(ReviewRunStore.findLatestByTriggerKey(first.triggerKey)).toMatchObject({ id: third.id, attempt: 3 })
+      expect(ReviewRunStore.list().filter((run) => run.triggerKey === first.triggerKey)).toHaveLength(3)
+    } finally {
+      if (previousLimit === undefined) delete process.env.NINE1BOT_REVIEW_RUN_ATTEMPT_LIMIT
+      else process.env.NINE1BOT_REVIEW_RUN_ATTEMPT_LIMIT = previousLimit
+    }
   })
 
   test('does not prefetch GitLab CI while creating an MR review run', async () => {
@@ -2368,6 +2888,45 @@ describe('GitLab review controller', () => {
     })).toMatchObject({ ok: true, resume: true })
   })
 
+  test('downgrades a persisted publishing owner so a failed run can resume after restart', () => {
+    const run = createPublishableReviewRun({ headSha: 'restart-publishing-head' })
+    const payloadHash = publicationPayloadHash(publicationStageResult())
+    const first = ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-before-restart',
+      identity: {
+        runId: run.id,
+        sessionId: run.sessionId,
+        generation: run.generation,
+      },
+    })
+    expect(first).toMatchObject({ ok: true, resume: false })
+    expect(ReviewRunStore.update(run.id, {
+      status: 'failed',
+      error: 'runtime_stopped_during_publication',
+    })).toBeDefined()
+
+    ReviewRunStore.reloadForTesting()
+
+    expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
+      state: 'partial',
+      claimId: undefined,
+      ownerId: undefined,
+      payloadHash,
+    })
+    expect(ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-after-restart',
+      identity: {
+        runId: run.id,
+        sessionId: run.sessionId,
+        generation: run.generation,
+      },
+    })).toMatchObject({ ok: true, resume: true })
+  })
+
   test('rolls back a failed publication claim save without wedging owner liveness', async () => {
     const run = createPublishableReviewRun({ headSha: 'claim-save-failure-head' })
     const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
@@ -2390,7 +2949,7 @@ describe('GitLab review controller', () => {
     })).toMatchObject({ ok: true, resume: false })
   })
 
-  test('rolls back failed marker, failure, and completion saves while preserving the live claim', async () => {
+  test('rolls back failed marker and failure saves but releases a failed completion owner', async () => {
     const run = createPublishableReviewRun({ headSha: 'mutation-save-failure-head' })
     const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
     const payloadHash = publicationPayloadHash(publicationStageResult())
@@ -2425,23 +2984,110 @@ describe('GitLab review controller', () => {
     await unblockStoreRename()
 
     await blockStoreRename()
-    expect(() => ReviewRunStore.completePublication({
-      ...identity,
-      status: 'succeeded',
-      warnings: [],
-    })).toThrow()
-    expect(ReviewRunStore.get(run.id)).toMatchObject({
-      status: 'running',
-      publication: { state: 'publishing', claimId: claim.claimId, ownerId: 'publisher-a' },
-    })
-    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
-    await unblockStoreRename()
-
     expect(ReviewRunStore.completePublication({
       ...identity,
       status: 'succeeded',
       warnings: [],
-    })).toBe(true)
+    })).toBe(false)
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'failed',
+      publication: {
+        state: 'partial',
+        claimId: undefined,
+        ownerId: undefined,
+        error: 'review_run_publication_finalize_failed',
+      },
+    })
+    expect(ReviewRunStore.get(run.id)?.publishedAt).toBeUndefined()
+    expect(ReviewRunStore.isPublicationClaimCurrent(identity)).toBe(false)
+    await unblockStoreRename()
+
+    expect(ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-b',
+    })).toMatchObject({ ok: true, resume: true })
+  })
+
+  test('does not revive terminal attempts through late ordinary store updates', () => {
+    for (const status of ['failed', 'rejected', 'blocked', 'succeeded'] as const) {
+      const run = ReviewRunStore.create({
+        platform: 'gitlab',
+        status,
+        idempotencyKey: `terminal-store-update-${status}`,
+        error: status === 'failed' ? 'runtime_failed' : undefined,
+      })
+
+      expect(ReviewRunStore.update(run.id, {
+        status: 'running',
+        error: undefined,
+      })).toBeUndefined()
+      expect(ReviewRunStore.get(run.id)).toMatchObject({
+        status,
+        ...(status === 'failed' ? { error: 'runtime_failed' } : {}),
+      })
+    }
+  })
+
+  test('returns a recoverable partial result when final publication persistence fails', async () => {
+    const run = createPublishableReviewRun({ headSha: 'finalize-save-failure-head' })
+    const storeFile = join(tempDirs.at(-1)!, 'review-runs.json')
+    const stageResult = { ...publicationStageResult('Finalize persistence.'), findings: [] }
+    const payloadHash = publicationPayloadHash(stageResult)
+    const recordMarker = ReviewRunStore.recordPublicationMarker
+    const markerSpy = spyOn(ReviewRunStore, 'recordPublicationMarker').mockImplementation((input) => {
+      const recorded = recordMarker(input)
+      rmStoreSync(storeFile, { force: true })
+      mkdirStoreSync(storeFile)
+      return recorded
+    })
+
+    let result
+    try {
+      result = await publishGitLabReviewRunResult({
+        runId: run.id,
+        stageResult,
+        platforms: summaryOnlyPublishingPlatforms(),
+        secrets: liveSecrets,
+        publisherOwnerId: 'publisher-a',
+        fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+          const value = String(url)
+          if (requestMethod(init) === 'GET' && value.endsWith('/merge_requests/10')) {
+            return Response.json({
+              diff_refs: { base_sha: 'base', start_sha: 'start', head_sha: 'finalize-save-failure-head' },
+            })
+          }
+          if (requestMethod(init) === 'POST' && value.endsWith('/notes')) return Response.json({ id: 1 })
+          throw new Error(`unexpected finalize failure request: ${requestMethod(init)} ${value}`)
+        }) as typeof fetch,
+      })
+    } finally {
+      markerSpy.mockRestore()
+      rmStoreSync(storeFile, { recursive: true, force: true })
+    }
+
+    expect(result).toEqual({
+      published: false,
+      runId: run.id,
+      error: 'review_run_publication_finalize_failed',
+    })
+    expect(ReviewRunStore.get(run.id)).toMatchObject({
+      status: 'failed',
+      publishedAt: undefined,
+      publication: {
+        state: 'partial',
+        ownerId: undefined,
+        claimId: undefined,
+        payloadHash,
+        completedMarkers: [gitLabReviewPublicationMarker({ runId: run.id, kind: 'summary' })],
+        error: 'review_run_publication_finalize_failed',
+      },
+    })
+    expect(ReviewRunStore.claimPublication({
+      runId: run.id,
+      payloadHash,
+      ownerId: 'publisher-b',
+    })).toMatchObject({ ok: true, resume: true })
   })
 
   test('rolls back failed ordinary updates while preserving the active publication claim', async () => {
@@ -2641,7 +3287,7 @@ describe('GitLab review controller', () => {
       payloadHash,
     }
 
-    ReviewRunStore.setMaxRecordsForTesting(1)
+    ReviewRunStore.setMaxRecordsForTesting(2)
     const pressure = ReviewRunStore.create({
       platform: 'gitlab',
       status: 'accepted',
@@ -2650,7 +3296,7 @@ describe('GitLab review controller', () => {
     })
 
     expect(ReviewRunStore.get(pressure.id)).toEqual(pressure)
-    expect(ReviewRunStore.get(first.id)).toBeDefined()
+    expect(ReviewRunStore.get(first.id)).toBeUndefined()
     expect(ReviewRunStore.get(publishing.id)).toBeDefined()
     expect(ReviewRunStore.recordPublicationMarker({ ...identity, marker: 'active-prune-marker' })).toBe(true)
     expect(ReviewRunStore.completePublication({
@@ -3081,7 +3727,7 @@ describe('GitLab review controller', () => {
     })
   })
 
-  test('keeps an oversized attempt chain whole and removes it only as a complete older chain', () => {
+  test('prunes the oldest attempts when a protected lineage exceeds the store limit', () => {
     ReviewRunStore.setMaxRecordsForTesting(2)
     const first = ReviewRunStore.create({
       platform: 'gitlab',
@@ -3102,11 +3748,14 @@ describe('GitLab review controller', () => {
     })
 
     expect(third).toBeDefined()
-    expect(ReviewRunStore.list().map((run) => run.id)).toEqual([third!.id, second!.id, first.id])
+    expect(ReviewRunStore.list().map((run) => run.id)).toEqual([third!.id, second!.id])
     for (const run of ReviewRunStore.list()) {
       expect(ReviewRunStore.get(run.rootRunId)).toBeDefined()
       if (run.retryOf) expect(ReviewRunStore.get(run.retryOf)).toBeDefined()
     }
+    expect(ReviewRunStore.get(first.id)).toBeUndefined()
+    expect(ReviewRunStore.get(second!.id)).toMatchObject({ rootRunId: second!.id, retryOf: undefined })
+    expect(ReviewRunStore.get(third!.id)).toMatchObject({ rootRunId: second!.id, retryOf: second!.id })
 
     const newer = ReviewRunStore.create({
       platform: 'gitlab',
@@ -4300,7 +4949,7 @@ describe('GitLab review controller', () => {
       runId: run.id,
       error: 'review_run_publish_in_progress',
     })
-    expect(ownerBCalls).toHaveLength(1)
+    expect(ownerBCalls).toHaveLength(0)
     expect(ownerBCalls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
     expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({ ownerId: 'publisher-a' })
 
@@ -4480,7 +5129,7 @@ describe('GitLab review controller', () => {
       runId: run.id,
       error: 'review_run_publish_payload_mismatch',
     })
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(0)
     expect(calls.filter((call) => requestMethod(call.init) === 'POST')).toHaveLength(0)
     expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
       state: 'partial',
@@ -6378,9 +7027,9 @@ describe('GitLab review controller', () => {
 
     ReviewRunStore.reloadForTesting()
     expect(ReviewRunStore.get(run.id)?.publication).toMatchObject({
-      state: 'publishing',
-      claimId: ownerAClaim.claimId,
-      ownerId: 'publisher-a',
+      state: 'partial',
+      claimId: undefined,
+      ownerId: undefined,
       payloadHash,
     })
 
@@ -6501,7 +7150,6 @@ describe('GitLab review controller', () => {
 
     expect(accepted).toMatchObject({ accepted: true, status: 'accepted' })
     if (!accepted.accepted) throw new Error('expected accepted review run')
-    ReviewRunStore.update(accepted.runId, { status: 'failed', error: 'previous_runtime_error' })
 
     const published = await publishGitLabReviewRunResult({
       runId: accepted.runId,
@@ -6518,7 +7166,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'ok',
         summary: 'Runtime review complete.',
         findings: [{
@@ -6541,7 +7189,6 @@ describe('GitLab review controller', () => {
       status: 'succeeded',
       publishedAt: expect.any(Number),
     })
-    expect(storedAfterPublish?.error).toBeUndefined()
     await expect(publishGitLabReviewRunResult({
       runId: accepted.runId,
       platforms: {
@@ -6557,7 +7204,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'ok',
         summary: 'Duplicate publish.',
         findings: [],
@@ -6622,7 +7269,7 @@ describe('GitLab review controller', () => {
       } } },
       secrets: liveSecrets,
       fetch: fetchMock,
-      stageResult: { stage: 'verification', status: 'ok', summary: 'Review complete.', findings: [] },
+      stageResult: { stage: 'closed', status: 'ok', summary: 'Review complete.', findings: [] },
     })).resolves.toMatchObject({
       published: false,
       error: 'gitlab_review_head_changed',
@@ -6649,7 +7296,7 @@ describe('GitLab review controller', () => {
       } } },
       secrets: liveSecrets,
       fetch: fetchMock,
-      stageResult: { stage: 'verification', status: 'ok', summary: 'Replay.', findings: [] },
+      stageResult: { stage: 'closed', status: 'ok', summary: 'Replay.', findings: [] },
     })).resolves.toEqual({
       published: false,
       runId: accepted.runId,
@@ -6699,7 +7346,7 @@ describe('GitLab review controller', () => {
       } } },
       secrets: liveSecrets,
       fetch: fetchMock,
-      stageResult: { stage: 'verification', status: 'ok', summary: 'Review complete.', findings: [] },
+      stageResult: { stage: 'closed', status: 'ok', summary: 'Review complete.', findings: [] },
     })).resolves.toMatchObject({
       published: false,
       error: 'gitlab_review_diff_head_unverified',
@@ -6899,7 +7546,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'blocked',
         summary: 'Runtime review blocked by PM gate.',
         findings: [],
@@ -6973,7 +7620,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'not-a-valid-status',
         summary: 'Invalid payload.',
         findings: [],
@@ -7102,7 +7749,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'ok',
         summary: 'Runtime review complete.',
         findings: [],
@@ -7351,7 +7998,7 @@ describe('GitLab review controller', () => {
       secrets: liveSecrets,
       fetch: fetchMock,
       stageResult: {
-        stage: 'verification',
+        stage: 'closed',
         status: 'ok',
         summary: 'Commit review complete.',
         findings: [{
