@@ -851,6 +851,9 @@ export function gitLabReviewSessionCreatedPatch(
       readCount: 0,
       searchCount: 0,
       outputBytes: 0,
+      apiRequestCount: 0,
+      fileFetchCount: 0,
+      fetchedBytes: 0,
     },
   } satisfies Parameters<typeof ReviewRunStore.update>[1]
   return run ? gitLabReviewRuntimePatch(run, patch) : patch

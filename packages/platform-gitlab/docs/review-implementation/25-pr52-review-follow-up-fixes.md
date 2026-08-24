@@ -1,6 +1,6 @@
 # PR #52 Review 跟进修复记录
 
-日期：2026-08-23
+日期：2026-08-24
 
 ## 1. 目标
 
@@ -147,6 +147,18 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - GitLab 文件、目录树和所有最终证据均固定到 ReviewRun 中的 SHA；找不到可信仓库证据时返回稳定诊断，自动 Review 主流程继续运行。
 - GitLab 自动 Review 的 `task` 提示词不再解析 `@file`、`@directory` 或 `@~/...` 本地引用，而是以纯文本传给 specialist，阻断通过通用 prompt 解析器枚举 Project 目录或工作区外路径的旁路；普通 TaskTool 的本地引用能力保持不变。
 
+### Batch 12：仓库优先路径发现与聚合资源预算
+
+完成项：
+
+- 未显式提供 `pathPrefix` 时，`search_text` 会先规范化并去重 Project Profile 中的 `includePathPrefixes`，最多选择 4 个优先路径，在最多 100 个 tree entry 的配额内先行查询；随后使用剩余配额做全仓 tree 回退，并按路径去重，单次搜索总量仍不超过 200 个 entry。
+- 配置中的优先路径返回 404 时将其视为过期提示并继续全仓回退；显式 `pathPrefix` 返回 404 时仍给出稳定的 `repository_search_path_not_found`。`includePathPrefixes` 只影响发现顺序，不构成访问 allowlist。
+- GitLab API client 在每次真实 `fetch` 前调用服务端预算钩子，分页请求和同 authority 重定向分别计数，无法再通过一次 wrapper 调用放大为未计量的 HTTP 请求。
+- 每个 ReviewRun attempt 最多允许 64 次 GitLab HTTP 请求、48 次 raw file 读取和 2 MiB 文件读取字节；这些计数与原有 12 次工具查询、128 KiB 累计输出预算一起持久化，并在新 attempt 创建时重置。
+- raw file 请求在首个网络访问前原子预留 HTTP、文件次数和最大读取字节，成功后回收未使用字节；失败或中断的请求保留预留额度，避免重复失败请求绕过总预算。并发工具调用也不能让计数越过硬上限。
+- 每次 `search_text` 增加 30 秒服务端硬截止，截止信号贯穿 tree 分页和 raw file 读取；上游取消仍返回 `repository_request_aborted`，内部截止稳定返回 `repository_search_timeout`。
+- 资源预算耗尽分别返回 `repository_api_request_limit_reached`、`repository_file_fetch_limit_reached` 和 `repository_fetch_byte_limit_reached`，并在下一次网络访问前停止，不返回不完整的伪成功结果。
+
 ## 3. 测试覆盖
 
 已完成聚焦红绿测试：
@@ -159,6 +171,9 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - `excludePathPatterns` 和硬黑名单同时约束直接读取、搜索前候选和搜索结果；排除路径不会发起 raw file 请求。
 - GitLab API 同 authority 重定向、响应字节限制和服务端 token 注入继续适用于仓库读取。
 - 仓库查询次数、内容、累计输出和最终 tool DTO 均受限。
+- 优先目录位于全仓前 200 个 tree entry 之外时，仍会在全仓回退前被发现；优先目录与全仓结果按路径去重。
+- 第 64 次真实 GitLab 请求后，后续分页或 raw file 请求在 `fetch` 前停止；同 authority 重定向的每一跳也独立计数。
+- 文件次数、文件字节聚合预算和 30 秒单次搜索截止返回稳定诊断，且不会继续访问 GitLab。
 - MR 与 commit review 分别固定使用 `headSha` 和 `commitSha`；模型不能覆盖任一 ref。
 - GitLab 自动 Review 的 specialist 任务中，本地 `@` 引用保持为字面文本且不会生成 `file://` part；普通 TaskTool 仍执行原有引用解析。
 - CI 日志读取前置 list、token 零读取和 GitLab 零请求。
@@ -166,8 +181,9 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - ReviewRun 状态机定向测试：132 pass / 0 fail。
 - GitLab CLI client 与 wrapper tools：39 pass / 0 fail。
 - OpenCode GitLab TaskTool 边界聚焦测试：10 pass / 0 fail。
+- GitLab 仓库 inspector 聚焦测试：14 pass / 0 fail。
 - 仓库定义的 OpenCode runtime CI：194 pass / 0 fail；registry 补充用例：1 pass / 0 fail。
-- 根仓库 `ci:test`：751 pass / 0 fail，3324 次断言。
+- 根仓库 `ci:test`：758 pass / 0 fail，3342 次断言。
 - 根仓库全部 package `ci:typecheck`：通过。
 - Web production build：通过（1869 modules transformed）。
 - OpenCode `tsgo --noEmit`：通过。

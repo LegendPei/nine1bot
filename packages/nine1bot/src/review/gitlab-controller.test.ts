@@ -2585,6 +2585,9 @@ describe('GitLab review controller', () => {
           readCount: 2,
           searchCount: 2,
           outputBytes: 1024,
+          apiRequestCount: 9,
+          fileFetchCount: 3,
+          fetchedBytes: 768,
         },
       }],
     }))
@@ -2595,6 +2598,9 @@ describe('GitLab review controller', () => {
       readCount: 2,
       searchCount: 2,
       outputBytes: 1024,
+      apiRequestCount: 9,
+      fileFetchCount: 3,
+      fetchedBytes: 768,
     })
   })
 

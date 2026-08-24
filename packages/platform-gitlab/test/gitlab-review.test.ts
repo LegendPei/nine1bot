@@ -2559,6 +2559,32 @@ describe('GitLab review foundation', () => {
     expect(requests[1]!.url.searchParams.get('page')).toBe('1')
   })
 
+  test('counts every physical repository request across same-authority redirects', async () => {
+    let fetchCalls = 0
+    let requestBudgetCalls = 0
+    const frozenHead = 'a'.repeat(40)
+    const client = new GitLabApiClient({
+      baseUrl: 'https://gitlab.example.com',
+      token: 'server-token',
+      fetch: (async () => {
+        fetchCalls += 1
+        return fetchCalls === 1
+          ? new Response(null, { status: 302, headers: { location: '/redirected-file' } })
+          : new Response('source')
+      }) as unknown as typeof fetch,
+    })
+
+    const result = await client.getRepositoryFileRaw(3, 'src/app.ts', frozenHead, 100, {
+      beforeRequest() {
+        requestBudgetCalls += 1
+      },
+    })
+
+    expect(new TextDecoder().decode(result.content)).toBe('source')
+    expect(fetchCalls).toBe(2)
+    expect(requestBudgetCalls).toBe(2)
+  })
+
   test('projects GitLab CI API objects before returning them', async () => {
     const client = new GitLabApiClient({
       baseUrl: 'https://gitlab.example.com',

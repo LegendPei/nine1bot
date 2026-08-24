@@ -34,6 +34,7 @@ export type GitLabRequestOptions = {
   signal?: AbortSignal
   maxItems?: number
   requestGuard?: () => void
+  beforeRequest?: () => void
 }
 
 export type GitLabApiRedirectErrorCode =
@@ -365,6 +366,7 @@ export class GitLabApiClient {
       { signal: options.signal },
       maxBytes,
       options.requestGuard,
+      options.beforeRequest,
     )
   }
 
@@ -541,6 +543,7 @@ export class GitLabApiClient {
         `${path}${separator}per_page=${perPage}&page=${encodeURIComponent(page)}`,
         { signal: options.signal },
         options.requestGuard,
+        options.beforeRequest,
       )
       if (!Array.isArray(result.data)) throw new Error('GitLab API paginated response must be an array')
       values.push(...result.data.slice(0, itemLimit - values.length))
@@ -556,6 +559,7 @@ export class GitLabApiClient {
     path: string,
     init: RequestInit = {},
     requestGuard?: () => void,
+    beforeRequest?: () => void,
   ): Promise<{ data: T; nextPage?: string }> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
@@ -568,7 +572,7 @@ export class GitLabApiClient {
       const data = text.trim() ? parseGitLabJson<T>(text) : undefined as T
       const nextPage = response.headers.get('x-next-page')?.trim() || undefined
       return { data, nextPage }
-    }, requestGuard)
+    }, requestGuard, beforeRequest)
   }
 
   async listNotes(input: GitLabListNotesInput, options: GitLabRequestOptions = {}): Promise<GitLabPublishedComment[]> {
@@ -612,6 +616,7 @@ export class GitLabApiClient {
     init: RequestInit,
     consume: (response: Response) => Promise<T>,
     requestGuard?: () => void,
+    beforeRequest?: () => void,
   ): Promise<T> {
     const controller = new AbortController()
     const upstreamSignal = init.signal
@@ -633,6 +638,7 @@ export class GitLabApiClient {
           init,
           controller.signal,
           requestGuard,
+          beforeRequest,
         )
         if (!requestGuard) return await consume(response)
         assertRequestGuard(requestGuard, response)
@@ -654,6 +660,7 @@ export class GitLabApiClient {
     init: RequestInit,
     maxBytes: number,
     requestGuard?: () => void,
+    beforeRequest?: () => void,
   ): Promise<GitLabRepositoryFileRaw> {
     return await this.withRequest(path, init, async (response) => {
       if (!response.ok) {
@@ -661,7 +668,7 @@ export class GitLabApiClient {
         throw new GitLabApiError(response.status, response.statusText, errorBody?.text)
       }
       return await readBoundedBytes(response, maxBytes)
-    }, requestGuard)
+    }, requestGuard, beforeRequest)
   }
 
   private async fetchWithSafeRedirects(
@@ -669,6 +676,7 @@ export class GitLabApiClient {
     init: RequestInit,
     signal: AbortSignal,
     requestGuard?: () => void,
+    beforeRequest?: () => void,
   ): Promise<Response> {
     const initialUrl = parseHttpUrl(url)
     if (!initialUrl) throw new GitLabApiRedirectError('gitlab_redirect_invalid')
@@ -681,6 +689,7 @@ export class GitLabApiClient {
       const headers = new Headers(currentInit.headers)
       headers.set('PRIVATE-TOKEN', this.token)
       requestGuard?.()
+      beforeRequest?.()
       let response: Response | undefined
       try {
         response = await this.fetchImpl(currentUrl, {

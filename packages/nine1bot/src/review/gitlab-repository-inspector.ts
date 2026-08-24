@@ -72,6 +72,10 @@ type GitLabRepositoryTarget = {
 
 const MAX_REPOSITORY_QUERIES = 12
 const MAX_REPOSITORY_OUTPUT_BYTES = 128 * 1024
+const MAX_REPOSITORY_API_REQUESTS = 64
+const MAX_REPOSITORY_FILE_FETCHES = 48
+const MAX_REPOSITORY_FETCHED_BYTES = 2 * 1024 * 1024
+const MAX_REPOSITORY_SEARCH_DURATION_MS = 30_000
 const MAX_TOOL_CONTENT_BYTES = 20 * 1024
 const MAX_FILE_BLOB_BYTES = 256 * 1024
 const MAX_READ_LINES = 200
@@ -79,6 +83,8 @@ const DEFAULT_READ_LINES = 120
 const MAX_SEARCH_MATCHES = 50
 const MAX_SEARCH_MATCH_TEXT_BYTES = 2 * 1024
 const MAX_SEARCH_TREE_ENTRIES = 200
+const MAX_SEARCH_PRIORITY_PREFIXES = 4
+const MAX_SEARCH_PRIORITY_TREE_ENTRIES = 100
 const MAX_SEARCH_FILES = 32
 const MAX_SEARCH_FILE_BYTES = 64 * 1024
 const MAX_SEARCH_SOURCE_BYTES = 512 * 1024
@@ -92,6 +98,7 @@ export async function inspectGitLabRepositoryForSession(input: {
   secrets: PlatformSecretAccess
   fetch?: typeof fetch
   signal?: AbortSignal
+  searchTimeoutMs?: number
 }): Promise<GitLabRepositoryToolOutput> {
   const action = input.request.action
   const run = ReviewRunStore.findBySessionId(input.sessionId)
@@ -144,10 +151,9 @@ export async function inspectGitLabRepositoryForSession(input: {
     token,
     fetch: input.fetch,
   })
-  const requestState: GitLabRepositoryRequestState = {}
-  const requestGuard = repositoryRequestGuard(identity, input.signal, requestState)
-
   if (validatedRequest.request.action === 'read_file') {
+    const requestState: GitLabRepositoryRequestState = {}
+    const requestGuard = repositoryRequestGuard(identity, input.signal, requestState)
     return await readFrozenFile({
       identity,
       client,
@@ -159,17 +165,29 @@ export async function inspectGitLabRepositoryForSession(input: {
       signal: input.signal,
     })
   }
-  return await searchFrozenRepository({
+  const deadline = repositorySearchDeadline(input.signal, input.searchTimeoutMs)
+  const requestState: GitLabRepositoryRequestState = {}
+  const requestGuard = repositoryRequestGuard(
     identity,
-    client,
-    target,
-    run,
-    request: validatedRequest.request,
-    maxOutputBytes: reservation.maxOutputBytes,
-    requestGuard,
+    deadline.signal,
     requestState,
-    signal: input.signal,
-  })
+    deadline.abortDiagnostic,
+  )
+  try {
+    return await searchFrozenRepository({
+      identity,
+      client,
+      target,
+      run,
+      request: validatedRequest.request,
+      maxOutputBytes: reservation.maxOutputBytes,
+      requestGuard,
+      requestState,
+      signal: deadline.signal,
+    })
+  } finally {
+    deadline.dispose()
+  }
 }
 
 async function readFrozenFile(input: {
@@ -182,6 +200,7 @@ async function readFrozenFile(input: {
   requestState: GitLabRepositoryRequestState
   signal?: AbortSignal
 }): Promise<GitLabRepositoryToolOutput> {
+  const requestBudget = repositoryFileRequestBoundary(input.identity, MAX_FILE_BLOB_BYTES + 1)
   let raw
   try {
     raw = await input.client.getRepositoryFileRaw(
@@ -189,11 +208,21 @@ async function readFrozenFile(input: {
       input.request.path,
       input.target.headSha,
       MAX_FILE_BLOB_BYTES + 1,
-      { signal: input.signal, requestGuard: input.requestGuard },
+      {
+        signal: input.signal,
+        requestGuard: input.requestGuard,
+        beforeRequest: requestBudget.beforeRequest,
+      },
     )
   } catch (error) {
     return failure('read_file', repositoryApiDiagnostic('read_file', error, input.requestState, input.identity, input.signal))
   }
+  const settlementFailure = settleRepositoryFileRequest(
+    input.identity,
+    requestBudget.reservedBytes(),
+    raw.content.byteLength,
+  )
+  if (settlementFailure) return failure('read_file', settlementFailure)
   if (raw.truncated || raw.content.byteLength > MAX_FILE_BLOB_BYTES) {
     return failure('read_file', 'repository_file_too_large')
   }
@@ -243,12 +272,14 @@ async function searchFrozenRepository(input: {
   requestState: GitLabRepositoryRequestState
   signal?: AbortSignal
 }): Promise<GitLabRepositoryToolOutput> {
-  let tree: GitLabRepositoryTreeEntry[]
+  let discovery: RepositorySearchTreeDiscovery
   try {
-    tree = await input.client.getRepositoryTree(input.target.projectId, input.target.headSha, {
-      ...(input.request.pathPrefix ? { path: input.request.pathPrefix } : {}),
-      recursive: true,
-      maxItems: MAX_SEARCH_TREE_ENTRIES,
+    discovery = await discoverRepositorySearchTree({
+      identity: input.identity,
+      client: input.client,
+      target: input.target,
+      run: input.run,
+      pathPrefix: input.request.pathPrefix,
       signal: input.signal,
       requestGuard: input.requestGuard,
     })
@@ -256,12 +287,12 @@ async function searchFrozenRepository(input: {
     return failure('search_text', repositoryApiDiagnostic('search_text', error, input.requestState, input.identity, input.signal))
   }
 
-  const candidates = prioritizedSearchCandidates(tree, input.run)
+  const candidates = prioritizedSearchCandidates(discovery.entries, input.run)
     .filter((entry) => searchCandidateAllowed(entry.path, input.run, input.request.pathPrefix))
   const selectedCandidates = candidates.slice(0, MAX_SEARCH_FILES)
   const matches: GitLabRepositoryMatch[] = []
   let inspectedBytes = 0
-  let truncated = tree.length >= MAX_SEARCH_TREE_ENTRIES || candidates.length > selectedCandidates.length
+  let truncated = discovery.truncated || candidates.length > selectedCandidates.length
 
   for (const entry of selectedCandidates) {
     if (matches.length >= MAX_SEARCH_MATCHES || inspectedBytes >= MAX_SEARCH_SOURCE_BYTES) {
@@ -270,6 +301,7 @@ async function searchFrozenRepository(input: {
     }
     const remainingBytes = MAX_SEARCH_SOURCE_BYTES - inspectedBytes
     const maxBytes = Math.min(MAX_SEARCH_FILE_BYTES, remainingBytes)
+    const requestBudget = repositoryFileRequestBoundary(input.identity, maxBytes + 1)
     let raw
     try {
       raw = await input.client.getRepositoryFileRaw(
@@ -277,11 +309,21 @@ async function searchFrozenRepository(input: {
         entry.path,
         input.target.headSha,
         maxBytes + 1,
-        { signal: input.signal, requestGuard: input.requestGuard },
+        {
+          signal: input.signal,
+          requestGuard: input.requestGuard,
+          beforeRequest: requestBudget.beforeRequest,
+        },
       )
     } catch (error) {
       return failure('search_text', repositoryApiDiagnostic('search_text', error, input.requestState, input.identity, input.signal))
     }
+    const settlementFailure = settleRepositoryFileRequest(
+      input.identity,
+      requestBudget.reservedBytes(),
+      raw.content.byteLength,
+    )
+    if (settlementFailure) return failure('search_text', settlementFailure)
 
     let content = raw.content
     if (content.byteLength > maxBytes) content = content.slice(0, maxBytes)
@@ -325,6 +367,87 @@ async function searchFrozenRepository(input: {
     bytes,
     truncated,
     diagnostics: truncated ? ['repository_search_output_truncated'] : [],
+  }
+}
+
+type RepositorySearchTreeDiscovery = {
+  entries: GitLabRepositoryTreeEntry[]
+  truncated: boolean
+}
+
+async function discoverRepositorySearchTree(input: {
+  identity: ReviewRunIdentity
+  client: GitLabApiClient
+  target: GitLabRepositoryTarget
+  run: ReviewRunRecord
+  pathPrefix?: string
+  signal?: AbortSignal
+  requestGuard: () => void
+}): Promise<RepositorySearchTreeDiscovery> {
+  const beforeRequest = repositoryApiRequestBoundary(input.identity)
+  if (input.pathPrefix) {
+    const entries = await input.client.getRepositoryTree(input.target.projectId, input.target.headSha, {
+      path: input.pathPrefix,
+      recursive: true,
+      maxItems: MAX_SEARCH_TREE_ENTRIES,
+      signal: input.signal,
+      requestGuard: input.requestGuard,
+      beforeRequest,
+    })
+    return { entries, truncated: entries.length >= MAX_SEARCH_TREE_ENTRIES }
+  }
+
+  const entries: GitLabRepositoryTreeEntry[] = []
+  const seenPaths = new Set<string>()
+  let truncated = false
+  const preferredPrefixes = preferredSearchPrefixes(input.run)
+  const perPrefixLimit = preferredPrefixes.length > 0
+    ? Math.max(1, Math.floor(MAX_SEARCH_PRIORITY_TREE_ENTRIES / preferredPrefixes.length))
+    : 0
+  for (const prefix of preferredPrefixes) {
+    let preferredEntries: GitLabRepositoryTreeEntry[]
+    try {
+      preferredEntries = await input.client.getRepositoryTree(input.target.projectId, input.target.headSha, {
+        path: prefix,
+        recursive: true,
+        maxItems: perPrefixLimit,
+        signal: input.signal,
+        requestGuard: input.requestGuard,
+        beforeRequest,
+      })
+    } catch (error) {
+      if (error instanceof GitLabApiError && error.status === 404) continue
+      throw error
+    }
+    if (preferredEntries.length >= perPrefixLimit) truncated = true
+    appendRepositoryTreeEntries(entries, preferredEntries, seenPaths, MAX_SEARCH_PRIORITY_TREE_ENTRIES)
+  }
+
+  const remaining = MAX_SEARCH_TREE_ENTRIES - entries.length
+  if (remaining <= 0) return { entries, truncated: true }
+  const fallbackEntries = await input.client.getRepositoryTree(input.target.projectId, input.target.headSha, {
+    recursive: true,
+    maxItems: remaining,
+    signal: input.signal,
+    requestGuard: input.requestGuard,
+    beforeRequest,
+  })
+  if (fallbackEntries.length >= remaining) truncated = true
+  appendRepositoryTreeEntries(entries, fallbackEntries, seenPaths, MAX_SEARCH_TREE_ENTRIES)
+  return { entries, truncated }
+}
+
+function appendRepositoryTreeEntries(
+  target: GitLabRepositoryTreeEntry[],
+  source: GitLabRepositoryTreeEntry[],
+  seenPaths: Set<string>,
+  maximum: number,
+) {
+  for (const entry of source) {
+    if (target.length >= maximum) return
+    if (seenPaths.has(entry.path)) continue
+    seenPaths.add(entry.path)
+    target.push(entry)
   }
 }
 
@@ -412,16 +535,33 @@ function searchCandidateAllowed(path: string, run: ReviewRunRecord, pathPrefix?:
 }
 
 function prioritizedSearchCandidates(tree: GitLabRepositoryTreeEntry[], run: ReviewRunRecord) {
-  const includePathPrefixes = run.project?.includePathPrefixes ?? []
+  const includePathPrefixes = preferredSearchPrefixes(run)
   return tree
     .map((entry, index) => ({
       entry,
       index,
-      priority: includePathPrefixes.some((prefix) => prefix && entry.path.startsWith(prefix)) ? 0 : 1,
+      priority: includePathPrefixes.some((prefix) => pathWithinPrefix(entry.path, prefix)) ? 0 : 1,
     }))
     .filter(({ entry }) => entry.type === 'blob')
     .sort((left, right) => left.priority - right.priority || left.index - right.index)
     .map(({ entry }) => entry)
+}
+
+function preferredSearchPrefixes(run: ReviewRunRecord) {
+  const prefixes: string[] = []
+  for (const configuredPrefix of run.project?.includePathPrefixes ?? []) {
+    if (typeof configuredPrefix !== 'string') continue
+    const prefix = configuredPrefix.replace(/\/+$/, '')
+    if (!validGitPath(prefix) || repositoryPathPrefixPolicyDiagnostic(prefix, run)) continue
+    if (prefixes.some((existing) => pathWithinPrefix(prefix, existing))) continue
+    prefixes.push(prefix)
+    if (prefixes.length >= MAX_SEARCH_PRIORITY_PREFIXES) break
+  }
+  return prefixes
+}
+
+function pathWithinPrefix(path: string, prefix: string) {
+  return path === prefix || path.startsWith(`${prefix}/`)
 }
 
 function validGitPath(path: string) {
@@ -433,6 +573,106 @@ function validGitPath(path: string) {
 
 function boundedPositiveInteger(value: number, maximum: number) {
   return Number.isInteger(value) && value > 0 && value <= maximum
+}
+
+class GitLabRepositoryBoundaryError extends Error {
+  constructor(readonly diagnostic: string) {
+    super(diagnostic)
+    this.name = 'GitLabRepositoryBoundaryError'
+  }
+}
+
+function repositoryApiRequestBoundary(identity: ReviewRunIdentity) {
+  return () => {
+    const diagnostic = reserveRepositoryApiRequest(identity)
+    if (diagnostic) throw new GitLabRepositoryBoundaryError(diagnostic)
+  }
+}
+
+function repositoryFileRequestBoundary(identity: ReviewRunIdentity, requestedBytes: number) {
+  let firstRequest = true
+  let reservation = 0
+  return {
+    beforeRequest() {
+      if (firstRequest) {
+        const diagnostic = reserveRepositoryFileRequest(identity, requestedBytes)
+        if (diagnostic) throw new GitLabRepositoryBoundaryError(diagnostic)
+        firstRequest = false
+        reservation = requestedBytes
+        return
+      }
+      const diagnostic = reserveRepositoryApiRequest(identity)
+      if (diagnostic) throw new GitLabRepositoryBoundaryError(diagnostic)
+    },
+    reservedBytes() {
+      return reservation
+    },
+  }
+}
+
+function reserveRepositoryApiRequest(identity: ReviewRunIdentity) {
+  const currentResult = currentActiveReviewRun(identity)
+  if ('diagnostic' in currentResult) return currentResult.diagnostic
+  const repository = currentResult.run.repository
+  if (!repository) return 'repository_inspection_not_initialized'
+  const apiRequestCount = normalizedCounter(repository.apiRequestCount)
+  if (apiRequestCount >= MAX_REPOSITORY_API_REQUESTS) {
+    return 'repository_api_request_limit_reached'
+  }
+  return ReviewRunStore.updateIfCurrent(identity, {
+    repository: {
+      ...repository,
+      apiRequestCount: apiRequestCount + 1,
+    },
+  }) ? undefined : 'repository_review_attempt_stale'
+}
+
+function reserveRepositoryFileRequest(identity: ReviewRunIdentity, requestedBytes: number) {
+  const currentResult = currentActiveReviewRun(identity)
+  if ('diagnostic' in currentResult) return currentResult.diagnostic
+  const repository = currentResult.run.repository
+  if (!repository) return 'repository_inspection_not_initialized'
+  const apiRequestCount = normalizedCounter(repository.apiRequestCount)
+  const fileFetchCount = normalizedCounter(repository.fileFetchCount)
+  const fetchedBytes = normalizedCounter(repository.fetchedBytes)
+  if (apiRequestCount >= MAX_REPOSITORY_API_REQUESTS) {
+    return 'repository_api_request_limit_reached'
+  }
+  if (fileFetchCount >= MAX_REPOSITORY_FILE_FETCHES) {
+    return 'repository_file_fetch_limit_reached'
+  }
+  if (requestedBytes > MAX_REPOSITORY_FETCHED_BYTES - fetchedBytes) {
+    return 'repository_fetch_byte_limit_reached'
+  }
+  return ReviewRunStore.updateIfCurrent(identity, {
+    repository: {
+      ...repository,
+      apiRequestCount: apiRequestCount + 1,
+      fileFetchCount: fileFetchCount + 1,
+      fetchedBytes: fetchedBytes + requestedBytes,
+    },
+  }) ? undefined : 'repository_review_attempt_stale'
+}
+
+function settleRepositoryFileRequest(
+  identity: ReviewRunIdentity,
+  reservedBytes: number,
+  fetchedBytes: number,
+) {
+  if (reservedBytes <= 0) return 'repository_request_budget_not_reserved'
+  const currentResult = currentActiveReviewRun(identity)
+  if ('diagnostic' in currentResult) return currentResult.diagnostic
+  const repository = currentResult.run.repository
+  if (!repository) return 'repository_inspection_not_initialized'
+  const releaseBytes = Math.max(0, reservedBytes - fetchedBytes)
+  if (releaseBytes === 0) return undefined
+  const currentBytes = normalizedCounter(repository.fetchedBytes)
+  return ReviewRunStore.updateIfCurrent(identity, {
+    repository: {
+      ...repository,
+      fetchedBytes: Math.max(0, currentBytes - releaseBytes),
+    },
+  }) ? undefined : 'repository_review_attempt_stale'
 }
 
 function reserveRepositoryQuery(
@@ -492,12 +732,16 @@ type RepositoryLifecycleDiagnostic =
   | 'repository_review_run_not_active'
   | 'repository_request_aborted'
 
+type RepositoryRequestDiagnostic =
+  | RepositoryLifecycleDiagnostic
+  | 'repository_search_timeout'
+
 type GitLabRepositoryRequestState = {
-  diagnostic?: RepositoryLifecycleDiagnostic
+  diagnostic?: RepositoryRequestDiagnostic
 }
 
 class GitLabRepositoryLifecycleError extends Error {
-  constructor(readonly diagnostic: RepositoryLifecycleDiagnostic) {
+  constructor(readonly diagnostic: RepositoryRequestDiagnostic) {
     super(diagnostic)
     this.name = 'GitLabRepositoryLifecycleError'
   }
@@ -507,9 +751,12 @@ function repositoryRequestGuard(
   identity: ReviewRunIdentity,
   signal: AbortSignal | undefined,
   state: GitLabRepositoryRequestState,
+  abortDiagnostic: () => RepositoryRequestDiagnostic = () => 'repository_request_aborted',
 ) {
   return () => {
-    const diagnostic = repositoryLifecycleFailure(identity, signal)
+    const diagnostic = signal?.aborted
+      ? abortDiagnostic()
+      : repositoryLifecycleFailure(identity)
     if (!diagnostic) return
     state.diagnostic ??= diagnostic
     throw new GitLabRepositoryLifecycleError(state.diagnostic)
@@ -527,6 +774,7 @@ function repositoryApiDiagnostic(
     ?? repositoryLifecycleFailure(identity, signal)
     ?? (error instanceof Error && error.name === 'AbortError' ? 'repository_request_aborted' : undefined)
   if (interrupted) return interrupted
+  if (error instanceof GitLabRepositoryBoundaryError) return error.diagnostic
   if (error instanceof GitLabApiError && error.status === 404) {
     return action === 'read_file' ? 'repository_file_not_found' : 'repository_search_path_not_found'
   }
@@ -543,6 +791,40 @@ function repositoryLifecycleFailure(
   if (signal?.aborted) return 'repository_request_aborted'
   const currentResult = currentActiveReviewRun(identity)
   return 'diagnostic' in currentResult ? currentResult.diagnostic : undefined
+}
+
+function repositorySearchDeadline(upstreamSignal: AbortSignal | undefined, requestedTimeoutMs?: number) {
+  const controller = new AbortController()
+  let timedOut = false
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const onUpstreamAbort = () => {
+    if (timeout) clearTimeout(timeout)
+    controller.abort(upstreamSignal?.reason)
+  }
+  if (upstreamSignal?.aborted) onUpstreamAbort()
+  else upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true })
+
+  const timeoutMs = typeof requestedTimeoutMs === 'number'
+    && Number.isFinite(requestedTimeoutMs)
+    && requestedTimeoutMs > 0
+    ? Math.min(MAX_REPOSITORY_SEARCH_DURATION_MS, Math.floor(requestedTimeoutMs))
+    : MAX_REPOSITORY_SEARCH_DURATION_MS
+  if (!controller.signal.aborted) {
+    timeout = setTimeout(() => {
+      timedOut = true
+      controller.abort(new GitLabRepositoryLifecycleError('repository_search_timeout'))
+    }, timeoutMs)
+  }
+  return {
+    signal: controller.signal,
+    abortDiagnostic: (): RepositoryRequestDiagnostic => timedOut
+      ? 'repository_search_timeout'
+      : 'repository_request_aborted',
+    dispose() {
+      if (timeout) clearTimeout(timeout)
+      upstreamSignal?.removeEventListener('abort', onUpstreamAbort)
+    },
+  }
 }
 
 function currentActiveReviewRun(identity: ReviewRunIdentity):

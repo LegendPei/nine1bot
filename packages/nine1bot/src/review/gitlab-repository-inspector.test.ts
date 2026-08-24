@@ -90,6 +90,11 @@ describe('GitLab review repository inspector', () => {
     expect(requests[0]!.searchParams.get('ref')).toBe(frozenHead)
     expect(requests[0]!.href).not.toContain('evil.example.com')
     expect(requests[0]!.href).not.toContain('model-token')
+    expect(ReviewRunStore.findBySessionId('session-frozen')?.repository).toMatchObject({
+      apiRequestCount: 1,
+      fileFetchCount: 1,
+      fetchedBytes: 35,
+    })
   })
 
   test('uses the frozen commit SHA for commit review repository reads', async () => {
@@ -185,6 +190,80 @@ describe('GitLab review repository inspector', () => {
     expect(JSON.stringify(result)).not.toContain('dist/bundle.js')
   })
 
+  test('queries configured priority paths before the capped global repository tree', async () => {
+    createReviewRun('session-priority-search', {
+      includePathPrefixes: ['src/priority'],
+    })
+    const treePaths: Array<string | null> = []
+    const requestedFiles: string[] = []
+    const decoys = Array.from({ length: 200 }, (_, index) => ({
+      id: `decoy-${index}`,
+      name: `decoy-${index}.ts`,
+      type: 'blob',
+      path: `vendor/decoy-${index}.ts`,
+      mode: '100644',
+    }))
+    const fetchMock = (async (input: string | URL | Request) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/repository/tree')) {
+        const path = url.searchParams.get('path')
+        treePaths.push(path)
+        if (path === 'src/priority') {
+          return Response.json([
+            { id: 'target', name: 'target.ts', type: 'blob', path: 'src/priority/target.ts', mode: '100644' },
+          ])
+        }
+        return Response.json(decoys)
+      }
+      requestedFiles.push(url.pathname)
+      if (url.pathname.includes('src%2Fpriority%2Ftarget.ts')) {
+        return new Response(Array.from({ length: 50 }, () => 'needle in priority source').join('\n'))
+      }
+      return new Response('')
+    }) as unknown as typeof fetch
+
+    const result = await inspectRepository('session-priority-search', {
+      action: 'search_text',
+      query: 'needle',
+    }, fetchMock)
+
+    expect(result).toMatchObject({ ok: true, action: 'search_text' })
+    if (!result.ok || result.action !== 'search_text') throw new Error('expected repository search output')
+    expect(result.matches[0]).toEqual({
+      path: 'src/priority/target.ts',
+      line: 1,
+      text: 'needle in priority source',
+    })
+    expect(treePaths[0]).toBe('src/priority')
+    expect(treePaths).toContain(null)
+    expect(requestedFiles.some((path) => path.includes('src%2Fpriority%2Ftarget.ts'))).toBe(true)
+  })
+
+  test('ignores malformed stored priority paths while keeping valid repository hints usable', async () => {
+    createReviewRun('session-malformed-priority', {
+      includePathPrefixes: [42 as unknown as string, 'src'],
+    })
+    const result = await inspectRepository('session-malformed-priority', {
+      action: 'search_text', query: 'needle',
+    }, (async (input) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/repository/tree')) {
+        return url.searchParams.get('path') === 'src'
+          ? Response.json([
+              { id: '1', name: 'app.ts', type: 'blob', path: 'src/app.ts', mode: '100644' },
+            ])
+          : Response.json([])
+      }
+      return new Response('needle')
+    }) as typeof fetch)
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'search_text',
+      matches: [{ path: 'src/app.ts', line: 1, text: 'needle' }],
+    })
+  })
+
   test('fails closed before GitLab access when session, project snapshot, or token is invalid', async () => {
     let fetchCalls = 0
     const fetchMock = (async () => {
@@ -272,6 +351,114 @@ describe('GitLab review repository inspector', () => {
     expect(ReviewRunStore.get(run.id)?.repository).toMatchObject({ queryCount: 12 })
   })
 
+  test('stops before the next physical GitLab request when the aggregate API budget is exhausted', async () => {
+    const run = createReviewRun('session-api-budget', {
+      repository: { apiRequestCount: 63 },
+    })
+    let fetchCalls = 0
+    const result = await inspectRepository('session-api-budget', {
+      action: 'search_text', query: 'needle',
+    }, (async (input) => {
+      fetchCalls += 1
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/repository/tree')) {
+        return Response.json(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: String(index),
+            name: `file-${index}.ts`,
+            type: 'blob',
+            path: `src/file-${index}.ts`,
+            mode: '100644',
+          })),
+          { headers: { 'x-next-page': '2' } },
+        )
+      }
+      return new Response('needle')
+    }) as typeof fetch)
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'search_text',
+      diagnostic: 'repository_api_request_limit_reached',
+    })
+    expect(fetchCalls).toBe(1)
+    expect(ReviewRunStore.get(run.id)?.repository).toMatchObject({
+      apiRequestCount: 64,
+      fileFetchCount: 0,
+      fetchedBytes: 0,
+    })
+  })
+
+  test('rejects a repository file read before network access when the file budget is exhausted', async () => {
+    createReviewRun('session-file-budget', {
+      repository: { fileFetchCount: 48 },
+    })
+    let fetchCalls = 0
+
+    const result = await inspectRepository('session-file-budget', {
+      action: 'read_file', path: 'src/app.ts',
+    }, (async () => {
+      fetchCalls += 1
+      return new Response('unexpected')
+    }) as unknown as typeof fetch)
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_file',
+      diagnostic: 'repository_file_fetch_limit_reached',
+    })
+    expect(fetchCalls).toBe(0)
+  })
+
+  test('rejects a repository file read before network access when the byte budget is exhausted', async () => {
+    createReviewRun('session-byte-budget', {
+      repository: { fetchedBytes: 2 * 1024 * 1024 },
+    })
+    let fetchCalls = 0
+
+    const result = await inspectRepository('session-byte-budget', {
+      action: 'read_file', path: 'src/app.ts',
+    }, (async () => {
+      fetchCalls += 1
+      return new Response('unexpected')
+    }) as unknown as typeof fetch)
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'read_file',
+      diagnostic: 'repository_fetch_byte_limit_reached',
+    })
+    expect(fetchCalls).toBe(0)
+  })
+
+  test('aborts a repository text search at its service-side deadline', async () => {
+    createReviewRun('session-search-timeout')
+    const input = {
+      sessionId: 'session-search-timeout',
+      request: { action: 'search_text' as const, query: 'needle' },
+      platforms,
+      secrets,
+      searchTimeoutMs: 10,
+      fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+        return await new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(Response.json([])), 60)
+          init?.signal?.addEventListener('abort', () => {
+            clearTimeout(timer)
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
+      }) as typeof fetch,
+    } satisfies Parameters<typeof inspectGitLabRepositoryForSession>[0] & { searchTimeoutMs: number }
+
+    const result = await inspectGitLabRepositoryForSession(input)
+
+    expect(result).toEqual({
+      ok: false,
+      action: 'search_text',
+      diagnostic: 'repository_search_timeout',
+    })
+  })
+
   test('stops aborted and superseded review attempts before repository access', async () => {
     createReviewRun('session-old', { triggerKey: 'same-trigger' })
     createReviewRun('session-new', { triggerKey: 'same-trigger' })
@@ -314,8 +501,14 @@ function createReviewRun(
   sessionId: string,
   options: {
     excludePathPatterns?: string[]
+    includePathPrefixes?: string[]
     objectType?: 'mr' | 'commit'
     projectHost?: string
+    repository?: {
+      apiRequestCount?: number
+      fileFetchCount?: number
+      fetchedBytes?: number
+    }
     sha?: string
     triggerKey?: string
   } = {},
@@ -342,7 +535,7 @@ function createReviewRun(
       pathWithNamespace: 'root/uftest',
       enabled: true,
       reviewFocus: [],
-      includePathPrefixes: [],
+      includePathPrefixes: options.includePathPrefixes ?? [],
       excludePathPatterns: options.excludePathPatterns ?? [],
       ci: { maxJobLogs: 2, maxJobLogBytes: 80 },
       source: 'configured',
@@ -353,6 +546,9 @@ function createReviewRun(
       readCount: 0,
       searchCount: 0,
       outputBytes: 0,
+      apiRequestCount: options.repository?.apiRequestCount ?? 0,
+      fileFetchCount: options.repository?.fileFetchCount ?? 0,
+      fetchedBytes: options.repository?.fetchedBytes ?? 0,
     },
   })
 }

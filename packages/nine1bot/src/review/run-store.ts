@@ -25,6 +25,9 @@ export type ReviewRunRepositorySummary = {
   readCount?: number
   searchCount?: number
   outputBytes?: number
+  apiRequestCount?: number
+  fileFetchCount?: number
+  fetchedBytes?: number
 }
 
 export type ReviewRunPublication = {
@@ -1229,6 +1232,9 @@ function normalizeStoredRepositorySummary(input: unknown): ReviewRunRepositorySu
     ...storedRepositoryCounter('readCount', repository.readCount),
     ...storedRepositoryCounter('searchCount', repository.searchCount),
     ...storedRepositoryCounter('outputBytes', repository.outputBytes),
+    ...storedRepositoryCounter('apiRequestCount', repository.apiRequestCount),
+    ...storedRepositoryCounter('fileFetchCount', repository.fileFetchCount),
+    ...storedRepositoryCounter('fetchedBytes', repository.fetchedBytes),
   }
 }
 

@@ -1178,6 +1178,9 @@ describe("webhook status URL selection", () => {
         readCount: 0,
         searchCount: 0,
         outputBytes: 0,
+        apiRequestCount: 0,
+        fileFetchCount: 0,
+        fetchedBytes: 0,
       },
     })
   })
