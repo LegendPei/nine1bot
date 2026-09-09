@@ -616,7 +616,7 @@ export namespace ReviewRunStore {
     return true
   }
 
-  export function failFailureNotification(input: FailureNotificationClaimIdentity & { error: string }): boolean {
+  export function failFailureNotification(input: FailureNotificationClaimIdentity & { error: string; deliveryRejected?: boolean }): boolean {
     load()
     const existing = runs.get(input.runId)
     if (!existing || !failureNotificationClaimMatches(existing, input) || !activeFailureNotificationClaimMatches(input)) {
@@ -634,6 +634,7 @@ export namespace ReviewRunStore {
           ownerId: undefined,
           updatedAt: now,
           error: input.error,
+          postStartedAt: input.deliveryRejected ? undefined : existing.failureNotification!.postStartedAt,
         },
       })
       activeFailureNotificationClaims.delete(existing.id)

@@ -7940,6 +7940,70 @@ describe('GitLab review controller', () => {
     expect(posts).toBe(1)
   })
 
+  test('retries definitively rejected failure POSTs but preserves uncertain delivery after reload', async () => {
+    for (const status of [400, 401, 403, 404, 405, 413, 415, 422, 429, 408, 500, 502]) {
+      const run = createPublishableReviewRun({ headSha: `post-status-${status}` })
+      ReviewRunStore.update(run.id, { status: 'failed' })
+      let posts = 0
+      const input = {
+        runId: run.id, platforms: publishingPlatforms(), secrets: liveSecrets, phase: 'runtime', error: 'failed',
+        fetch: (async (url, init) => {
+          const path = new URL(String(url)).pathname
+          if (init?.method === 'POST') {
+            posts++
+            return posts === 1 ? new Response('', { status }) : Response.json({ id: 1 })
+          }
+          if (path.endsWith('/user')) return Response.json({ id: 7 })
+          if (path.endsWith('/notes')) return Response.json([])
+          return Response.json({ diff_refs: { head_sha: `post-status-${status}` } })
+        }) as typeof fetch,
+      }
+      expect((await reportGitLabReviewRunFailure(input)).notified).toBe(false)
+      ReviewRunStore.reloadForTesting()
+      const rejected = ![408, 500, 502].includes(status)
+      expect(ReviewRunStore.get(run.id)?.failureNotification?.postStartedAt !== undefined).toBe(!rejected)
+      const recovery = await reportGitLabReviewRunFailure({ ...input, recover: true })
+      expect(recovery.notified).toBe(rejected)
+      expect(posts).toBe(rejected ? 2 : 1)
+      if (!rejected) expect(recovery.error).toBe('failure_notification_delivery_unknown')
+    }
+  })
+
+  test('reconciles existing failure notes after HEAD changes but refuses new writes', async () => {
+    for (const written of [true, false]) {
+      const run = createPublishableReviewRun({ headSha: `reconcile-head-${written}` })
+      ReviewRunStore.update(run.id, { status: 'failed' })
+      const identity = { runId: run.id, sessionId: run.sessionId, generation: run.generation }
+      const payloadHash = createHash('sha256').update('runtime\0failed').digest('hex')
+      const marker = `<!-- nine1bot-failure:${createHash('sha256').update(`${run.id}\0${payloadHash}`).digest('hex')} -->`
+      const claim = ReviewRunStore.claimFailureNotification({ identity, payloadHash, ownerId: 'old', marker })
+      if (!claim.ok) throw new Error(claim.error)
+      if (written) ReviewRunStore.markFailureNotificationPostStarted({ ...identity, payloadHash, ownerId: 'old', claimId: claim.claimId })
+      ReviewRunStore.reloadForTesting()
+      let posts = 0
+      let lists = 0
+      const result = await reportGitLabReviewRunFailure({
+        runId: run.id, platforms: publishingPlatforms(), secrets: liveSecrets,
+        recover: true, phase: 'runtime', error: 'failed',
+        fetch: (async (url, init) => {
+          const path = new URL(String(url)).pathname
+          if (init?.method === 'POST') { posts++; return Response.json({ id: 1 }) }
+          if (path.endsWith('/user')) return Response.json({ id: 7 })
+          if (path.endsWith('/notes')) {
+            lists++
+            return Response.json(written ? [{ body: `### Nine1Bot review failed\noriginal\n\n${marker}`, author: { id: 7 } }] : [])
+          }
+          return Response.json({ diff_refs: { head_sha: 'new-head' } })
+        }) as typeof fetch,
+      })
+      expect(result.notified).toBe(written)
+      expect(lists).toBe(1)
+      expect(posts).toBe(0)
+      expect(ReviewRunStore.get(run.id)?.status).toBe(written ? 'failed' : 'rejected')
+      if (!written) expect(result.error).toBe('gitlab_review_head_changed')
+    }
+  })
+
   test('failure notification takeover rejects live owners and changed payloads', () => {
     const run = createPublishableReviewRun({ headSha: 'claim-conflict' })
     ReviewRunStore.update(run.id, { status: 'failed' })

@@ -980,7 +980,7 @@ export async function reportGitLabReviewRunFailure(input: {
       return { notified: false, runId: input.runId, error: 'review_run_failure_claim_lost' }
     }
     const error = notification.error ?? 'gitlab_failure_comment_not_posted'
-    ReviewRunStore.failFailureNotification({ ...claimIdentity, error })
+    ReviewRunStore.failFailureNotification({ ...claimIdentity, error, deliveryRejected: notification.deliveryRejected })
     return { notified: false, runId: input.runId, error }
   } catch {
     try {
@@ -1050,7 +1050,7 @@ async function maybeWriteFailureComment(input: {
   fetch?: typeof fetch
   phase: string
   error: string
-}): Promise<{ notified: boolean; error?: string }> {
+}): Promise<{ notified: boolean; error?: string; deliveryRejected?: boolean }> {
   const guard = await prepareGitLabReviewPublication({
     identity: input.identity,
     trigger: input.trigger,
@@ -1058,6 +1058,7 @@ async function maybeWriteFailureComment(input: {
     secrets: input.secrets,
     fetch: input.fetch,
     operation: 'failure_comment',
+    reconcileOnly: input.resume,
     allowedStatuses: ['failed'],
     claimCurrent: () => ReviewRunStore.isFailureNotificationClaimCurrent(input.claimIdentity),
     claimLostError: 'review_run_failure_claim_lost',
@@ -1114,6 +1115,9 @@ async function maybeWriteFailureComment(input: {
     })
     return { notified: true }
   } catch (error) {
+    if (error instanceof GitLabApiError && [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(error.status)) {
+      return { notified: false, error: `failure_notification_post_rejected:${error.status}`, deliveryRejected: true }
+    }
     const message = error instanceof Error ? error.message : String(error)
     if (isGitLabReviewHeadPolicyError(message)) {
       ReviewRunStore.rejectFailureNotificationForPolicy({
@@ -1328,6 +1332,7 @@ type GitLabReviewPublicationGuard =
   | { ok: false; error: string }
 
 async function prepareGitLabReviewPublication(input: {
+  reconcileOnly?: boolean
   identity: ReviewRunIdentity
   trigger: GitLabReviewTrigger
   settings: GitLabReviewSettings
@@ -1361,7 +1366,8 @@ async function prepareGitLabReviewPublication(input: {
   })
   if (!resolvedClient.ok) return { ok: false, error: resolvedClient.reason }
 
-  if (input.trigger.objectType === 'mr') {
+  // Reconciliation is read-only; every new write still checks HEAD in the guarded client.
+  if (input.trigger.objectType === 'mr' && !input.reconcileOnly) {
     try {
       const mergeRequest = await resolvedClient.client.getMergeRequest(
         input.trigger.projectId,
