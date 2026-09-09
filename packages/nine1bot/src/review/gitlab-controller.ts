@@ -921,6 +921,7 @@ export async function publishGitLabReviewRunResult(input: {
 }
 
 export async function reportGitLabReviewRunFailure(input: {
+  recover?: boolean
   runId: string
   platforms: PlatformManagerConfig
   secrets: PlatformSecretAccess
@@ -937,9 +938,13 @@ export async function reportGitLabReviewRunFailure(input: {
   if (!trigger) return { notified: false, runId: input.runId, error: 'review_run_trigger_missing' }
   const settings = normalizeGitLabReviewSettings(input.platforms.gitlab?.settings)
   const identity = reviewRunIdentity(run)
-  const payloadHash = createHash('sha256').update(`${input.phase}\0${input.error}`).digest('hex')
+  if (input.recover && !run.failureNotification) return { notified: false, runId: run.id, error: 'review_run_failure_notification_missing' }
+  const payloadHash = input.recover ? run.failureNotification!.payloadHash
+    : createHash('sha256').update(`${input.phase}\0${input.error}`).digest('hex')
+  const marker = `<!-- nine1bot-failure:${createHash('sha256').update(`${run.id}\0${payloadHash}`).digest('hex')} -->`
   const ownerId = gitLabReviewFailureNotifierOwnerId
   const claim = ReviewRunStore.claimFailureNotification({
+    marker: run.failureNotification ? run.failureNotification.marker : marker,
     identity,
     payloadHash,
     ownerId,
@@ -954,25 +959,39 @@ export async function reportGitLabReviewRunFailure(input: {
     sessionId: identity.sessionId,
     generation: identity.generation,
   }
-  const notification = await maybeWriteFailureComment({
-    identity,
-    claimIdentity,
-    trigger,
-    settings,
-    secrets: input.secrets,
-    fetch: input.fetch,
-    phase: input.phase,
-    error: input.error,
-  })
-  if (notification.notified) {
-    if (ReviewRunStore.completeFailureNotification(claimIdentity)) {
-      return { notified: true, runId: input.runId }
+  try {
+    const notification = await maybeWriteFailureComment({
+      resume: claim.resume,
+      marker: run.failureNotification ? run.failureNotification.marker : marker,
+      postStartedAt: run.failureNotification?.postStartedAt,
+      identity,
+      claimIdentity,
+      trigger,
+      settings,
+      secrets: input.secrets,
+      fetch: input.fetch,
+      phase: input.phase,
+      error: input.error,
+    })
+    if (notification.notified) {
+      if (ReviewRunStore.completeFailureNotification(claimIdentity)) {
+        return { notified: true, runId: input.runId }
+      }
+      return { notified: false, runId: input.runId, error: 'review_run_failure_claim_lost' }
     }
-    return { notified: false, runId: input.runId, error: 'review_run_failure_claim_lost' }
+    const error = notification.error ?? 'gitlab_failure_comment_not_posted'
+    ReviewRunStore.failFailureNotification({ ...claimIdentity, error })
+    return { notified: false, runId: input.runId, error }
+  } catch {
+    try {
+      ReviewRunStore.failFailureNotification({ ...claimIdentity, error: 'review_run_failure_finalize_failed' })
+    } catch {
+      // Preserve the persisted claim for reconciliation after storage recovers.
+    }
+    return { notified: false, runId: input.runId, error: 'review_run_failure_finalize_failed' }
+  } finally {
+    ReviewRunStore.releaseFailureNotificationClaim(claimIdentity)
   }
-  const error = notification.error ?? 'gitlab_failure_comment_not_posted'
-  ReviewRunStore.failFailureNotification({ ...claimIdentity, error })
-  return { notified: false, runId: input.runId, error }
 }
 
 function reviewRunStatusForStageResult(status: ReturnType<typeof parseReviewStageResult>['status']) {
@@ -1020,6 +1039,9 @@ function gitLabApiFailureMessage(operation: string, error: unknown) {
 }
 
 async function maybeWriteFailureComment(input: {
+  resume: boolean
+  marker?: string
+  postStartedAt?: number
   identity: ReviewRunIdentity
   claimIdentity: Parameters<typeof ReviewRunStore.isFailureNotificationClaimCurrent>[0]
   trigger: GitLabReviewTrigger
@@ -1053,6 +1075,9 @@ async function maybeWriteFailureComment(input: {
     client: guard.client,
     trigger: input.trigger,
     objectId: guard.objectId,
+    beforeNote() {
+      if (!ReviewRunStore.markFailureNotificationPostStarted(input.claimIdentity)) throw new Error('review_run_failure_claim_lost')
+    },
     assertCurrent() {
       assertReviewRunIdentityCurrent(input.identity, ['failed'])
       if (!ReviewRunStore.isFailureNotificationClaimCurrent(input.claimIdentity)) {
@@ -1061,11 +1086,31 @@ async function maybeWriteFailureComment(input: {
     },
   })
   try {
+    if (input.resume) {
+      if (!input.marker) return { notified: false, error: 'failure_notification_legacy_unverified' }
+      let found: boolean
+      try {
+        found = await guard.client.findFailureNotification({
+          projectId: input.trigger.projectId, resource: guard.resource, resourceId: guard.objectId,
+        }, input.marker, { requestGuard() {
+          if (!ReviewRunStore.isFailureNotificationClaimCurrent(input.claimIdentity)) throw new Error('review_run_failure_claim_lost')
+        } })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        const diagnostic = [
+          'review_run_failure_claim_lost', 'failure_notification_author_unverified',
+          'failure_notification_listing_invalid', 'failure_notification_listing_incomplete',
+        ].includes(message) ? message : 'failure_notification_reconcile_failed'
+        return { notified: false, error: diagnostic }
+      }
+      if (found) return { notified: true }
+      if (input.postStartedAt !== undefined) return { notified: false, error: 'failure_notification_delivery_unknown' }
+    }
     await client.createNote({
       projectId: input.trigger.projectId,
       resource: guard.resource,
       resourceId: guard.objectId,
-      body: renderFailureComment(input.phase, input.error),
+      body: `${renderFailureComment(input.phase, input.error)}\n\n${input.marker}`,
     })
     return { notified: true }
   } catch (error) {
@@ -1506,6 +1551,7 @@ async function assertGitLabReviewWriteHeadCurrent(input: {
 }
 
 function headGuardedPublicationClient(input: {
+  beforeNote?: () => void
   client: Pick<GitLabApiClient, 'getMergeRequest' | 'createNote' | 'createDiscussion'>
   trigger: GitLabReviewTrigger
   objectId: string | number
@@ -1515,6 +1561,7 @@ function headGuardedPublicationClient(input: {
   return {
     async createNote(note: Parameters<typeof input.client.createNote>[0]) {
       await assertHeadCurrent()
+      input.beforeNote?.()
       try {
         return await input.client.createNote(note)
       } finally {

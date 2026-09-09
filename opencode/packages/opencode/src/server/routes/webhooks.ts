@@ -1113,5 +1113,20 @@ export const WebhookRoutes = lazy(() =>
       "/gitlab/runs/:runId/retry",
       validator("param", z.object({ runId: z.string() })),
       retryGitLabReviewRun,
+    )
+    .post(
+      "/gitlab/runs/:runId/recover-failure-notification",
+      validator("param", z.object({ runId: z.string() })),
+      async (c) => {
+        const result = await reportGitLabReviewRunFailure({
+          runId: c.req.valid("param").runId,
+          platforms: await readPlatformManagerConfig(),
+          secrets: new FilePlatformSecretStore(process.env.NINE1BOT_PLATFORM_SECRETS_PATH),
+          recover: true,
+          phase: "notification_recovery",
+          error: "The review failed. See the original review run for details.",
+        })
+        return c.json(result, result.notified ? 200 : 409)
+      },
     ),
 )

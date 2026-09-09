@@ -1,6 +1,6 @@
 # PR #52 Review 跟进修复记录
 
-日期：2026-08-24
+日期：2026-09-09
 
 ## 1. 目标
 
@@ -159,6 +159,19 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - 每次 `search_text` 增加 30 秒服务端硬截止，截止信号贯穿 tree 分页和 raw file 读取；上游取消仍返回 `repository_request_aborted`，内部截止稳定返回 `repository_search_timeout`。
 - 资源预算耗尽分别返回 `repository_api_request_limit_reached`、`repository_file_fetch_limit_reached` 和 `repository_fetch_byte_limit_reached`，并在下一次网络访问前停止，不返回不完整的伪成功结果。
 
+### Batch 13：失败通知重启恢复（2026-09-09）
+
+- reload 将遗留 `notifying` 降为 `partial` 并清除 owner；新 owner 可接管相同 payload，活动 owner 和不同 payload 仍拒绝接管。
+- 失败评论追加由 run ID 与 payload hash 派生的固定 marker；恢复查询最多 5 页、每页 100 条，并校验当前 GitLab token 用户、评论标题和末尾 marker。MR notes 与 commit comments 分别使用正确接口及正文字段。
+- 查询失败、分页不完整、历史无 marker 记录保持未完成，不重新 POST。错误响应正文不进入恢复诊断。
+- HEAD 校验后、POST 前持久化发送意图。已存在发送意图但远端尚无匹配评论时返回 `failure_notification_delivery_unknown`；后续显式恢复会再次对账，找到迟到评论后补齐状态。该状态不自动重发，避免在 GitLab 仍处理旧 POST 时重复评论。
+- POST 前崩溃且尚无发送意图的记录可以恢复发送。管理恢复使用固定的通用失败说明，保留原通知 marker，不额外持久化原始错误正文。
+- completion 落盘失败保留可恢复状态并释放进程内 owner，旧 owner 迟到不能覆盖新 owner。
+- 管理入口：`POST /webhooks/gitlab/runs/:runId/recover-failure-notification`，无需请求体，复用管理 API 认证；公共 webhook 路由不暴露该操作。成功返回 200，未完成返回 409 和稳定诊断。
+- 恢复通知不会创建 review attempt，也不会重新执行 review；平台关闭、dry-run、非最新 attempt 和 HEAD 变化等既有边界继续生效。
+
+回归覆盖：POST 前重启、已写入但未完成落盘、发送结果未知、迟到 POST、并发 owner、payload 冲突、其他作者伪造 marker、分页不完整、查询失败、历史无 marker、completion 异常，以及管理路由上的 commit 评论对账。
+
 ## 3. 测试覆盖
 
 已完成聚焦红绿测试：
@@ -183,7 +196,8 @@ PM coordinator 和 MR/commit review skill 只允许在 diff 中的符号缺少�
 - OpenCode GitLab TaskTool 边界聚焦测试：10 pass / 0 fail。
 - GitLab 仓库 inspector 聚焦测试：14 pass / 0 fail。
 - 仓库定义的 OpenCode runtime CI：194 pass / 0 fail；registry 补充用例：1 pass / 0 fail。
-- 根仓库 `ci:test`：758 pass / 0 fail，3342 次断言。
+- 根仓库 `ci:test`（Batch 13）：762 pass / 0 fail。
+- Webhook 路由回归（Batch 13）：31 pass / 0 fail；根仓库与 OpenCode 类型检查均通过。
 - 根仓库全部 package `ci:typecheck`：通过。
 - Web production build：通过（1869 modules transformed）。
 - OpenCode `tsgo --noEmit`：通过。

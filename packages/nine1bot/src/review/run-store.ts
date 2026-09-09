@@ -43,6 +43,8 @@ export type ReviewRunPublication = {
 }
 
 export type ReviewRunFailureNotification = {
+  marker?: string
+  postStartedAt?: number
   state: 'notifying' | 'partial' | 'notified'
   claimId?: string
   ownerId?: string
@@ -72,7 +74,7 @@ export type PublicationClaimIdentity = {
 export type FailureNotificationClaimIdentity = PublicationClaimIdentity
 
 export type FailureNotificationClaimResult =
-  | { ok: true; claimId: string }
+  | { ok: true; claimId: string; resume: boolean }
   | { ok: false; error: string }
 
 export type ReviewRunRecord = {
@@ -514,6 +516,7 @@ export namespace ReviewRunStore {
   }
 
   export function claimFailureNotification(input: {
+    marker?: string
     identity: ReviewRunIdentity
     payloadHash: string
     ownerId: string
@@ -524,6 +527,14 @@ export namespace ReviewRunStore {
     if (!existing) return { ok: false, error: 'review_run_not_found' }
     const guardError = failureNotificationGuardError(existing, input.identity, input.configurationError)
     if (guardError) return { ok: false, error: guardError }
+
+    const previous = existing.failureNotification
+    if (previous?.payloadHash && previous.payloadHash !== input.payloadHash) {
+      return { ok: false, error: 'review_run_failure_payload_mismatch' }
+    }
+    if (activeFailureNotificationClaims.has(existing.id)) {
+      return { ok: false, error: 'review_run_failure_notification_started' }
+    }
 
     const now = Date.now()
     const claimId = randomUUID()
@@ -540,11 +551,13 @@ export namespace ReviewRunStore {
         ...existing,
         updatedAt: now,
         failureNotification: {
+          ...previous,
+          marker: previous?.marker ?? input.marker,
           state: 'notifying',
           claimId,
           ownerId: input.ownerId,
           payloadHash: input.payloadHash,
-          startedAt: now,
+          startedAt: previous?.startedAt ?? now,
           updatedAt: now,
           error: undefined,
         },
@@ -552,7 +565,24 @@ export namespace ReviewRunStore {
       activeFailureNotificationClaims.set(existing.id, identity)
       return existing.id
     })
-    return { ok: true, claimId }
+    return { ok: true, claimId, resume: Boolean(previous) }
+  }
+
+  export function markFailureNotificationPostStarted(input: FailureNotificationClaimIdentity): boolean {
+    load()
+    const existing = runs.get(input.runId)
+    if (!existing || !isCurrentFailureNotificationClaim(existing, input)) return false
+    persistRunMutation(() => {
+      setStoredReviewRun({ ...existing, failureNotification: {
+        ...existing.failureNotification!, postStartedAt: Date.now(),
+      } })
+      return existing.id
+    })
+    return true
+  }
+
+  export function releaseFailureNotificationClaim(input: FailureNotificationClaimIdentity) {
+    if (activeFailureNotificationClaimMatches(input)) activeFailureNotificationClaims.delete(input.runId)
   }
 
   export function isFailureNotificationClaimCurrent(input: FailureNotificationClaimIdentity): boolean {
@@ -842,7 +872,6 @@ function failureNotificationGuardError(
   if (run.failureNotifiedAt || run.failureNotification?.state === 'notified') {
     return 'review_run_failure_already_notified'
   }
-  if (run.failureNotification) return 'review_run_failure_notification_started'
   if (run.status === 'rejected') return run.error ?? 'review_run_rejected'
   if (run.status === 'blocked' || run.status === 'succeeded') return `review_run_terminal_${run.status}`
   if (run.status !== 'failed') return 'review_run_not_failed'
@@ -1294,9 +1323,7 @@ function normalizeStoredFailureNotification(
   if (typeof notification.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(notification.payloadHash)) {
     return undefined
   }
-  const claimId = normalizedIdentityField(notification.claimId)
-  const ownerId = normalizedIdentityField(notification.ownerId)
-  const state = notification.state === 'notifying' && (!claimId || !ownerId)
+  const state = notification.state === 'notifying'
     ? 'partial'
     : notification.state
   const startedAt = typeof notification.startedAt === 'number' && Number.isFinite(notification.startedAt)
@@ -1307,17 +1334,15 @@ function normalizeStoredFailureNotification(
     : runUpdatedAt
   return {
     state,
-    claimId: state === 'notifying' ? claimId : undefined,
-    ownerId: state === 'notifying' ? ownerId : undefined,
+    marker: typeof notification.marker === 'string' && /^<!-- nine1bot-failure:[a-f0-9]{64} -->$/.test(notification.marker) ? notification.marker : undefined,
+    postStartedAt: typeof notification.postStartedAt === 'number' && Number.isFinite(notification.postStartedAt) ? notification.postStartedAt : undefined,
+    claimId: undefined,
+    ownerId: undefined,
     payloadHash: notification.payloadHash,
     startedAt,
     updatedAt,
     error: typeof notification.error === 'string' ? notification.error : undefined,
   }
-}
-
-function normalizedIdentityField(input: unknown) {
-  return typeof input === 'string' && input.trim() ? input : undefined
 }
 
 function isStoredReviewRunRecord(input: unknown): input is Record<string, unknown> {

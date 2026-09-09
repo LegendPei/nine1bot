@@ -522,6 +522,28 @@ export class GitLabApiClient {
     return (await this.requestPage<T>(path, init)).data
   }
 
+  async findFailureNotification(input: GitLabListNotesInput, marker: string, options: GitLabRequestOptions): Promise<boolean> {
+    const user = await this.requestPage<{ id: number }>('/api/v4/user', { signal: options.signal }, options.requestGuard)
+    if (!Number.isSafeInteger(user.data?.id)) throw new Error('failure_notification_author_unverified')
+    const path = input.resource === 'repository/commits'
+      ? `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/repository/commits/${encodeURIComponent(String(input.resourceId))}/comments`
+      : `/api/v4/projects/${encodeURIComponent(String(input.projectId))}/merge_requests/${encodeURIComponent(String(input.resourceId))}/notes`
+    for (let page = 1; page <= 5; page++) {
+      const result = await this.requestPage<Array<{ body?: string; note?: string; author?: { id?: number } }>>(
+        `${path}?per_page=100&page=${page}`, { signal: options.signal }, options.requestGuard,
+      )
+      if (!Array.isArray(result.data)) throw new Error('failure_notification_listing_invalid')
+      for (const note of result.data) {
+        const body = input.resource === 'repository/commits' ? note.note : note.body
+        if (note.author?.id === user.data.id && typeof body === 'string'
+          && body.startsWith('### Nine1Bot review failed\n') && body.endsWith(`\n\n${marker}`)) return true
+      }
+      if (!result.nextPage && result.data.length < 100) return false
+      if (result.nextPage && result.nextPage !== String(page + 1)) throw new Error('failure_notification_listing_incomplete')
+    }
+    throw new Error('failure_notification_listing_incomplete')
+  }
+
   private async requestPaginated<T>(path: string, options: GitLabRequestOptions = {}): Promise<T[]> {
     const values: T[] = []
     const visitedPages = new Set<string>()

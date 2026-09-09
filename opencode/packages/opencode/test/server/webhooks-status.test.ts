@@ -42,6 +42,47 @@ import {
 } from "../../src/server/routes/webhooks"
 
 describe("public GitLab webhook request limits", () => {
+  test("failure notification recovery is a management route and reconciles commit comments", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "failure-recovery-route-"))
+    const previousConfig = process.env.NINE1BOT_CONFIG_PATH
+    const previousFetch = globalThis.fetch
+    const configPath = join(dir, "config.json")
+    const marker = `<!-- nine1bot-failure:${"a".repeat(64)} -->`
+    ReviewRunStore.setPathForTesting(join(dir, "runs.json"))
+    const run = ReviewRunStore.create({
+      platform: "gitlab", status: "failed",
+      trigger: { host: "gitlab.example.com", projectId: 3, objectType: "commit", commitSha: "b".repeat(40), mode: "webhook" },
+      failureNotification: { state: "partial", payloadHash: "c".repeat(64), marker, startedAt: 1, updatedAt: 1, postStartedAt: 1 },
+    })
+    await writeFile(configPath, JSON.stringify({ platforms: { gitlab: { enabled: true, settings: {
+      "review.enabled": true, "review.dryRun": false,
+      "review.baseUrl": "https://gitlab.example.com", "review.tokenSecretRef": "test-token",
+    } } } }))
+    process.env.NINE1BOT_CONFIG_PATH = configPath
+    let posts = 0
+    globalThis.fetch = (async (url, init) => {
+      if (init?.method === "POST") posts++
+      if (String(url).endsWith("/user")) return Response.json({ id: 7 })
+      expect(String(url)).toContain(`/repository/commits/${"b".repeat(40)}/comments?`)
+      return Response.json([{ note: `### Nine1Bot review failed\noriginal\n\n${marker}`, author: { id: 7 } }])
+    }) as typeof fetch
+    try {
+      const path = `/gitlab/runs/${run.id}/recover-failure-notification`
+      expect((await WebhookPublicRoutes().request(`http://localhost${path}`, { method: "POST" })).status).toBe(404)
+      const response = await WebhookRoutes().request(`http://localhost${path}`, { method: "POST" })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ notified: true, runId: run.id })
+      expect(posts).toBe(0)
+      expect(ReviewRunStore.get(run.id)?.failureNotification?.state).toBe("notified")
+    } finally {
+      globalThis.fetch = previousFetch
+      if (previousConfig === undefined) delete process.env.NINE1BOT_CONFIG_PATH
+      else process.env.NINE1BOT_CONFIG_PATH = previousConfig
+      ReviewRunStore.clearForTesting()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("rejects oversized JSON before validating missing or incorrect header tokens", async () => {
     const body = JSON.stringify({
       object_kind: "merge_request",

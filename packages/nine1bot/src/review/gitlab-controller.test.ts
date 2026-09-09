@@ -7876,6 +7876,117 @@ describe('GitLab review controller', () => {
     expect(calls).toHaveLength(3)
   })
 
+  test('recovers failure notification claims after reload without repeating uncertain writes', async () => {
+    for (const scenario of ['before-post', 'written', 'unknown', 'foreign-author', 'legacy', 'listing-failed', 'listing-full'] as const) {
+      const run = createPublishableReviewRun({ headSha: `recover-${scenario}` })
+      ReviewRunStore.update(run.id, { status: 'failed' })
+      const identity = { runId: run.id, sessionId: run.sessionId, generation: run.generation }
+      const payloadHash = createHash('sha256').update('runtime\0failed').digest('hex')
+      const marker = `<!-- nine1bot-failure:${createHash('sha256').update(`${run.id}\0${payloadHash}`).digest('hex')} -->`
+      const claim = ReviewRunStore.claimFailureNotification({ identity, payloadHash, ownerId: 'old', marker: scenario === 'legacy' ? undefined : marker })
+      if (!claim.ok) throw new Error(claim.error)
+      const oldOwner = { ...identity, payloadHash, ownerId: 'old', claimId: claim.claimId }
+      if (scenario !== 'before-post') ReviewRunStore.markFailureNotificationPostStarted(oldOwner)
+      ReviewRunStore.reloadForTesting()
+      expect(ReviewRunStore.get(run.id)?.failureNotification?.state).toBe('partial')
+      expect(ReviewRunStore.completeFailureNotification(oldOwner)).toBe(false)
+      let posts = 0
+      const result = await reportGitLabReviewRunFailure({
+        runId: run.id, platforms: publishingPlatforms(), secrets: liveSecrets,
+        recover: true, phase: 'notification_recovery', error: 'failed',
+        fetch: (async (url, init) => {
+          const path = new URL(String(url)).pathname
+          if (init?.method === 'POST') { posts++; return Response.json({ id: 1 }) }
+          if (path.endsWith('/user')) return Response.json({ id: 7 })
+          if (path.endsWith('/notes')) {
+            if (scenario === 'listing-failed') return new Response('', { status: 502 })
+            if (scenario === 'listing-full') return Response.json(Array.from({ length: 100 }, () => ({ body: 'other', author: { id: 7 } })))
+            return Response.json(scenario === 'written' || scenario === 'foreign-author'
+              ? [{ body: `### Nine1Bot review failed\noriginal\n\n${marker}`, author: { id: scenario === 'written' ? 7 : 8 } }] : [])
+          }
+          return Response.json({ diff_refs: { head_sha: `recover-${scenario}` } })
+        }) as typeof fetch,
+      })
+      expect(result.notified).toBe(scenario === 'written' || scenario === 'before-post')
+      expect(posts).toBe(scenario === 'before-post' ? 1 : 0)
+      if (scenario === 'listing-full') expect(result.error).toBe('failure_notification_listing_incomplete')
+      if (scenario === 'listing-failed') expect(result.error).toBe('failure_notification_reconcile_failed')
+      expect(ReviewRunStore.get(run.id)?.failureNotification?.state).toBe(result.notified ? 'notified' : 'partial')
+      expect(ReviewRunStore.completeFailureNotification(oldOwner)).toBe(false)
+    }
+  })
+
+  test('reconciles a failure comment after completion persistence fails', async () => {
+    const run = createPublishableReviewRun({ headSha: 'finalize-failure' })
+    ReviewRunStore.update(run.id, { status: 'failed' })
+    let body = ''
+    let posts = 0
+    const input = {
+      runId: run.id, platforms: publishingPlatforms(), secrets: liveSecrets, phase: 'runtime', error: 'failed',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname
+        if (init?.method === 'POST') { posts++; body = new URLSearchParams(String(init.body)).get('body')!; return Response.json({ id: 1 }) }
+        if (path.endsWith('/user')) return Response.json({ id: 7 })
+        if (path.endsWith('/notes')) return Response.json([{ body, author: { id: 7 } }])
+        return Response.json({ diff_refs: { head_sha: 'finalize-failure' } })
+      }) as typeof fetch,
+    }
+    const failing = spyOn(ReviewRunStore, 'completeFailureNotification').mockImplementation(() => { throw new Error('disk failure') })
+    try {
+      expect((await reportGitLabReviewRunFailure(input)).notified).toBe(false)
+    } finally { failing.mockRestore() }
+    ReviewRunStore.reloadForTesting()
+    expect((await reportGitLabReviewRunFailure(input)).notified).toBe(true)
+    expect(posts).toBe(1)
+  })
+
+  test('failure notification takeover rejects live owners and changed payloads', () => {
+    const run = createPublishableReviewRun({ headSha: 'claim-conflict' })
+    ReviewRunStore.update(run.id, { status: 'failed' })
+    const input = { identity: { runId: run.id, sessionId: run.sessionId, generation: run.generation }, payloadHash: 'a'.repeat(64), ownerId: 'one' }
+    expect(ReviewRunStore.claimFailureNotification(input).ok).toBe(true)
+    expect(ReviewRunStore.claimFailureNotification({ ...input, ownerId: 'two' }).ok).toBe(false)
+    ReviewRunStore.reloadForTesting()
+    expect(ReviewRunStore.claimFailureNotification({ ...input, payloadHash: 'b'.repeat(64) })).toMatchObject({ ok: false, error: 'review_run_failure_payload_mismatch' })
+    expect(ReviewRunStore.claimFailureNotification({ ...input, ownerId: 'two' })).toMatchObject({ ok: true, resume: true })
+  })
+
+  test('a late failure POST cannot complete after reload and is reconciled by a new owner', async () => {
+    const run = createPublishableReviewRun({ headSha: 'late-failure-post' })
+    ReviewRunStore.update(run.id, { status: 'failed' })
+    const started = deferred()
+    const release = deferred()
+    let body = ''
+    let visible = false
+    let posts = 0
+    const input = {
+      runId: run.id, platforms: publishingPlatforms(), secrets: liveSecrets, phase: 'runtime', error: 'failed',
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname
+        if (init?.method === 'POST') {
+          posts++
+          body = new URLSearchParams(String(init.body)).get('body')!
+          started.resolve()
+          await release.promise
+          visible = true
+          return Response.json({ id: 1 })
+        }
+        if (path.endsWith('/user')) return Response.json({ id: 7 })
+        if (path.endsWith('/notes')) return Response.json(visible ? [{ body, author: { id: 7 } }] : [])
+        return Response.json({ diff_refs: { head_sha: 'late-failure-post' } })
+      }) as typeof fetch,
+    }
+    const oldRequest = reportGitLabReviewRunFailure(input)
+    await started.promise
+    ReviewRunStore.reloadForTesting()
+    const uncertain = await reportGitLabReviewRunFailure(input)
+    expect(uncertain).toMatchObject({ notified: false, error: 'failure_notification_delivery_unknown' })
+    release.resolve()
+    expect((await oldRequest).notified).toBe(false)
+    expect((await reportGitLabReviewRunFailure(input)).notified).toBe(true)
+    expect(posts).toBe(1)
+  })
+
   test('rejects a failed MR when its HEAD changes before the failure note with zero POSTs', async () => {
     const run = ReviewRunStore.create({
       platform: 'gitlab',
