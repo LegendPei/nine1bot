@@ -22,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const {
+  settingsError,
   activeTab,
   modelProviders,
   providers,
@@ -191,6 +192,7 @@ function handleOverlayClick(e: MouseEvent) {
       </div>
 
       <div class="modal-body">
+        <div v-if="settingsError" class="settings-error" role="alert">{{ settingsError }}</div>
         <!-- Models Tab -->
         <ModelSelector
           v-if="activeTab === 'models'"
@@ -422,6 +424,7 @@ function handleOverlayClick(e: MouseEvent) {
 </template>
 
 <style scoped>
+.settings-error { padding: 12px; margin-bottom: 16px; color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
 .settings-modal {
   width: 90%;
   max-width: 860px;

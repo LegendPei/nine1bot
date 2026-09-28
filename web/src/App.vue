@@ -42,6 +42,8 @@ const McpProjectPanel = defineAsyncComponent(() => import('./components/McpProje
 const {
   sessions,
   sessionsLoading,
+  historyError,
+  retryHistory,
   sessionsLoadError,
   currentSession,
   messages,
@@ -1057,6 +1059,8 @@ function handlePromptSelect(prompt: string) {
       </div>
 
       <ChatPanel
+              :loadError="historyError"
+              @retry="retryHistory"
         :messages="messages"
         :isLoading="isLoading"
         :isStreaming="isStreaming"
@@ -1230,6 +1234,8 @@ function handlePromptSelect(prompt: string) {
         <template v-else>
           <div class="conversation-content" :class="{ 'empty-center-wrapper': isEmptyState }">
             <ChatPanel
+              :loadError="historyError"
+              @retry="retryHistory"
               :messages="messages"
               :isLoading="isLoading"
               :isStreaming="isStreaming"

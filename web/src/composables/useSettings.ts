@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { getApiDirectory } from '../api/client'
 import { providerApi, configApi, mcpApi, skillApi, authApi, nine1botConfigApi, customProviderApi, platformApi, importAuthFromOpencode as importAuthFromOpencodeApi } from '../api/client'
 import type { Provider, McpServer, Skill, Config, McpConfig, CustomProvider, AuthImportResult, PlatformSummary, PlatformDetail, PlatformConfigPatch, PlatformActionResult } from '../api/client'
 import { authenticateMcpWithPopup } from '../utils/mcp-auth'
@@ -51,10 +52,24 @@ const config = ref<Config>({})
 // Nine1Bot 默认模型（持久化在 nine1bot.config.jsonc）
 const defaultProvider = ref<string>('')
 const defaultModel = ref<string>('')
+const settingsError = ref('')
+const savingModel = ref(false)
+let platformRequest = 0
+let providerRequest = 0
+let configRequest = 0
+let modelRequest = 0
+let defaultModelRequest = 0
+let modelQueue: Promise<unknown> = Promise.resolve()
+let defaultModelQueue: Promise<unknown> = Promise.resolve()
+
+function reportSettingsError(error: unknown) {
+  settingsError.value = error instanceof Error ? error.message : '操作失败，请重试'
+}
 
 export function useSettings() {
   function openSettings() {
     showSettings.value = true
+    settingsError.value = ''
     authImportResult.value = null
     loadCustomProviders().then(() => loadProviders())
     loadMcpServers()
@@ -69,6 +84,8 @@ export function useSettings() {
   }
 
   async function loadProviders() {
+    const request = ++providerRequest
+    const directory = getApiDirectory()
     loadingProviders.value = true
     try {
       // 并行获取 providers 和 auth methods
@@ -77,6 +94,7 @@ export function useSettings() {
         providerApi.getAuthMethods().catch(() => ({} as Record<string, any[]>)),
         authApi.list().catch(() => [])
       ])
+      if (request !== providerRequest || directory !== getApiDirectory()) return
       const authSet = new Set(authedProviderIds)
 
       // 保存 defaults 和 connected
@@ -104,8 +122,9 @@ export function useSettings() {
       })
     } catch (e) {
       console.error('Failed to load providers:', e)
+      if (request === providerRequest) reportSettingsError(e)
     } finally {
-      loadingProviders.value = false
+      if (request === providerRequest) loadingProviders.value = false
     }
   }
 
@@ -158,11 +177,16 @@ export function useSettings() {
   }
 
   async function loadPlatformDetail(id: string) {
+    const request = ++platformRequest
+    const directory = getApiDirectory()
     platformError.value = ''
     selectedPlatformId.value = id
+    selectedPlatform.value = null
     try {
-      selectedPlatform.value = await platformApi.get(id)
+      const detail = await platformApi.get(id)
+      if (request === platformRequest && directory === getApiDirectory()) selectedPlatform.value = detail
     } catch (e: any) {
+      if (request !== platformRequest || directory !== getApiDirectory()) return
       console.error('Failed to load platform detail:', e)
       platformError.value = e?.message || '加载平台详情失败'
       selectedPlatform.value = null
@@ -173,7 +197,8 @@ export function useSettings() {
     savingPlatform.value = true
     platformError.value = ''
     try {
-      selectedPlatform.value = await platformApi.update(id, patch)
+      const updated = await platformApi.update(id, patch)
+      if (selectedPlatformId.value === id) selectedPlatform.value = updated
       platforms.value = await platformApi.list()
     } catch (e: any) {
       console.error('Failed to update platform:', e)
@@ -189,7 +214,7 @@ export function useSettings() {
     platformError.value = ''
     try {
       const result = await platformApi.health(id)
-      if (result.platform) selectedPlatform.value = result.platform
+      if (result.platform && selectedPlatformId.value === id) selectedPlatform.value = result.platform
       platforms.value = await platformApi.list()
     } catch (e: any) {
       console.error('Failed to refresh platform status:', e)
@@ -222,8 +247,13 @@ export function useSettings() {
   }
 
   async function loadConfig() {
+    const request = ++configRequest
+    const directory = getApiDirectory()
+    const modelVersion = modelRequest
     try {
-      config.value = await configApi.get()
+      const loaded = await configApi.get()
+      if (request !== configRequest || directory !== getApiDirectory() || modelVersion !== modelRequest) return
+      config.value = loaded
       // 后端的 model 格式是 "provider/model"
       let modelStr = config.value.model || ''
 
@@ -250,14 +280,24 @@ export function useSettings() {
   }
 
   async function selectModel(providerId: string, modelId: string) {
+    const request = ++modelRequest
+    const directory = getApiDirectory()
+    savingModel.value = true
+    settingsError.value = ''
+    const save = modelQueue.catch(() => {}).then(() => configApi.update({ model: `${providerId}/${modelId}` }, directory))
+    modelQueue = save
     try {
-      // 后端期望 model 格式为 "provider/model"
-      const modelStr = `${providerId}/${modelId}`
-      await configApi.update({ model: modelStr })
-      currentProvider.value = providerId
-      currentModel.value = modelId
+      await save
+      if (request === modelRequest && directory === getApiDirectory()) {
+        currentProvider.value = providerId
+        currentModel.value = modelId
+      }
+      return true
     } catch (e) {
-      console.error('Failed to update model:', e)
+      if (request === modelRequest) reportSettingsError(e)
+      return false
+    } finally {
+      if (request === modelRequest) savingModel.value = false
     }
   }
 
@@ -323,11 +363,14 @@ export function useSettings() {
   }
 
   async function setApiKey(providerId: string, apiKey: string) {
+    settingsError.value = ''
     try {
       await authApi.setApiKey(providerId, apiKey)
       await loadProviders()
+      return true
     } catch (e) {
-      console.error('Failed to set API key:', e)
+      reportSettingsError(e)
+      return false
     }
   }
 
@@ -337,6 +380,7 @@ export function useSettings() {
       await loadProviders()
     } catch (e) {
       console.error('Failed to remove auth:', e)
+      reportSettingsError(e)
     }
   }
 
@@ -358,7 +402,6 @@ export function useSettings() {
     try {
       const list = await customProviderApi.list()
       customProviders.value = list
-      await nine1botConfigApi.update({ customProviders: list })
     } catch (e) {
       console.error('Failed to load custom providers:', e)
       customProviders.value = {}
@@ -405,13 +448,20 @@ export function useSettings() {
   }
 
   async function setDefaultModel(providerId: string, modelId: string) {
+    const request = ++defaultModelRequest
+    settingsError.value = ''
+    const save = defaultModelQueue.catch(() => {}).then(() => nine1botConfigApi.update({ model: `${providerId}/${modelId}` }))
+    defaultModelQueue = save
     try {
-      const modelStr = `${providerId}/${modelId}`
-      await nine1botConfigApi.update({ model: modelStr })
-      defaultProvider.value = providerId
-      defaultModel.value = modelId
+      await save
+      if (request === defaultModelRequest) {
+        defaultProvider.value = providerId
+        defaultModel.value = modelId
+      }
+      return true
     } catch (e) {
-      console.error('Failed to set default model:', e)
+      if (request === defaultModelRequest) reportSettingsError(e)
+      return false
     }
   }
 
@@ -453,6 +503,8 @@ export function useSettings() {
   })
 
   return {
+    settingsError,
+    savingModel,
     showSettings,
     activeTab,
     providers,

@@ -18,6 +18,17 @@ export function setApiDirectory(directory?: string) {
   activeDirectory = (directory || '').trim()
 }
 
+export function getApiDirectory() {
+  return activeDirectory
+}
+
+async function requireOk(response: Response): Promise<Response> {
+  if (response.ok) return response
+  const body = await response.json().catch(() => null)
+  const message = typeof body?.error === 'string' ? body.error : body?.error?.message || body?.message
+  throw new Error(message || `请求失败（HTTP ${response.status}）`)
+}
+
 export function setApiClientSurface(surface: ClientSurface) {
   clientSurface = surface
 }
@@ -1114,13 +1125,11 @@ export const api = {
   // 获取消息历史
   // 后端返回 { info: MessageInfo, parts: Part[] }[]
   async getMessages(sessionId: string): Promise<Message[]> {
-    const res = await fetchWithDirectory(`${BASE_URL}/session/${sessionId}/message`)
-    if (!res.ok) {
-      console.error(`Failed to load messages: HTTP ${res.status}`)
-      return []
-    }
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/session/${sessionId}/message`))
     const data = await res.json()
-    return Array.isArray(data) ? data : (data.data || [])
+    const messages = Array.isArray(data) ? data : data.data
+    if (!Array.isArray(messages)) throw new Error('会话历史响应格式无效')
+    return messages
   },
 
   // 发送消息。消息流通过 per-session runtime event stream 返回。
@@ -2493,7 +2502,7 @@ export const mcpApi = {
 export const skillApi = {
   // 获取所有可用技能
   async list(): Promise<Skill[]> {
-    const res = await fetch(`${BASE_URL}/skill`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/skill`))
     const data = await res.json()
     return Array.isArray(data) ? data : (data.data || [])
   }
@@ -2503,7 +2512,7 @@ export const providerApi = {
   // 获取所有提供者和模型
   // 后端返回 { all: Provider[], default: Record<string, string>, connected: string[] }
   async list(): Promise<{ providers: Provider[]; defaults: Record<string, string>; connected: string[] }> {
-    const res = await fetchWithDirectory(`${BASE_URL}/provider`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/provider`))
     const data = await res.json()
     // 后端返回 { all: [...], default: {...}, connected: [...] }
     const providerList = data.all || data
@@ -2570,16 +2579,16 @@ export const providerApi = {
 export const nine1botConfigApi = {
   // 获取 Nine1Bot 默认配置（nine1bot.config.jsonc）
   async get(): Promise<{ model?: string; small_model?: string; customProviders?: Record<string, CustomProvider>; configPath: string }> {
-    const res = await fetchWithTimeout(`${BASE_URL}/config/nine1bot`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/config/nine1bot`))
     return res.json()
   },
   // 更新 Nine1Bot 默认配置
   async update(config: { model?: string; small_model?: string; customProviders?: Record<string, CustomProvider> }): Promise<void> {
-    await fetchWithTimeout(`${BASE_URL}/config/nine1bot`, {
+    await requireOk(await fetchWithTimeout(`${BASE_URL}/config/nine1bot`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config)
-    })
+    }))
   },
   async getBrowserExtension(): Promise<BrowserExtensionConfig> {
     const res = await fetchWithTimeout(`${BASE_URL}/config/nine1bot/browser-extension`)
@@ -2725,18 +2734,19 @@ export const platformApi = {
 export const configApi = {
   // 获取当前配置
   async get(): Promise<Config> {
-    const res = await fetch(`${BASE_URL}/config`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/config`))
     const data = await res.json()
     return data
   },
 
   // 更新配置
-  async update(config: Partial<Config>): Promise<Config> {
-    const res = await fetch(`${BASE_URL}/config`, {
+  async update(config: Partial<Config>, directory = activeDirectory): Promise<Config> {
+    const suffix = directory ? `?directory=${encodeURIComponent(directory)}` : ''
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/config${suffix}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-opencode-directory': directory },
       body: JSON.stringify(config)
-    })
+    }, DEFAULT_TIMEOUT, false))
     const data = await res.json()
     return data
   }
@@ -2744,8 +2754,7 @@ export const configApi = {
 
 export const authApi = {
   async list(): Promise<string[]> {
-    const res = await fetchWithDirectory(`${BASE_URL}/auth`)
-    if (!res.ok) return []
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/auth`))
     const data = await res.json().catch(() => [])
     return Array.isArray(data) ? data : []
   },
@@ -2753,18 +2762,18 @@ export const authApi = {
   // 设置 API Key
   // 后端期望 Auth.Info 格式: { type: 'api', key: string }
   async setApiKey(providerId: string, apiKey: string): Promise<void> {
-    await fetchWithDirectory(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
+    await requireOk(await fetchWithTimeout(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'api', key: apiKey })
-    })
+    }))
   },
 
   // 移除认证
   async remove(providerId: string): Promise<void> {
-    await fetchWithDirectory(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
+    await requireOk(await fetchWithTimeout(`${BASE_URL}/auth/${encodeURIComponent(providerId)}`, {
       method: 'DELETE'
-    })
+    }))
   }
 }
 
@@ -2808,7 +2817,7 @@ export const gitLabReviewApi = {
 export const questionApi = {
   // 获取待处理的问题列表
   async list(): Promise<QuestionRequest[]> {
-    const res = await fetch(`${BASE_URL}/question`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/question`, {}, 10000))
     const data = await res.json()
     return Array.isArray(data) ? data : []
   },

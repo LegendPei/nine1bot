@@ -30,6 +30,10 @@ export function useFiles() {
 
   // 设置工作目录
   function setDirectory(directory: string | undefined) {
+    if (currentDirectory.value !== directory) {
+      clearFileContent()
+      clearSearch()
+    }
     currentDirectory.value = directory
   }
 
@@ -121,6 +125,8 @@ export function useFiles() {
 
   // 清除文件内容
   function clearFileContent() {
+    loadContentRequest++
+    isLoadingContent.value = false
     fileContent.value = null
     contentError.value = null
     isContentTruncated.value = false
@@ -130,7 +136,7 @@ export function useFiles() {
   async function searchFiles(pattern: string) {
     const requestId = ++searchRequest
     if (!pattern.trim()) {
-      searchResults.value = []
+      clearSearch()
       return
     }
 
@@ -154,6 +160,8 @@ export function useFiles() {
 
   // 清除搜索结果
   function clearSearch() {
+    searchRequest++
+    isSearching.value = false
     searchResults.value = []
     searchError.value = null
   }

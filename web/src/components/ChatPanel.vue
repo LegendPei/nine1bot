@@ -11,6 +11,7 @@ import DirectoryBrowser from './DirectoryBrowser.vue'
 const props = defineProps<{
   messages: Message[]
   isLoading: boolean
+  loadError?: string | null
   isStreaming: boolean
   sessionId?: string
   pendingQuestions?: QuestionRequest[]
@@ -22,6 +23,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  (e: 'retry'): void
   (e: 'questionAnswered', requestId: string, answers: string[][]): void
   (e: 'questionRejected', requestId: string): void
   (e: 'permissionResponded', requestId: string, response: 'once' | 'always' | 'reject'): void
@@ -159,6 +161,10 @@ function scrollToBottom(force = false) {
 
 <template>
   <div class="chat-messages custom-scrollbar" ref="scrollContainer">
+    <div v-if="loadError" class="history-error" role="alert">
+      <span>{{ loadError }}</span>
+      <button class="btn btn-sm btn-ghost" @click="emit('retry')">重试加载</button>
+    </div>
     <!-- Session Error Banner -->
     <div v-if="sessionError" class="session-error-banner">
       <div class="error-content">
@@ -260,6 +266,7 @@ function scrollToBottom(force = false) {
 </template>
 
 <style scoped>
+.history-error { display: flex; align-items: center; gap: 12px; margin: 16px auto; padding: 12px 16px; max-width: var(--input-max-width); color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
 .chat-messages {
   flex: 1;
   overflow-y: auto;

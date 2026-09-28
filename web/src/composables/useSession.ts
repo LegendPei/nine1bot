@@ -39,6 +39,7 @@ export function useSession() {
   const currentSession = ref<Session | null>(null)
   const messages = ref<Message[]>([])
   const isLoading = ref(false)
+  const historyError = ref<string | null>(null)
   const currentDirectory = ref('')
 
   // 是否处于草稿模式（新建会话但未发送消息）
@@ -88,6 +89,7 @@ export function useSession() {
   let sessionEventGeneration = 0
   let sessionEventSubscriptionVersion = 0
   let selectionVersion = 0
+  let pendingCreation: { version: number; promise: Promise<Session> } | undefined
   let sessionsLoadVersion = 0
   const sessionEventReconciler = createSessionEventReconciler<SSEEvent>(dispatchSessionEvent)
   const frameDeltaBuffer = createFrameDeltaBuffer({
@@ -245,6 +247,8 @@ export function useSession() {
   function createSession(directory: string) {
     // 使任何在途的选择/创建请求失效，防止其返回后抢占新草稿
     selectionVersion++
+    isLoading.value = false
+    historyError.value = null
     // 进入草稿模式，清空当前会话状态
     isDraftSession.value = true
     currentSession.value = null
@@ -328,6 +332,12 @@ export function useSession() {
         getStatuses: api.getSessionStatus,
         getQuestions: questionApi.list,
         getPermissions: permissionApi.list,
+        onMessages(loaded) {
+          if (!sessionEventReconciler.isCurrent(generation) || currentSession.value?.id !== sessionID) return
+          messages.value = loaded
+          isLoading.value = false
+          historyError.value = null
+        },
       })
 
       if (
@@ -340,13 +350,16 @@ export function useSession() {
       return sessionEventReconciler.applySnapshot(generation, () => {
         frameDeltaBuffer.clear()
         messages.value = snapshot.messages
-        pendingQuestions.value = snapshot.questions
-        pendingPermissions.value = snapshot.permissions
+        if (snapshot.questions) pendingQuestions.value = snapshot.questions
+        if (snapshot.permissions) pendingPermissions.value = snapshot.permissions
         seenUserMessageIds.clear()
         for (const message of snapshot.messages) {
           if (message.info.role === 'user') seenUserMessageIds.add(message.info.id)
         }
-        applyRecoveryStatus(sessionID, snapshot.status)
+        if (snapshot.status) applyRecoveryStatus(sessionID, snapshot.status)
+        historyError.value = snapshot.failures?.length
+          ? `${snapshot.failures.join('、')}加载失败，消息已显示，请重试同步。`
+          : null
       })
     } catch (error) {
       if (
@@ -354,6 +367,7 @@ export function useSession() {
         currentSession.value?.id === sessionID
       ) {
         console.error('Failed to reconcile session state:', error)
+        historyError.value = error instanceof Error ? error.message : '历史消息加载失败，请重试'
       }
       return false
     } finally {
@@ -431,6 +445,7 @@ export function useSession() {
     const requestVersion = ++selectionVersion
     try {
       isLoading.value = true
+      historyError.value = null
       // 切换到已存在的会话，退出草稿模式
       isDraftSession.value = false
       // 重置所有会话级状态，防止旧会话的状态残留
@@ -452,6 +467,7 @@ export function useSession() {
     } catch (error) {
       if (requestVersion === selectionVersion) {
         console.error('Failed to load session:', error)
+        historyError.value = error instanceof Error ? error.message : '会话加载失败，请重试'
       }
     } finally {
       if (requestVersion === selectionVersion) {
@@ -498,6 +514,7 @@ export function useSession() {
     model?: { providerID: string; modelID: string },
     files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>
   ): Promise<boolean> {
+    const originVersion = selectionVersion
     const draftPageContext =
       isDraftSession.value || !currentSession.value
         ? await collectActivePageContext().catch((error) => {
@@ -505,13 +522,16 @@ export function useSession() {
             return undefined
           })
         : undefined
+    if (originVersion !== selectionVersion) return false
     // 如果是草稿模式或没有当前会话，先创建会话
     const ensuredSession = await ensureSession(draftPageContext)
     if (!ensuredSession) {
       return false
     }
 
-    if (!currentSession.value) return false
+    if (currentSession.value?.id !== ensuredSession.id) return false
+    const sendVersion = selectionVersion
+    const isCurrentSend = () => sendVersion === selectionVersion && currentSession.value?.id === ensuredSession.id
 
     // Check if this session is already streaming
     if (isSessionRunning(currentSession.value.id)) return false
@@ -540,10 +560,18 @@ export function useSession() {
           ? sessionEventSource
           : await openSessionEventStreamAndReconcile(sessionId)
       await subscription.ready
+      if (!isCurrentSend()) {
+        setSessionRunning(sessionId, false)
+        return false
+      }
       setSessionRunning(sessionId, true)
 
       if (model && !isSameModel(currentSession.value.runtime?.currentModel, model)) {
         const modelResult = await api.changeSessionModel(sessionId, model)
+        if (!isCurrentSend()) {
+          setSessionRunning(sessionId, false)
+          return false
+        }
         applyCurrentSessionRuntime({
           currentModel: modelResult.currentModel,
           profileSnapshotId: modelResult.profileSnapshotId,
@@ -556,6 +584,10 @@ export function useSession() {
           console.warn('Failed to collect active page context:', error)
           return undefined
         }))
+      if (!isCurrentSend()) {
+        setSessionRunning(sessionId, false)
+        return false
+      }
       const sendResult = await api.sendMessage(sessionId, content, files, pageContext)
       showContextEnrichmentNotice(sessionId, sendResult.contextEnrichment)
       return true
@@ -603,7 +635,13 @@ export function useSession() {
     }
 
     try {
-      return await _createSessionInternal(currentDirectory.value || '.', pageContext)
+      if (pendingCreation?.version === selectionVersion) return await pendingCreation.promise
+      const promise = _createSessionInternal(currentDirectory.value || '.', pageContext)
+      const pending = { version: selectionVersion, promise }
+      pendingCreation = pending
+      try { return await promise } finally {
+        if (pendingCreation === pending) pendingCreation = undefined
+      }
     } catch (error) {
       console.error('Failed to ensure session:', error)
       sessionError.value = {
@@ -1052,11 +1090,13 @@ export function useSession() {
 
   // 加载待处理的问题和权限请求
   async function loadPendingRequests() {
+    const version = selectionVersion
     try {
       const [questions, permissions] = await Promise.all([
         questionApi.list(),
         permissionApi.list()
       ])
+      if (version !== selectionVersion) return
       // 只保留当前会话的请求
       if (currentSession.value) {
         pendingQuestions.value = questions.filter(q => q.sessionID === currentSession.value!.id)
@@ -1277,6 +1317,8 @@ export function useSession() {
     currentSession,
     messages,
     isLoading,
+    historyError,
+    retryHistory: () => currentSession.value ? reconcileCurrentSessionState(currentSession.value.id) : Promise.resolve(false),
     isStreaming,
     isDraftSession,
     currentDirectory,
