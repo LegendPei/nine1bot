@@ -32,6 +32,8 @@ const props = defineProps<{
   // 移动端（≤768px）抽屉式展开状态，由 App.vue 持有
   mobileOpen?: boolean
   sessions: SidebarSession[]
+  sessionsLoading: boolean
+  sessionsLoadError: boolean
   currentSession: Session | null
   isDraftSession: boolean
   files: FileItem[]
@@ -283,8 +285,8 @@ function contextMenuDelete() {
         </div>
 
         <!-- Empty state when no sessions match current mode -->
-        <div v-if="filteredSessions.length === 0 && !isDraftSession" class="empty-state section-empty">
-          暂无会话
+        <div v-if="filteredSessions.length === 0 && (sessionsLoading || sessionsLoadError || !isDraftSession)" class="empty-state section-empty">
+          {{ sessionsLoading ? '正在加载会话...' : sessionsLoadError ? '加载失败，正在重试...' : '暂无会话' }}
         </div>
       </div>
     </div>

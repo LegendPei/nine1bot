@@ -34,6 +34,8 @@ export type SessionNotification = {
 
 export function useSession() {
   const sessions = ref<Session[]>([])
+  const sessionsLoading = ref(false)
+  const sessionsLoadError = ref(false)
   const currentSession = ref<Session | null>(null)
   const messages = ref<Message[]>([])
   const isLoading = ref(false)
@@ -86,6 +88,7 @@ export function useSession() {
   let sessionEventGeneration = 0
   let sessionEventSubscriptionVersion = 0
   let selectionVersion = 0
+  let sessionsLoadVersion = 0
   const sessionEventReconciler = createSessionEventReconciler<SSEEvent>(dispatchSessionEvent)
   const frameDeltaBuffer = createFrameDeltaBuffer({
     apply({ messageID, partID, field, delta }) {
@@ -209,12 +212,30 @@ export function useSession() {
     }
   }
 
-  async function loadSessions(directory?: string) {
+  async function loadSessions(directory?: string): Promise<boolean> {
+    const requestVersion = ++sessionsLoadVersion
+    sessionsLoading.value = true
     try {
-      sessions.value = await api.getSessions(directory)
+      const loaded = await api.getSessions(directory)
+      if (requestVersion !== sessionsLoadVersion) return false
+      sessions.value = loaded
+      sessionsLoadError.value = false
+      return true
     } catch (error) {
-      console.error('Failed to load sessions:', error)
+      if (requestVersion === sessionsLoadVersion) {
+        sessionsLoadError.value = true
+        console.error('Failed to load sessions:', error)
+      }
+      return false
+    } finally {
+      if (requestVersion === sessionsLoadVersion) sessionsLoading.value = false
     }
+  }
+
+  function invalidateSessionsLoad() {
+    sessionsLoadVersion++
+    sessionsLoading.value = false
+    sessionsLoadError.value = false
   }
 
   /**
@@ -1251,6 +1272,8 @@ export function useSession() {
 
   return {
     sessions,
+    sessionsLoading,
+    sessionsLoadError,
     currentSession,
     messages,
     isLoading,
@@ -1263,6 +1286,7 @@ export function useSession() {
     sessionError,
     retryInfo,
     loadSessions,
+    invalidateSessionsLoad,
     createSession,
     ensureSession,
     selectSession,

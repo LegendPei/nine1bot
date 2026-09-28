@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onUnmounted, defineAsyncComponent } from 'vue'
 import { Terminal, Eye, X, ChevronLeft } from 'lucide-vue-next'
-import TerminalContent from './TerminalContent.vue'
-import PreviewContent from './PreviewContent.vue'
 import { useRightPanel } from '../composables/useRightPanel'
 import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useFilePreview } from '../composables/useFilePreview'
@@ -21,7 +19,10 @@ const {
 const { terminals } = useAgentTerminal()
 const { previews } = useFilePreview()
 
-const terminalContentRef = ref<InstanceType<typeof TerminalContent> | null>(null)
+const TerminalContent = defineAsyncComponent(() => import('./TerminalContent.vue'))
+const PreviewContent = defineAsyncComponent(() => import('./PreviewContent.vue'))
+
+const terminalContentRef = ref<{ fit: () => void } | null>(null)
 const isResizing = ref(false)
 
 // 保存当前的事件处理器引用以便清理

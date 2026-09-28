@@ -390,12 +390,22 @@ export namespace Session {
 
   export async function* list() {
     const project = Instance.project
-    for (const item of await Storage.list(["session", project.id])) {
-      try {
-        yield await Storage.read<Info>(item)
-      } catch (e) {
-        if (Storage.NotFoundError.isInstance(e) || Storage.CorruptedError.isInstance(e)) continue
-        throw e
+    const keys = await Storage.list(["session", project.id])
+    // Preserve the storage order while reading a bounded batch concurrently.
+    const batchSize = 8
+    for (let index = 0; index < keys.length; index += batchSize) {
+      const batch = await Promise.all(
+        keys.slice(index, index + batchSize).map(async (item) => {
+          try {
+            return await Storage.read<Info>(item)
+          } catch (e) {
+            if (Storage.NotFoundError.isInstance(e) || Storage.CorruptedError.isInstance(e)) return undefined
+            throw e
+          }
+        }),
+      )
+      for (const session of batch) {
+        if (session) yield session
       }
     }
   }

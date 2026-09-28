@@ -13,20 +13,27 @@ export type GlobalRecentSessionItem = Session & {
 
 const recentSessionsState = ref<GlobalRecentSessionItem[]>([])
 const isLoadingState = ref(false)
+const loadErrorState = ref(false)
 const lastLoadedAtState = ref<number | null>(null)
 let pollingTimer: ReturnType<typeof setInterval> | null = null
+let loadGeneration = 0
 
-function toProjectDisplayName(project: Project): string {
+type RecentSessionProject = Pick<Project, 'id' | 'worktree' | 'name'> & {
+  rootDirectory?: string
+}
+
+function toProjectDisplayName(project: RecentSessionProject): string {
   const fallbackPath = (project.rootDirectory || project.worktree || '').replace(/\\/g, '/')
   const fallbackName = fallbackPath.split('/').filter(Boolean).pop() || project.id.slice(0, 8)
   return project.name || fallbackName
 }
 
-function mapProjectSessions(project: Project, sessions: Session[]): GlobalRecentSessionItem[] {
+function mapProjectSessions(project: RecentSessionProject, sessions: Session[]): GlobalRecentSessionItem[] {
   const displayName = toProjectDisplayName(project)
   const displayPath = project.rootDirectory || project.worktree
   return sessions.map((session) => ({
     ...session,
+    projectID: session.projectID || project.id,
     projectDisplayName: displayName,
     projectDisplayPath: displayPath,
   }))
@@ -49,49 +56,71 @@ async function runWithConcurrencyLimit<T>(tasks: Array<() => Promise<T>>, limit:
   return results
 }
 
-async function loadGlobalRecentSessions(): Promise<GlobalRecentSessionItem[]> {
+function mergeRecentSessions(groups: Array<GlobalRecentSessionItem[] | undefined>): GlobalRecentSessionItem[] {
+  const deduped = new Map<string, GlobalRecentSessionItem>()
+  for (const group of groups) {
+    if (!group) continue
+    for (const session of group) {
+      const previous = deduped.get(session.id)
+      if (!previous || previous.time.updated < session.time.updated) {
+        deduped.set(session.id, session)
+      }
+    }
+  }
+  return Array.from(deduped.values())
+    .sort((a, b) => b.time.updated - a.time.updated)
+    .slice(0, MAX_TOTAL_SESSIONS)
+}
+
+async function loadGlobalRecentSessions(knownProjects?: RecentSessionProject[]): Promise<GlobalRecentSessionItem[]> {
+  const generation = ++loadGeneration
   isLoadingState.value = true
   try {
-    const projects = await projectApi.list()
+    const projects = knownProjects ?? await projectApi.list()
+    const partialGroups: Array<GlobalRecentSessionItem[] | undefined> = []
+    const publishIncrementally = recentSessionsState.value.length === 0
+    let failedProjects = 0
     const tasks = projects.map(
-      (project) => async (): Promise<GlobalRecentSessionItem[]> => {
+      (project, index) => async (): Promise<GlobalRecentSessionItem[]> => {
+        let group: GlobalRecentSessionItem[] = []
         try {
           const sessions = await projectApi.sessions(project.id, {
             roots: true,
             limit: MAX_SESSIONS_PER_PROJECT,
           })
-          return mapProjectSessions(project, sessions)
+          group = mapProjectSessions(project, sessions)
         } catch (error) {
+          failedProjects++
+          group = recentSessionsState.value.filter((session) => session.projectID === project.id)
           console.error('Failed to load project sessions for global recents:', {
             projectID: project.id,
             error,
           })
-          return []
         }
+        partialGroups[index] = group
+        if (publishIncrementally && generation === loadGeneration) {
+          recentSessionsState.value = mergeRecentSessions(partialGroups)
+        }
+        return group
       },
     )
 
     const grouped = await runWithConcurrencyLimit(tasks, MAX_CONCURRENCY)
-    const deduped = new Map<string, GlobalRecentSessionItem>()
-
-    for (const group of grouped) {
-      for (const session of group) {
-        const previous = deduped.get(session.id)
-        if (!previous || previous.time.updated < session.time.updated) {
-          deduped.set(session.id, session)
-        }
-      }
+    const sorted = mergeRecentSessions(grouped)
+    if (generation !== loadGeneration) return recentSessionsState.value
+    if (projects.length > 0 && failedProjects === projects.length) {
+      loadErrorState.value = true
+      return recentSessionsState.value
     }
-
-    const sorted = Array.from(deduped.values())
-      .sort((a, b) => b.time.updated - a.time.updated)
-      .slice(0, MAX_TOTAL_SESSIONS)
-
     recentSessionsState.value = sorted
+    loadErrorState.value = failedProjects > 0
     lastLoadedAtState.value = Date.now()
     return sorted
+  } catch (error) {
+    if (generation === loadGeneration) loadErrorState.value = true
+    throw error
   } finally {
-    isLoadingState.value = false
+    if (generation === loadGeneration) isLoadingState.value = false
   }
 }
 
@@ -102,7 +131,10 @@ async function refreshGlobalRecentSessions(): Promise<GlobalRecentSessionItem[]>
 function startGlobalRecentPolling(intervalMs = POLL_INTERVAL_MS) {
   stopGlobalRecentPolling()
   pollingTimer = setInterval(() => {
-    void refreshGlobalRecentSessions()
+    if (isLoadingState.value) return
+    void refreshGlobalRecentSessions().catch((error) => {
+      console.error('Failed to poll global recent sessions:', error)
+    })
   }, intervalMs)
 }
 
@@ -112,14 +144,24 @@ function stopGlobalRecentPolling() {
   pollingTimer = null
 }
 
+function resetGlobalRecentSessions() {
+  loadGeneration++
+  recentSessionsState.value = []
+  isLoadingState.value = false
+  loadErrorState.value = false
+  lastLoadedAtState.value = null
+}
+
 export function useGlobalRecentSessions() {
   return {
     recentSessions: computed(() => recentSessionsState.value),
     isLoading: computed(() => isLoadingState.value),
+    loadError: computed(() => loadErrorState.value),
     lastLoadedAt: computed(() => lastLoadedAtState.value),
     loadGlobalRecentSessions,
     refreshGlobalRecentSessions,
     startGlobalRecentPolling,
     stopGlobalRecentPolling,
+    resetGlobalRecentSessions,
   }
 }

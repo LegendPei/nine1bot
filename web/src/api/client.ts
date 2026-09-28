@@ -263,7 +263,8 @@ function controllerEntry(page?: RequestPagePayload) {
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeout: number = DEFAULT_TIMEOUT
+  timeout: number = DEFAULT_TIMEOUT,
+  appendDirectoryQuery = true,
 ): Promise<Response> {
   const controller = new AbortController()
   let timedOut = false
@@ -271,7 +272,7 @@ async function fetchWithTimeout(
     timedOut = true
     controller.abort()
   }, timeout)
-  const preparedUrl = applyDirectoryToUrl(url)
+  const preparedUrl = appendDirectoryQuery ? applyDirectoryToUrl(url) : url
   const preparedOptions = applyDirectoryHeaders(options)
 
   try {
@@ -1075,13 +1076,22 @@ export const api = {
     const params = new URLSearchParams()
     if (directory) params.set('directory', directory)
     params.set('roots', 'true')  // 只获取主会话，过滤掉 subagent 会话
-    const res = await fetchWithTimeout(`${BASE_URL}/session?${params}`)
+    // Keep the directory header for project routing, but do not add an
+    // implicit query filter: history includes every directory in that project.
+    const res = await fetchWithTimeout(`${BASE_URL}/session?${params}`, {}, DEFAULT_TIMEOUT, false)
+    if (!res.ok) {
+      throw new Error(`Failed to list sessions: ${res.status}`)
+    }
     const data = await res.json()
-    const sessions = Array.isArray(data) ? data : (data.data || [])
+    const sessions = Array.isArray(data) ? data : data?.data
+    if (!Array.isArray(sessions)) {
+      throw new Error('Invalid session list response')
+    }
     // 添加 createdAt 字段用于显示
     return sessions
       .map((s: Session) => normalizeSession(s))
       .filter((session: Session) => sessionMatchesClientSurface(session))
+      .sort((a: Session, b: Session) => b.time.updated - a.time.updated)
   },
 
   // 创建会话
