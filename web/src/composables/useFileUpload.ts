@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { api } from '../api/client'
+import { api, getApiDirectory } from '../api/client'
 
 export interface FileAttachment {
   id: string
@@ -102,6 +102,7 @@ export function useFileUpload(options: UseFileUploadOptions) {
     uploadError.value = null
     // Resolve ownership at selection time, before the serial upload queue yields.
     let session: Promise<string | null> | undefined
+    const directory = getApiDirectory()
 
     for (const file of fileArray) {
       if (file.size > MAX_FILE_SIZE) {
@@ -122,21 +123,21 @@ export function useFileUpload(options: UseFileUploadOptions) {
 
       attachments.value.push(attachment)
       session ??= options.ensureSessionId().catch(() => null)
-      queueUpload(attachment.id, session)
+      queueUpload(attachment.id, session, directory)
     }
   }
 
-  function queueUpload(id: string, session: Promise<string | null>) {
+  function queueUpload(id: string, session: Promise<string | null>, directory: string) {
     uploadQueue = uploadQueue
       .then(async () => {
-        await uploadAttachment(id, session)
+        await uploadAttachment(id, session, directory)
       })
       .catch((error) => {
         console.error('Attachment upload queue failed:', error)
       })
   }
 
-  async function uploadAttachment(id: string, session: Promise<string | null>) {
+  async function uploadAttachment(id: string, session: Promise<string | null>, directory: string) {
     const idx = findAttachmentIndex(id)
     if (idx === -1) return
 
@@ -156,6 +157,7 @@ export function useFileUpload(options: UseFileUploadOptions) {
       if (currentIdx === -1) return
 
       const uploaded = await api.uploadSessionFile(sessionId, attachments.value[currentIdx].file, {
+        directory,
         signal: controller.signal,
         onProgress: (progress) => {
           const nextIdx = findAttachmentIndex(id)

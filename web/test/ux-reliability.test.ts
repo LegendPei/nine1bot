@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { api, configApi, customProviderApi, nine1botConfigApi, permissionApi, platformApi, questionApi, setApiDirectory, type Session } from '../src/api/client'
+import { api, authApi, configApi, customProviderApi, mcpApi, nine1botConfigApi, permissionApi, platformApi, providerApi, questionApi, setApiDirectory, type Session } from '../src/api/client'
+import { getComposerDraft } from '../src/composables/composer-drafts'
 import { useSession } from '../src/composables/useSession'
 import { useSettings } from '../src/composables/useSettings'
 import { useFiles } from '../src/composables/useFiles'
 
-const originals = [api, configApi, customProviderApi, nine1botConfigApi, permissionApi, platformApi, questionApi].map(object => [object, { ...object }] as const)
+const originals = [api, authApi, configApi, customProviderApi, mcpApi, nine1botConfigApi, permissionApi, platformApi, providerApi, questionApi].map(object => [object, { ...object }] as const)
 const originalFetch = globalThis.fetch
 let current: ReturnType<typeof useSession> | undefined
 afterEach(() => {
@@ -62,6 +63,26 @@ describe('chat and settings reliability', () => {
     expect(creates).toBe(1)
   })
 
+  it('reuses pending creation when returning to the same unsent draft', async () => {
+    const state = setupSession()
+    const created = deferred<Session>()
+    let creates = 0
+    api.createSession = () => { creates++; return created.promise }
+    state.createSession('/workspace/A')
+    const originalDraft = state.composerKey.value
+    getComposerDraft(originalDraft).text = 'unsent A'
+    const first = state.ensureSession()
+    await state.selectSession(session('B'))
+    state.createSession('/workspace/A')
+    const second = state.ensureSession()
+    created.resolve(session('A'))
+    await Promise.all([first, second])
+    expect(creates).toBe(1)
+    expect(state.currentSession.value?.id).toBe('A')
+    expect(getComposerDraft(state.composerKey.value).text).toBe('unsent A')
+    state.clearDrafts()
+  })
+
   it('shows history before a slow auxiliary request and keeps it when that request fails', async () => {
     const state = setupSession()
     const permissions = deferred<any>()
@@ -94,6 +115,47 @@ describe('chat and settings reliability', () => {
     nine1botConfigApi.update = async () => { writes++ }
     await useSettings().loadCustomProviders()
     expect(writes).toBe(0)
+  })
+
+  it('loads only the active settings category and reuses its data for the provider subpage', async () => {
+    setApiDirectory('/settings-read-only-test')
+    let providerLoads = 0
+    let mcpLoads = 0
+    let writes = 0
+    customProviderApi.list = async () => ({})
+    providerApi.list = async () => { providerLoads++; return { providers: [], connected: [], defaults: {} } }
+    providerApi.getAuthMethods = async () => ({})
+    authApi.list = async () => []
+    configApi.get = async () => ({})
+    nine1botConfigApi.get = async () => ({ configPath: '' })
+    nine1botConfigApi.update = async () => { writes++ }
+    mcpApi.list = async () => { mcpLoads++; return [] }
+    const settings = useSettings()
+    settings.platformError.value = ''
+    await settings.loadSettingsTab('models', true)
+    await settings.loadSettingsTab('auth')
+    expect(providerLoads).toBe(1)
+    expect(mcpLoads).toBe(0)
+    expect(writes).toBe(0)
+    await settings.loadSettingsTab('mcp')
+    expect(mcpLoads).toBe(1)
+  })
+
+  it('returns to an unsent draft after visiting an existing conversation', async () => {
+    const state = setupSession()
+    state.createSession('/workspace/A')
+    getComposerDraft(state.composerKey.value).text = 'keep this draft'
+    await state.selectSession(session('B'))
+    state.createSession('/workspace/A')
+    expect(getComposerDraft(state.composerKey.value).text).toBe('keep this draft')
+    state.clearDrafts()
+  })
+
+  it('rejects failed MCP connections and API key writes', async () => {
+    globalThis.fetch = async () => Response.json({ error: 'offline' }, { status: 500 })
+    await expect(mcpApi.connect('server')).rejects.toThrow('offline')
+    await expect(mcpApi.disconnect('server')).rejects.toThrow('offline')
+    await expect(authApi.setApiKey('provider', 'test-key')).rejects.toThrow('offline')
   })
 
   it('ignores a previous platform response after another platform was selected', async () => {

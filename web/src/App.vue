@@ -43,6 +43,7 @@ const {
   sessions,
   sessionsLoading,
   historyError,
+  connectionState,
   retryHistory,
   composerKey,
   clearDrafts,
@@ -122,6 +123,8 @@ const {
 
 const {
   showSettings,
+  settingsError,
+  savingModel,
   openSettings,
   closeSettings,
   activeTab: settingsTab,
@@ -688,10 +691,11 @@ watch(currentSession, (newSession, oldSession) => {
 }, { flush: 'sync' })
 
 // 监听当前目录变化，更新文件树工作目录
-watch(currentDirectory, async (newDir) => {
+watch(currentDirectory, (newDir) => {
   if (!authenticatedRuntimeStarted) return
   setFilesDirectory(newDir || undefined)
-  await loadFiles('.')
+  void loadFiles('.')
+  void loadProviders().then(loadConfig)
 })
 
 watch(appMode, (newMode) => {
@@ -892,6 +896,7 @@ function handleSearchSelect(sessionId: string) {
 }
 
 function handleProjectNewSession(projectId: string) {
+  sidebarMobileOpen.value = false
   const project = getProject(projectId)
   if (!project) return
   showProjectsPage.value = false
@@ -1089,6 +1094,8 @@ function handlePromptSelect(prompt: string) {
       />
       <InputBox
               :draftKey="composerKey"
+              :modelError="settingsError"
+              :savingModel="savingModel"
         :disabled="isLoading"
         :isStreaming="isStreaming"
         :centered="messages.length === 0"
@@ -1101,6 +1108,7 @@ function handlePromptSelect(prompt: string) {
         @abort="abortCurrentSession"
         @select-model="handleSelectModel"
         @open-mcp="handleOpenMcp"
+              @open-model-settings="settingsTab = 'auth'; openSettings()"
         @toggle-mcp-panel="toggleMcpPanel"
         @open-skills="handleOpenSkills"
         @compress-session="handleSummarize"
@@ -1168,6 +1176,7 @@ function handlePromptSelect(prompt: string) {
       @toggle-collapse="toggleSidebar"
       @select-session="handleSidebarSelectSession"
       @new-session="handleNewSession"
+      @project-new-session="handleProjectNewSession"
       @toggle-directory="toggleDirectory"
       @delete-session="handleDeleteSession"
       @rename-session="handleRenameSession"
@@ -1195,6 +1204,10 @@ function handlePromptSelect(prompt: string) {
       <!-- Header -->
       <Header
         :session="currentSession"
+        :directory="currentDirectory"
+        :projectName="projects.find(project => project.id === currentSession?.projectID)?.name"
+        :pendingCount="pendingQuestions.length + pendingPermissions.length"
+        :connectionState="connectionState"
         :isStreaming="isStreaming"
         :sidebarCollapsed="sidebarCollapsed"
         :isSummarizing="isSummarizing"
@@ -1265,6 +1278,8 @@ function handlePromptSelect(prompt: string) {
             />
             <InputBox
               :draftKey="composerKey"
+              :modelError="settingsError"
+              :savingModel="savingModel"
               :disabled="isLoading"
               :isStreaming="isStreaming"
               :centered="isEmptyState"
@@ -1277,6 +1292,7 @@ function handlePromptSelect(prompt: string) {
               @abort="abortCurrentSession"
               @select-model="handleSelectModel"
               @open-mcp="handleOpenMcp"
+              @open-model-settings="settingsTab = 'auth'; openSettings()"
               @toggle-mcp-panel="toggleMcpPanel"
               @open-skills="handleOpenSkills"
               @compress-session="handleSummarize"

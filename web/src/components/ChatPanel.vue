@@ -304,6 +304,12 @@ onUnmounted(() => {
 .jump-latest, .pending-shortcut { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-default); padding: 8px 12px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-sm); cursor: pointer; font-size: var(--text-13); }
 .pending-shortcut { color: var(--accent); }
 .load-earlier { align-self: center; margin-bottom: 16px; }
+@media (max-width: 640px) {
+  .chat-viewport .messages-container { padding: 16px 4px; }
+  .chat-viewport .agent-message-row { padding: 8px 0; }
+  .chat-viewport :deep(.message-row) { padding: 12px 0; }
+  .scroll-actions { right: 8px; bottom: 8px; }
+}
 
 .history-error { display: flex; align-items: center; gap: 12px; margin: 16px auto; padding: 12px 16px; max-width: var(--input-max-width); color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
 .chat-messages {

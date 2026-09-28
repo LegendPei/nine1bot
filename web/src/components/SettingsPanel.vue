@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch, defineAsyncComponent } from 'vue'
+import { useModalFocus } from '../composables/useModalFocus'
 import { Sun, Moon, Upload, X, User, Info, ExternalLink } from 'lucide-vue-next'
 import { useSettings } from '../composables/useSettings'
 import { useTheme } from '../composables/useTheme'
 import { useUserProfile } from '../composables/useUserProfile'
 import { NINE1BOT_WEB_PROVENANCE } from '../provenance'
 import type { Nine1BotProjectOption } from '../api/client'
-import McpManager from './McpManager.vue'
-import SkillsList from './SkillsList.vue'
+const McpManager = defineAsyncComponent(() => import('./McpManager.vue'))
+const SkillsList = defineAsyncComponent(() => import('./SkillsList.vue'))
 import ModelSelector from './ModelSelector.vue'
-import AuthManager from './AuthManager.vue'
-import PreferencesPanel from './PreferencesPanel.vue'
-import PlatformManager from './PlatformManager.vue'
+const AuthManager = defineAsyncComponent(() => import('./AuthManager.vue'))
+const PreferencesPanel = defineAsyncComponent(() => import('./PreferencesPanel.vue'))
+const PlatformManager = defineAsyncComponent(() => import('./PlatformManager.vue'))
 
 const { projects } = defineProps<{
   projects: Nine1BotProjectOption[]
@@ -23,6 +24,8 @@ const emit = defineEmits<{
 
 const {
   settingsError,
+  savingModel,
+  loadSettingsTab,
   activeTab,
   modelProviders,
   providers,
@@ -111,140 +114,143 @@ function handleBotAvatarUpload(e: Event) {
   input.value = ''
 }
 
+type SettingsTab = typeof activeTab.value
+const navigation: { id: SettingsTab; label: string; description: string }[] = [
+  { id: 'models', label: '模型与供应商', description: '选择模型、管理连接' },
+  { id: 'mcp', label: '工具与 MCP', description: '连接外部工具' },
+  { id: 'skills', label: '技能', description: '扩展助手能力' },
+  { id: 'platforms', label: '平台集成', description: '飞书、GitLab 等' },
+  { id: 'preferences', label: '偏好', description: '回复与工作习惯' },
+  { id: 'profile', label: '外观与个人', description: '主题、头像与名称' },
+  { id: 'about', label: '关于', description: '版本与项目信息' },
+]
+const activeSection = computed(() => activeTab.value === 'auth' ? 'models' : activeTab.value)
+const activeLabel = computed(() => navigation.find(item => item.id === activeSection.value)?.label)
+const mobileDetail = ref(false)
+const visited = ref(new Set<SettingsTab>([activeTab.value]))
+const modalRef = ref<HTMLElement>()
+const authRef = ref<{ hasUnsavedChanges: boolean; isSaving: boolean }>()
+const mcpRef = ref<{ hasUnsavedChanges: boolean; isSaving: boolean }>()
+const platformRef = ref<{ hasUnsavedChanges: boolean }>()
+const settingsNotice = ref('')
+const hasUnsavedChanges = computed(() => Boolean(authRef.value?.hasUnsavedChanges || mcpRef.value?.hasUnsavedChanges || platformRef.value?.hasUnsavedChanges || editingName.value.trim() !== (profile.value.name || '')))
+watch(activeTab, tab => {
+  visited.value.add(tab)
+  settingsNotice.value = ''
+  const dirty = tab === 'platforms' ? platformRef.value?.hasUnsavedChanges : tab === 'mcp' ? mcpRef.value?.hasUnsavedChanges : (tab === 'auth' || tab === 'models') ? authRef.value?.hasUnsavedChanges : false
+  if (!dirty) void loadSettingsTab(tab)
+}, { immediate: true })
+function chooseSection(tab: SettingsTab) { activeTab.value = tab; mobileDetail.value = true }
+function requestClose() {
+  if (savingModel.value || savingPlatform.value || authRef.value?.isSaving || mcpRef.value?.isSaving) { settingsNotice.value = '正在保存，请稍候…'; return }
+  if (hasUnsavedChanges.value && !window.confirm('有未保存的修改，确定关闭并丢弃吗？')) return
+  emit('close')
+}
+useModalFocus(modalRef, requestClose)
+async function runAction(action: () => Promise<unknown>, notice = '已保存') {
+  settingsNotice.value = ''
+  settingsError.value = ''
+  try {
+    if (await action() !== false) settingsNotice.value = notice
+  } catch (error) { settingsError.value = error instanceof Error ? error.message : '操作失败，请重试' }
+}
+async function saveKey(id: string, key: string) {
+  const success = await setApiKey(id, key)
+  if (success) settingsNotice.value = '认证已保存'
+  return success
+}
+async function saveServer(name: string, config: Parameters<typeof addMcp>[1]) {
+  await addMcp(name, config)
+  settingsNotice.value = 'MCP 服务器已保存'
+}
 function handleOverlayClick(e: MouseEvent) {
   if ((e.target as HTMLElement).classList.contains('modal-overlay')) {
-    emit('close')
+    requestClose()
   }
 }
 </script>
 
 <template>
   <div class="modal-overlay" @click="handleOverlayClick">
-    <div class="modal settings-modal">
+    <div class="modal settings-modal" ref="modalRef" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
       <div class="modal-header">
-        <h2 class="modal-title">设置</h2>
-        <button class="btn btn-ghost btn-icon sm" @click="emit('close')">
+        <div class="settings-heading"><button v-if="mobileDetail" class="settings-back btn btn-ghost btn-sm" @click="mobileDetail = false">← 返回</button><h2 id="settings-title" class="modal-title">{{ mobileDetail ? activeLabel : '设置' }}</h2></div>
+        <button class="btn btn-ghost btn-icon sm" @click="requestClose" aria-label="关闭设置">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>
         </button>
       </div>
 
-      <div class="settings-tabs">
-        <div class="tabs">
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'models' }"
-            @click="activeTab = 'models'"
-          >
-            模型
+      <div class="settings-layout" :class="{ 'is-detail': mobileDetail }">
+        <nav class="settings-nav" aria-label="设置分类">
+          <button v-for="item in navigation" :key="item.id" class="settings-nav-item" :class="{ active: activeSection === item.id }" :aria-current="activeSection === item.id ? 'page' : undefined" @click="chooseSection(item.id)">
+            <span>{{ item.label }}</span><small>{{ item.description }}</small>
           </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'mcp' }"
-            @click="activeTab = 'mcp'"
-          >
-            MCP
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'skills' }"
-            @click="activeTab = 'skills'"
-          >
-            技能
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'auth' }"
-            @click="activeTab = 'auth'"
-          >
-            认证
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'preferences' }"
-            @click="activeTab = 'preferences'"
-          >
-            偏好
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'profile' }"
-            @click="activeTab = 'profile'"
-          >
-            个人
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'platforms' }"
-            @click="activeTab = 'platforms'"
-          >
-            多平台
-          </button>
-          <button
-            class="tab"
-            :class="{ active: activeTab === 'about' }"
-            @click="activeTab = 'about'"
-          >
-            关于
-          </button>
+        </nav>
+      <div class="modal-body settings-content" @input="settingsNotice = ''">
+        <div class="settings-feedback" aria-live="polite">
+          <span v-if="savingModel">正在保存模型…</span><span v-else-if="settingsNotice">{{ settingsNotice }}</span>
+          <button class="btn btn-ghost btn-sm settings-refresh" :disabled="hasUnsavedChanges" @click="loadSettingsTab(activeTab, true)">刷新</button>
         </div>
-      </div>
-
-      <div class="modal-body">
+        <div v-if="activeSection === 'models'" class="models-subnav" aria-label="模型与供应商">
+          <button :class="{ active: activeTab === 'models' }" @click="activeTab = 'models'">可用模型</button>
+          <button :class="{ active: activeTab === 'auth' }" @click="activeTab = 'auth'">供应商连接</button>
+        </div>
         <div v-if="settingsError" class="settings-error" role="alert">{{ settingsError }}</div>
         <!-- Models Tab -->
         <ModelSelector
-          v-if="activeTab === 'models'"
+          v-if="visited.has('models')" v-show="activeTab === 'models'"
           :providers="modelProviders"
           :currentProvider="currentProvider"
           :currentModel="currentModel"
           :defaultProvider="defaultProvider"
           :defaultModel="defaultModel"
           :loading="loadingProviders"
-          @select="selectModel"
-          @set-default="setDefaultModel"
+          @select="(provider, model) => runAction(() => selectModel(provider, model))"
+          @set-default="(provider, model) => runAction(() => setDefaultModel(provider, model))"
+          @manage-providers="activeTab = 'auth'"
         />
 
         <!-- MCP Tab -->
-        <McpManager
-          v-if="activeTab === 'mcp'"
+        <McpManager ref="mcpRef" :saveServer="saveServer"
+          v-if="visited.has('mcp')" v-show="activeTab === 'mcp'"
           :servers="mcpServers"
           :loading="loadingMcp"
-          @connect="connectMcp"
-          @authenticate="authenticateMcp"
-          @disconnect="disconnectMcp"
+          @connect="name => runAction(() => connectMcp(name), '连接状态已更新')"
+          @authenticate="name => runAction(() => authenticateMcp(name), '认证已更新')"
+          @disconnect="name => runAction(() => disconnectMcp(name), '连接状态已更新')"
           @add="addMcp"
-          @remove="removeMcp"
+          @remove="name => runAction(() => removeMcp(name), '服务器已移除')"
         />
 
         <!-- Skills Tab -->
         <SkillsList
-          v-if="activeTab === 'skills'"
+          v-if="visited.has('skills')" v-show="activeTab === 'skills'"
           :skills="skills"
           :loading="loadingSkills"
         />
 
         <!-- Auth Tab -->
-        <AuthManager
-          v-if="activeTab === 'auth'"
+        <AuthManager ref="authRef" :saveApiKey="saveKey"
+          v-if="visited.has('auth')" v-show="activeTab === 'auth'"
           :loading="loadingProviders"
           :importing="importingAuth"
           :importResult="authImportResult"
-          @oauth="startOAuth"
+          @oauth="id => runAction(() => startOAuth(id), '已打开授权页面')"
           @set-api-key="setApiKey"
           @remove="removeAuth"
-          @import-opencode="importAuthFromOpencode"
+          @import-opencode="() => runAction(importAuthFromOpencode, '认证导入完成')"
         />
 
         <!-- Preferences Tab -->
         <PreferencesPanel
-          v-if="activeTab === 'preferences'"
+          v-if="visited.has('preferences')" v-show="activeTab === 'preferences'"
         />
 
         <!-- Platforms Tab -->
-        <PlatformManager
-          v-if="activeTab === 'platforms'"
+        <PlatformManager ref="platformRef"
+          v-if="visited.has('platforms')" v-show="activeTab === 'platforms'"
           :platforms="platforms"
           :selected-platform-id="selectedPlatformId"
           :selected-platform="selectedPlatform"
@@ -256,9 +262,9 @@ function handleOverlayClick(e: MouseEvent) {
           :providers="providers"
           :projects="projects"
           @select="loadPlatformDetail"
-          @update="updatePlatform"
-          @refresh="refreshPlatformStatus"
-          @action="executePlatformAction"
+          @update="(id, patch) => runAction(() => updatePlatform(id, patch))"
+          @refresh="id => runAction(() => refreshPlatformStatus(id), '状态已刷新')"
+          @action="(id, action, input, confirm) => runAction(() => executePlatformAction(id, action, input, confirm), '操作已完成')"
         />
 
         <!-- About Tab -->
@@ -419,54 +425,38 @@ function handleOverlayClick(e: MouseEvent) {
           </div>
         </div>
       </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .settings-error { padding: 12px; margin-bottom: 16px; color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
-.settings-modal {
-  width: 90%;
-  max-width: 860px;
-  max-height: 80vh;
-}
-
-.settings-tabs {
-  padding: 0 var(--space-lg);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.settings-tabs .tabs {
-  background: var(--bg-tertiary);
-  padding: 4px;
-  gap: 4px;
-  border-radius: var(--radius-md);
-  border-bottom: none;
-  flex-wrap: wrap;
-}
-
-.settings-tabs .tab {
-  flex: 1;
-  background: transparent;
-  padding: 6px 16px;
-  border-radius: var(--radius-sm);
-  border: none;
-  margin: 0;
-  text-align: center;
-  color: var(--text-secondary);
-  font-weight: var(--font-weight-normal);
-  transition: all var(--transition-fast);
-}
-
-.settings-tabs .tab:hover {
-  color: var(--text-primary);
-  background: var(--hover-overlay);
-}
-
-.settings-tabs .tab.active {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  font-weight: 500;
+.settings-modal { width: min(1040px, calc(100vw - 64px)); height: min(760px, calc(100dvh - 80px)); max-width: none; max-height: none; overflow: hidden; }
+.settings-heading { display: flex; align-items: center; gap: 8px; }
+.settings-layout { display: flex; flex: 1; min-height: 0; }
+.settings-nav { width: 204px; flex-shrink: 0; padding: 12px; background: var(--bg-secondary); border-right: 1px solid var(--border-subtle); overflow-y: auto; }
+.settings-nav-item { display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left; padding: 12px; margin-bottom: 4px; background: transparent; border: 1px solid transparent; border-radius: 9px; color: var(--text-secondary); cursor: pointer; }
+.settings-nav-item > span { font-size: var(--text-13); font-weight: 500; white-space: nowrap; }
+.settings-nav-item small { color: var(--text-muted); font-size: var(--text-xs); }
+.settings-nav-item.active { background: var(--bg-elevated); border-color: var(--border-subtle); color: var(--accent); }
+.settings-nav-item:hover { background: var(--bg-tertiary); }
+.settings-content { min-width: 0; flex: 1; overflow: auto; padding: 20px 28px 32px; }
+.settings-feedback { display: flex; min-height: 30px; align-items: center; color: var(--success); font-size: var(--text-sm); margin-bottom: 8px; }
+.settings-refresh { margin-left: auto; }
+.models-subnav { display: flex; gap: 20px; border-bottom: 1px solid var(--border-subtle); margin-bottom: 24px; }
+.models-subnav button { border: 0; border-bottom: 2px solid transparent; padding: 8px 0 12px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.models-subnav button.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.settings-back { display: none; }
+@media (max-width: 640px) {
+  .modal-overlay { padding: 0; }
+  .settings-modal { width: 100%; height: 100dvh; border-radius: 0; }
+  .settings-nav { width: 100%; border: 0; }
+  .settings-nav-item { padding: 16px; border-bottom: 1px solid var(--border-subtle); }
+  .settings-content { display: none; padding: 12px 18px 24px; }
+  .settings-layout.is-detail .settings-nav { display: none; }
+  .settings-layout.is-detail .settings-content { display: block; }
+  .settings-back { display: inline-flex; }
 }
 
 /* Profile Tab */

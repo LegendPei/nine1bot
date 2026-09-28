@@ -4,6 +4,10 @@ import type { Session } from '../api/client'
 
 defineProps<{
   session: Session | null
+  directory?: string
+  projectName?: string
+  pendingCount?: number
+  connectionState?: 'connecting' | 'connected' | 'reconnecting' | 'offline'
   isStreaming: boolean
   sidebarCollapsed: boolean
   isSummarizing?: boolean
@@ -40,17 +44,21 @@ const emit = defineEmits<{
         <PanelLeftOpen :size="20" />
       </button>
 
-      <div class="session-info" v-if="session">
-        <span class="session-title">{{ session.title || '新会话' }}</span>
-        <span v-if="session.directory && session.directory !== '.'" class="session-dir" :title="session.directory">
-          <Folder :size="12" /> {{ session.directory }}
+      <div class="session-info">
+        <span class="session-title">{{ session?.title || '新会话' }}</span>
+        <span v-if="(directory || session?.directory) && (directory || session?.directory) !== '.'" class="session-dir" :title="directory || session?.directory">
+          <Folder :size="12" /><span>{{ projectName ? projectName + ' · ' : '' }}{{ directory || session?.directory }}</span>
         </span>
       </div>
     </div>
 
     <div class="header-center">
+      <div v-if="session && connectionState && connectionState !== 'connected'" class="streaming-badge retry-badge" role="status">
+        {{ connectionState === 'offline' ? '连接已断开' : connectionState === 'reconnecting' ? '正在重新连接…' : '连接中…' }}
+      </div>
+      <div v-else-if="pendingCount" class="streaming-badge" role="status">等待确认 · {{ pendingCount }}</div>
       <!-- Retry Indicator -->
-      <div v-if="retryInfo" class="streaming-badge retry-badge">
+      <div v-else-if="retryInfo" class="streaming-badge retry-badge">
         <span class="retry-dot"></span>
         <span class="streaming-text">重试中 (第{{ retryInfo.attempt }}次) - {{ retryInfo.message }}</span>
       </div>
@@ -85,6 +93,10 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
+.header-left, .session-info { min-width: 0; }
+.session-title, .session-dir > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-dir > svg { flex-shrink: 0; }
+.session-dir > span { min-width: 0; }
 .glass-header {
   background: transparent;
   border-bottom: none;

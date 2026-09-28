@@ -3,10 +3,11 @@ import { computed, ref } from 'vue'
 import type { AuthImportResult } from '../api/client'
 import { useSettings } from '../composables/useSettings'
 
-defineProps<{
+const props = defineProps<{
   loading: boolean
   importing: boolean
   importResult: AuthImportResult | null
+  saveApiKey: (providerId: string, key: string) => Promise<boolean>
 }>()
 
 const emit = defineEmits<{
@@ -40,14 +41,27 @@ function toggleApiKeyInput(providerId: string) {
   showApiKeyInput.value[providerId] = !showApiKeyInput.value[providerId]
 }
 
-function submitApiKey(providerId: string) {
+const savingApiKey = ref('')
+const apiKeyError = ref('')
+async function submitApiKey(providerId: string) {
   const apiKey = apiKeyInputs.value[providerId]
-  if (apiKey) {
-    emit('set-api-key', providerId, apiKey)
-    apiKeyInputs.value[providerId] = ''
-    showApiKeyInput.value[providerId] = false
+  if (!apiKey || savingApiKey.value) return
+  savingApiKey.value = providerId
+  apiKeyError.value = ''
+  try {
+    if (await props.saveApiKey(providerId, apiKey)) {
+      apiKeyInputs.value[providerId] = ''
+      showApiKeyInput.value[providerId] = false
+    } else apiKeyError.value = '保存失败，输入已保留，请检查后重试。'
+  } catch (error) {
+    apiKeyError.value = error instanceof Error ? error.message : '保存失败'
+  } finally {
+    savingApiKey.value = ''
   }
 }
+
+const hasUnsavedChanges = computed(() => Object.values(apiKeyInputs.value).some(Boolean) || (showCustomProviderForm.value && Boolean(customProviderForm.value.id || customProviderForm.value.name || customProviderForm.value.baseURL)))
+defineExpose({ hasUnsavedChanges, isSaving: computed(() => Boolean(savingApiKey.value) || savingCustomProvider.value) })
 
 function clearSearch() {
   providerSearchQuery.value = ''
@@ -172,6 +186,8 @@ async function handleDeleteCustomProvider(providerId: string) {
 
 <template>
   <div class="auth-manager">
+    <p v-if="apiKeyError" class="text-error" role="alert">{{ apiKeyError }}</p>
+    <p v-if="savingApiKey" role="status">正在保存认证信息…</p>
     <div class="section-header">
       <h3 class="section-title">认证管理</h3>
       <p class="section-desc text-muted text-sm">管理 AI 提供者的认证信息</p>
@@ -345,8 +361,8 @@ async function handleDeleteCustomProvider(providerId: string) {
               <button class="btn btn-secondary" @click="toggleApiKeyInput(provider.id)">
                 取消
               </button>
-              <button class="btn btn-primary" @click="submitApiKey(provider.id)">
-                保存
+              <button class="btn btn-primary" :disabled="Boolean(savingApiKey)" @click="submitApiKey(provider.id)">
+                {{ savingApiKey === provider.id ? '保存中…' : '保存' }}
               </button>
             </div>
           </div>

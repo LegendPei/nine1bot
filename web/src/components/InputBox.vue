@@ -7,6 +7,8 @@ import type { Provider } from '../api/client'
 const props = defineProps<{
   disabled: boolean
   draftKey?: string
+  modelError?: string
+  savingModel?: boolean
   isStreaming: boolean
   centered?: boolean
   ensureSession?: () => Promise<string | null>
@@ -21,6 +23,7 @@ const emit = defineEmits<{
   abort: []
   'select-model': [providerId: string, modelId: string]
   'open-mcp': []
+  'open-model-settings': []
   'toggle-mcp-panel': []
   'open-skills': []
   'compress-session': []
@@ -262,6 +265,7 @@ function formatSize(bytes: number): string {
     <div v-if="uploadError" class="upload-error">
       {{ uploadError }}
     </div>
+    <div v-if="modelError" class="upload-error" role="alert">{{ modelError }}</div>
 
     <!-- Plan Mode 指示器 -->
     <div v-if="isPlanMode" class="plan-mode-indicator">
@@ -365,12 +369,12 @@ function formatSize(bytes: number): string {
         <!-- Right: Model selector + Send -->
         <div class="toolbar-right">
           <!-- Model Selector -->
-          <div class="model-selector-inline" ref="modelDropdownRef" v-if="providers && providers.length > 0">
+          <div class="model-selector-inline" ref="modelDropdownRef" v-if="providers?.some(provider => provider.authenticated)">
             <button
               class="model-trigger-inline"
               @click.stop="showModelDropdown = !showModelDropdown"
             >
-              <span class="model-name-inline">{{ getCurrentModelName() }}</span>
+              <span class="model-name-inline">{{ savingModel ? '保存模型中…' : getCurrentModelName() }}</span>
               <ChevronDown :size="12" class="model-chevron" :class="{ open: showModelDropdown }" />
             </button>
             <!-- Model Dropdown -->
@@ -393,11 +397,11 @@ function formatSize(bytes: number): string {
           <!-- 无可用 provider 时保留一个禁用入口，避免模型选择能力静默消失 -->
           <div v-else class="model-selector-inline">
             <button
-              class="model-trigger-inline model-trigger-disabled"
-              disabled
-              title="尚未配置模型提供商，请在设置中添加"
+              class="model-trigger-inline"
+              @click="emit('open-model-settings')"
+              title="连接模型供应商"
             >
-              <span class="model-name-inline">未配置模型</span>
+              <span class="model-name-inline">连接模型</span>
             </button>
           </div>
 

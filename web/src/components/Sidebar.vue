@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { groupSessionsByProject } from '../utils/session-groups'
 import {
   PanelLeftClose, PanelLeft, MessageSquare, Plus, Search,
   FolderOpen, Code2, Sparkles, Pencil, Trash2, X, Check,
-  Loader2, Square, ChevronRight, User, MessageCircle, EllipsisVertical, BarChart3, Webhook
+  Loader2, Square, ChevronRight, User, Settings, MessageCircle, EllipsisVertical, BarChart3, Webhook
 } from 'lucide-vue-next'
 import type { Session, FileItem } from '../api/client'
 import type { AppMode } from '../composables/useAppMode'
@@ -56,6 +57,7 @@ const emit = defineEmits<{
   'toggle-collapse': []
   'select-session': [session: Session]
   'new-session': []
+  'project-new-session': [projectId: string]
   'toggle-directory': [file: FileItem]
   'delete-session': [sessionId: string]
   'rename-session': [sessionId: string, title: string]
@@ -98,6 +100,11 @@ const filteredSessions = computed(() => {
   })
 })
 
+const collapsedProjects = ref<Record<string, boolean>>({})
+const sessionGroups = computed(() => props.mode === 'agent'
+  ? groupSessionsByProject(filteredSessions.value, props.projects)
+  : [{ id: 'recents', name: '', directory: '', projectId: undefined, sessions: filteredSessions.value }])
+
 function cancelRename() {
   renamingSession.value = null
   newTitle.value = ''
@@ -123,19 +130,6 @@ function doDelete() {
 
 function getSessionTitle(session: Session): string {
   return session.title || `会话 ${session.id.slice(0, 6)}`
-}
-
-function getDirectoryTail(directory: string): string {
-  const normalized = (directory || '').replace(/\\/g, '/')
-  return normalized.split('/').filter(Boolean).pop() || '.'
-}
-
-function getSessionProjectLabel(session: SidebarSession): string {
-  return session.projectDisplayName || getDirectoryTail(session.directory)
-}
-
-function getSessionProjectTitle(session: SidebarSession): string {
-  return session.projectDisplayPath || session.directory || ''
 }
 
 function isBrowserExtensionSession(session: SidebarSession): boolean {
@@ -234,7 +228,7 @@ function contextMenuDelete() {
     <!-- Recents Section -->
     <div class="sidebar-section" v-if="!collapsed">
       <div class="section-header" @click="showRecents = !showRecents">
-        <span class="section-label">最近会话</span>
+        <span class="section-label">{{ mode === 'agent' ? '项目' : '最近会话' }}</span>
         <ChevronRight :size="14" class="section-chevron" :class="{ expanded: showRecents }" />
       </div>
 
@@ -248,15 +242,29 @@ function contextMenuDelete() {
           <span class="session-title">新对话</span>
         </div>
 
+        <section v-for="group in sessionGroups" :key="group.id" class="project-session-group">
+          <div v-if="mode === 'agent'" class="project-group-heading">
+            <button class="project-group-toggle" :aria-expanded="!collapsedProjects[group.id]" :title="group.directory" @click="collapsedProjects[group.id] = !collapsedProjects[group.id]">
+              <ChevronRight :size="12" :class="{ expanded: !collapsedProjects[group.id] }" />
+              <FolderOpen :size="16" />
+              <span>{{ group.name }}</span>
+              <span class="project-session-count">{{ group.sessions.length }}</span>
+            </button>
+            <button v-if="group.projectId" class="mini-btn project-new" :title="'在 ' + group.name + ' 中新建会话'" @click="emit('project-new-session', group.projectId)"><Plus :size="14" /></button>
+          </div>
+          <div v-show="!collapsedProjects[group.id]" :class="{ 'project-session-children': mode === 'agent' }">
         <!-- Filtered Sessions by Mode -->
         <div
-          v-for="session in filteredSessions"
+          v-for="session in group.sessions"
           :key="session.id"
           class="session-item"
           :class="{
             active: !isDraftSession && currentSession?.id === session.id,
             running: isSessionRunning(session.id)
           }"
+          role="button" tabindex="0"
+          @keydown.enter.self="emit('select-session', session)"
+          @keydown.space.self.prevent="emit('select-session', session)"
           @click="emit('select-session', session)"
           @contextmenu="openContextMenu($event, session)"
         >
@@ -264,9 +272,7 @@ function contextMenuDelete() {
           <MessageSquare v-else :size="14" class="session-icon" />
           <span class="session-title">{{ getSessionTitle(session) }}</span>
           <span v-if="isBrowserExtensionSession(session)" class="session-source-badge">浏览器</span>
-          <span v-if="mode === 'agent'" class="session-project-label" :title="getSessionProjectTitle(session)">
-            {{ getSessionProjectLabel(session) }}
-          </span>
+
 
           <!-- Session Actions (on hover) -->
           <div class="session-actions" @click.stop>
@@ -284,6 +290,9 @@ function contextMenuDelete() {
           </div>
         </div>
 
+          <div v-if="mode === 'agent' && !group.sessions.length" class="project-empty">暂无会话</div>
+          </div>
+        </section>
         <!-- Empty state when no sessions match current mode -->
         <div v-if="filteredSessions.length === 0 && (sessionsLoading || sessionsLoadError || !isDraftSession)" class="empty-state section-empty">
           {{ sessionsLoading ? '正在加载会话...' : sessionsLoadError ? '加载失败，正在重试...' : '暂无会话' }}
@@ -336,16 +345,17 @@ function contextMenuDelete() {
 
     <!-- User Profile Footer -->
     <div class="sidebar-footer" v-if="!collapsed">
-      <div class="user-profile" @click="emit('open-settings')">
+      <button class="user-profile" @click="emit('open-settings')" aria-label="打开设置" title="设置">
         <div class="user-avatar">
           <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="头像" class="avatar-img" />
           <User v-else :size="16" />
         </div>
         <div class="user-info">
           <span class="user-name">{{ profile.name || '用户' }}</span>
-          <span class="user-plan">Nine1Bot</span>
+          <span class="user-plan">设置与偏好</span>
         </div>
-      </div>
+        <Settings :size="16" class="settings-icon" />
+      </button>
     </div>
 
     <!-- Collapsed Footer (avatar only) -->
@@ -439,6 +449,19 @@ function contextMenuDelete() {
 </template>
 
 <style scoped>
+.project-group-heading { display: flex; align-items: center; gap: 4px; margin: 12px 0 4px; }
+.project-group-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--text-secondary); padding: 7px 4px; cursor: pointer; text-align: left; }
+.project-group-toggle > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-group-toggle svg { flex-shrink: 0; }
+.project-group-toggle .expanded { transform: rotate(90deg); }
+.project-session-count { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+.project-session-children { padding-left: 15px; }
+.project-session-children .session-item { padding-left: 10px; }
+.project-session-children .session-icon:not(.spin) { display: none; }
+.project-empty { color: var(--text-muted); padding: 8px 12px; font-size: var(--text-sm); }
+.project-new { flex-shrink: 0; }
+.session-item:focus-within .session-actions { opacity: 1; transform: none; }
+
 /* === Sidebar (base layout lives in global style.css) === */
 .brand-area {
   display: flex;
@@ -751,6 +774,11 @@ function contextMenuDelete() {
 
 /* === User Profile Footer (base .sidebar-footer lives in global style.css) === */
 .user-profile {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -759,6 +787,8 @@ function contextMenuDelete() {
   cursor: pointer;
   transition: background-color var(--transition-fast);
 }
+
+.settings-icon { margin-left: auto; color: var(--text-muted); }
 
 .user-profile:hover {
   background: var(--hover-overlay);

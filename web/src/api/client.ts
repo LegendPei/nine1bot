@@ -25,7 +25,7 @@ export function getApiDirectory() {
 async function requireOk(response: Response): Promise<Response> {
   if (response.ok) return response
   const body = await response.json().catch(() => null)
-  const message = typeof body?.error === 'string' ? body.error : body?.error?.message || body?.message
+  const message = typeof body?.error === 'string' ? body.error : body?.error?.message || body?.message || body?.data?.message
   throw new Error(message || `请求失败（HTTP ${response.status}）`)
 }
 
@@ -45,12 +45,12 @@ export function sessionMatchesClientSurface(session: Pick<Session, 'client'>, su
   return true
 }
 
-function applyDirectoryToUrl(url: string): string {
-  if (!activeDirectory) return url
+function applyDirectoryToUrl(url: string, directory = activeDirectory): string {
+  if (!directory) return url
   try {
     const parsed = new URL(url, window.location.origin)
     if (!parsed.searchParams.has('directory')) {
-      parsed.searchParams.set('directory', activeDirectory)
+      parsed.searchParams.set('directory', directory)
     }
     if (url.startsWith('http://') || url.startsWith('https://')) {
       return parsed.toString()
@@ -61,11 +61,11 @@ function applyDirectoryToUrl(url: string): string {
   }
 }
 
-function applyDirectoryHeaders(options: RequestInit): RequestInit {
-  if (!activeDirectory) return options
+function applyDirectoryHeaders(options: RequestInit, directory = activeDirectory): RequestInit {
+  if (!directory) return options
   const headers = new Headers(options.headers || {})
   if (!headers.has('x-opencode-directory')) {
-    headers.set('x-opencode-directory', activeDirectory)
+    headers.set('x-opencode-directory', directory)
   }
   return {
     ...options,
@@ -141,6 +141,7 @@ export function createFetchEventStream(
 
   function reconnect(): void {
     if (closed) return
+    options.onDisconnect?.()
     if (reconnectAttempts >= maxReconnectAttempts) {
       options.onGiveUp?.()
       return
@@ -1107,7 +1108,7 @@ export const api = {
 
   // 创建会话
   async createSession(directory?: string, pageContext?: RequestPagePayload): Promise<Session> {
-    const res = await fetchWithDirectory(`${BASE_URL}/nine1bot/agent/sessions`, {
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/nine1bot/agent/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1116,9 +1117,10 @@ export const api = {
         ...(pageContext ? { page: pageContext } : {}),
         clientCapabilities: webClientCapabilities(pageContext),
       })
-    })
+    }))
     const data = await res.json()
     const session = data.session || data.data || data
+    if (!session?.id || typeof session.directory !== 'string') throw new Error('创建会话响应格式无效')
     return normalizeSession(session)
   },
 
@@ -1193,12 +1195,13 @@ export const api = {
       onProgress?: (progress: number) => void
       signal?: AbortSignal
       stallTimeoutMs?: number
+      directory?: string
     } = {}
   ): Promise<SessionUploadResponse> {
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      const url = applyDirectoryToUrl(`${BASE_URL}/session/${sessionId}/upload`)
-      const headers = new Headers(applyDirectoryHeaders({}).headers || {})
+      const url = applyDirectoryToUrl(`${BASE_URL}/session/${sessionId}/upload`, options.directory)
+      const headers = new Headers(applyDirectoryHeaders({}, options.directory).headers || {})
       const stallTimeoutMs = options.stallTimeoutMs ?? 60_000
       let settled = false
       let stallTimer: ReturnType<typeof setTimeout> | undefined
@@ -1588,6 +1591,7 @@ export const api = {
       eventSource.onerror = (e) => {
         if (closed) return
         console.error('Runtime EventSource error:', e)
+        options.onDisconnect?.()
 
         if (eventSource?.readyState === EventSource.CLOSED) {
           if (reconnectAttempts < maxReconnectAttempts) {
@@ -1716,6 +1720,7 @@ export interface EventStreamSubscription {
 }
 
 export interface EventStreamOptions {
+  onDisconnect?(): void
   onReconnect?(generation: number): void
   // 重连次数耗尽、彻底放弃时触发
   onGiveUp?(): void
@@ -2413,7 +2418,7 @@ export const mcpApi = {
   // 获取所有 MCP 服务器状态
   // 后端返回 Record<string, MCP.StatusInfo>，转换为数组
   async list(): Promise<McpServer[]> {
-    const res = await fetchWithTimeout(`${BASE_URL}/mcp`)
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/mcp`))
     const data = await res.json()
     // 后端返回 { serverName: { status, tools, ... }, ... }
     if (typeof data === 'object' && !Array.isArray(data)) {
@@ -2455,16 +2460,16 @@ export const mcpApi = {
 
   // 连接 MCP 服务器
   async connect(name: string): Promise<void> {
-    await fetchWithTimeout(`${BASE_URL}/mcp/${encodeURIComponent(name)}/connect`, {
+    await requireOk(await fetchWithTimeout(`${BASE_URL}/mcp/${encodeURIComponent(name)}/connect`, {
       method: 'POST'
-    })
+    }))
   },
 
   // 断开 MCP 服务器
   async disconnect(name: string): Promise<void> {
-    await fetchWithTimeout(`${BASE_URL}/mcp/${encodeURIComponent(name)}/disconnect`, {
+    await requireOk(await fetchWithTimeout(`${BASE_URL}/mcp/${encodeURIComponent(name)}/disconnect`, {
       method: 'POST'
-    })
+    }))
   },
 
   // 启动 OAuth 认证
@@ -2557,11 +2562,11 @@ export const providerApi = {
 
   // 启动 OAuth - 需要 method index
   async startOAuth(providerId: string, methodIndex: number = 0): Promise<{ url: string }> {
-    const res = await fetchWithDirectory(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
+    const res = await requireOk(await fetchWithTimeout(`${BASE_URL}/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ method: methodIndex })
-    })
+    }))
     const data = await res.json()
     return { url: data.url || data.authorizationUrl }
   },

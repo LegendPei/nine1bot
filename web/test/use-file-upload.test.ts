@@ -1,14 +1,34 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { api } from '../src/api/client'
+import { api, setApiDirectory } from '../src/api/client'
 import { useFileUpload } from '../src/composables/useFileUpload'
 
 const originalUploadSessionFile = api.uploadSessionFile
 
 afterEach(() => {
   api.uploadSessionFile = originalUploadSessionFile
+  setApiDirectory('')
 })
 
 describe('useFileUpload attachment relocation after await', () => {
+  it('binds queued uploads to the session and directory selected with the file', async () => {
+    let resolveSession!: (id: string) => void
+    let uploaded!: () => void
+    const uploadCalled = new Promise<void>(resolve => { uploaded = resolve })
+    let uploadOwner: unknown
+    api.uploadSessionFile = async (id, file, options) => {
+      uploadOwner = { id, directory: options?.directory }
+      uploaded()
+      return { url: 'file:///a.txt', mime: 'text/plain', filename: file.name } as any
+    }
+    const files = useFileUpload({ ensureSessionId: () => new Promise(resolve => { resolveSession = resolve }) })
+    setApiDirectory('/workspace/A')
+    await files.addFiles([new File(['hello'], 'a.txt', { type: 'text/plain' })])
+    setApiDirectory('/workspace/B')
+    resolveSession('session-A')
+    await uploadCalled
+    expect(uploadOwner).toEqual({ id: 'session-A', directory: '/workspace/A' })
+    files.clearAll()
+  })
   it('aborts the upload when the attachment was removed while ensuring the session', async () => {
     let uploadCalls = 0
     api.uploadSessionFile = (async () => {

@@ -61,6 +61,9 @@ let modelRequest = 0
 let defaultModelRequest = 0
 let modelQueue: Promise<unknown> = Promise.resolve()
 let defaultModelQueue: Promise<unknown> = Promise.resolve()
+const tabRequests = new Map<string, Promise<void>>()
+const tabLoadedAt = new Map<string, number>()
+let settingsDirectory = ''
 
 function reportSettingsError(error: unknown) {
   settingsError.value = error instanceof Error ? error.message : '操作失败，请重试'
@@ -71,12 +74,31 @@ export function useSettings() {
     showSettings.value = true
     settingsError.value = ''
     authImportResult.value = null
-    loadCustomProviders().then(() => loadProviders())
-    loadMcpServers()
-    loadSkills()
-    loadPlatforms()
-    loadConfig()
-    loadNine1botConfig()
+    void loadSettingsTab(activeTab.value)
+  }
+
+  async function loadSettingsTab(tab = activeTab.value, force = false) {
+    const directory = getApiDirectory()
+    if (settingsDirectory !== directory) {
+      tabLoadedAt.clear()
+      settingsDirectory = directory
+    }
+    const section = tab === 'auth' ? 'models' : tab
+    const key = `${directory}\u0000${section}`
+    const pending = tabRequests.get(key)
+    if (pending) return pending
+    if (!force && Date.now() - (tabLoadedAt.get(key) || 0) < 30000) return
+    settingsError.value = ''
+    const request = (async () => {
+      if (section === 'models') {
+        await Promise.all([loadCustomProviders().then(loadProviders), loadConfig(), loadNine1botConfig()])
+      } else if (section === 'mcp') await loadMcpServers()
+      else if (section === 'skills') await loadSkills()
+      else if (section === 'platforms') await Promise.all([loadPlatforms(), loadProviders()])
+      if (!settingsError.value && !platformError.value) tabLoadedAt.set(key, Date.now())
+    })().finally(() => tabRequests.delete(key))
+    tabRequests.set(key, request)
+    return request
   }
 
   function closeSettings() {
@@ -95,7 +117,7 @@ export function useSettings() {
         authApi.list().catch(() => [])
       ])
       if (request !== providerRequest || directory !== getApiDirectory()) return
-      const authSet = new Set(authedProviderIds)
+      const authSet = new Set([...authedProviderIds, ...providerData.connected])
 
       // 保存 defaults 和 connected
       providerDefaults.value = providerData.defaults
@@ -129,22 +151,28 @@ export function useSettings() {
   }
 
   async function loadMcpServers() {
+    const directory = getApiDirectory()
     loadingMcp.value = true
     try {
-      mcpServers.value = await mcpApi.list()
+      const loaded = await mcpApi.list()
+      if (directory === getApiDirectory()) mcpServers.value = loaded
     } catch (e) {
       console.error('Failed to load MCP servers:', e)
+      reportSettingsError(e)
     } finally {
       loadingMcp.value = false
     }
   }
 
   async function loadSkills() {
+    const directory = getApiDirectory()
     loadingSkills.value = true
     try {
-      skills.value = await skillApi.list()
+      const loaded = await skillApi.list()
+      if (directory === getApiDirectory()) skills.value = loaded
     } catch (e) {
       console.error('Failed to load skills:', e)
+      reportSettingsError(e)
     } finally {
       loadingSkills.value = false
     }
@@ -307,6 +335,7 @@ export function useSettings() {
       await loadMcpServers()
     } catch (e) {
       console.error('Failed to connect MCP:', e)
+      throw e
     }
   }
 
@@ -316,6 +345,7 @@ export function useSettings() {
       await loadMcpServers()
     } catch (e) {
       console.error('Failed to disconnect MCP:', e)
+      throw e
     }
   }
 
@@ -359,6 +389,7 @@ export function useSettings() {
       window.open(url, '_blank', 'width=600,height=700')
     } catch (e) {
       console.error('Failed to start OAuth:', e)
+      throw e
     }
   }
 
@@ -404,7 +435,7 @@ export function useSettings() {
       customProviders.value = list
     } catch (e) {
       console.error('Failed to load custom providers:', e)
-      customProviders.value = {}
+      reportSettingsError(e)
     }
   }
 
@@ -431,8 +462,10 @@ export function useSettings() {
   }
 
   async function loadNine1botConfig() {
+    const version = defaultModelRequest
     try {
       const data = await nine1botConfigApi.get()
+      if (version !== defaultModelRequest) return
       const modelStr = data.model || ''
       if (modelStr.includes('/')) {
         const [provider, ...modelParts] = modelStr.split('/')
@@ -503,6 +536,7 @@ export function useSettings() {
   })
 
   return {
+    loadSettingsTab,
     settingsError,
     savingModel,
     showSettings,

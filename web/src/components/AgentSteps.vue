@@ -21,6 +21,7 @@ const reasoningExpanded = ref<Record<string, boolean>>({})
 const allComplete = computed(() => props.steps.length > 0 && props.steps.every(s => s.isComplete))
 
 const allParts = computed(() => props.steps.flatMap(s => s.parts))
+const activeTool = computed(() => allParts.value.filter(part => part.type === 'tool' && (part.state?.status === 'running' || part.state?.status === 'pending')).slice(-1)[0])
 
 const lastRunningTool = computed(() => {
   const allTools = allParts.value.filter(p => p.type === 'tool')
@@ -79,14 +80,15 @@ function needsExpandButton(text: string): boolean {
 
 <template>
   <!-- State A: Running — show only the last active tool -->
-  <div v-if="!allComplete && !isExpanded" class="steps-running">
-    <ToolCall v-if="lastRunningTool" :tool="lastRunningTool" :hideAttachments="true" />
+  <div v-if="isStreaming && !isExpanded" class="steps-running">
+    <ToolCall v-if="activeTool" :tool="activeTool" :hideAttachments="true" />
+    <button v-else class="steps-waiting" @click="isExpanded = true">正在思考与生成… <ChevronRight :size="12" /></button>
   </div>
 
   <!-- State B: Complete + Collapsed -->
-  <div v-else-if="allComplete && !isExpanded" class="steps-row" @click="isExpanded = true">
+  <div v-else-if="!isExpanded" class="steps-row" role="button" tabindex="0" @keydown.enter="isExpanded = true" @keydown.space.prevent="isExpanded = true" @click="isExpanded = true">
     <div class="steps-icon">
-      <Check :size="10" />
+      <Check v-if="allComplete" :size="10" /><ChevronRight v-else :size="10" />
     </div>
     <span class="steps-summary">{{ stepSummary }}</span>
     <ChevronRight :size="12" class="steps-chevron" />
@@ -130,6 +132,7 @@ function needsExpandButton(text: string): boolean {
 </template>
 
 <style scoped>
+.steps-waiting { display: flex; gap: 6px; align-items: center; background: transparent; border: 0; padding: 8px 0; font-size: var(--text-13); color: var(--text-muted); cursor: pointer; }
 .steps-running {
   margin: 2px 0 4px;
 }

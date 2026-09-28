@@ -41,6 +41,7 @@ export function useSession() {
   const messages = ref<Message[]>([])
   const isLoading = ref(false)
   const historyError = ref<string | null>(null)
+  const connectionState = ref<'connecting' | 'connected' | 'reconnecting' | 'offline'>('connecting')
   const currentDirectory = ref('')
   const composerKey = ref(`draft-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
@@ -91,15 +92,26 @@ export function useSession() {
   let sessionEventGeneration = 0
   let sessionEventSubscriptionVersion = 0
   let selectionVersion = 0
-  let pendingCreation: { version: number; promise: Promise<Session> } | undefined
+  const pendingCreations = new Map<string, Promise<Session>>()
   let sessionsLoadVersion = 0
   const sessionEventReconciler = createSessionEventReconciler<SSEEvent>(dispatchSessionEvent)
+  const messagePositions = new Map<string, number>()
+  const partPositions = new Map<string, number>()
   const frameDeltaBuffer = createFrameDeltaBuffer({
     apply({ messageID, partID, field, delta }) {
-      const messageIndex = messages.value.findIndex(message => message.info.id === messageID)
+      let messageIndex = messagePositions.get(messageID)
+      if (messageIndex === undefined || messages.value[messageIndex]?.info.id !== messageID) {
+        messageIndex = messages.value.findIndex(message => message.info.id === messageID)
+        if (messageIndex >= 0) messagePositions.set(messageID, messageIndex)
+      }
       if (messageIndex === -1) return
       const message = messages.value[messageIndex]
-      const partIndex = message.parts.findIndex(part => part.id === partID)
+      const partKey = `${messageID}\u0000${partID}`
+      let partIndex = partPositions.get(partKey)
+      if (partIndex === undefined || message.parts[partIndex]?.id !== partID) {
+        partIndex = message.parts.findIndex(part => part.id === partID)
+        if (partIndex >= 0) partPositions.set(partKey, partIndex)
+      }
       if (partIndex === -1) return
       const part = message.parts[partIndex]
       if (field !== 'text') return
@@ -243,9 +255,10 @@ export function useSession() {
    * 不会立即调用后端 API，只有发送消息时才真正创建
    */
   function createSession(directory: string) {
+    if (isDraftSession.value && currentDirectory.value === (directory || '.') && !currentSession.value) return
     // 使任何在途的选择/创建请求失效，防止其返回后抢占新草稿
     selectionVersion++
-    composerKey.value = `draft-${Date.now()}-${selectionVersion}`
+    composerKey.value = `draft:${directory || '.'}`
     isLoading.value = false
     historyError.value = null
     // 进入草稿模式，清空当前会话状态
@@ -273,6 +286,7 @@ export function useSession() {
   async function changeDirectory(directory: string) {
     // 如果是草稿模式，直接更新本地状态
     if (isDraftSession.value) {
+      composerKey.value = `draft:${directory}`
       currentDirectory.value = directory
       setApiDirectory(currentDirectory.value)
       reconnectEventsForDirectory()
@@ -375,13 +389,16 @@ export function useSession() {
   }
 
   async function openSessionEventStreamAndReconcile(sessionID: string) {
+    connectionState.value = 'connecting'
     const generation = sessionEventReconciler.begin(sessionID)
     sessionEventGeneration = generation
     const subscription = subscribeToSessionRuntimeEvents(sessionID, generation)
     try {
       await subscription.ready
+      if (currentSession.value?.id === sessionID) connectionState.value = 'connected'
     } catch (error) {
       sessionEventReconciler.finish(generation)
+      if (currentSession.value?.id === sessionID) connectionState.value = 'offline'
       if (sessionEventSource === subscription) {
         unsubscribeSessionRuntimeEvents()
       } else {
@@ -417,7 +434,8 @@ export function useSession() {
       moveComposerDraft(draftKey, session.id)
       // 创建请求在途期间用户可能已选择其他会话：新会话照常加入列表，
       // 但不抢占 currentSession、不订阅其事件流
-      if (requestVersion !== selectionVersion) {
+      const ownsDraft = !currentSession.value && isDraftSession.value && composerKey.value === draftKey
+      if (requestVersion !== selectionVersion && !ownsDraft) {
         await loadSessions()
         return session
       }
@@ -637,16 +655,20 @@ export function useSession() {
       return currentSession.value
     }
 
+    let version = selectionVersion
+    const draftKey = composerKey.value
     try {
-      if (pendingCreation?.version === selectionVersion) return await pendingCreation.promise
+      const existing = pendingCreations.get(draftKey)
+      if (existing) return await existing
       const promise = _createSessionInternal(currentDirectory.value || '.', pageContext)
-      const pending = { version: selectionVersion, promise }
-      pendingCreation = pending
+      version = selectionVersion
+      pendingCreations.set(draftKey, promise)
       try { return await promise } finally {
-        if (pendingCreation === pending) pendingCreation = undefined
+        if (pendingCreations.get(draftKey) === promise) pendingCreations.delete(draftKey)
       }
     } catch (error) {
       console.error('Failed to ensure session:', error)
+      if (version !== selectionVersion && composerKey.value !== draftKey) return null
       sessionError.value = {
         message: '创建会话失败，请重试',
         dismissable: true
@@ -1039,6 +1061,9 @@ export function useSession() {
         sessionEventReconciler.buffer(sessionEventGeneration, event)
       },
       {
+        onDisconnect() {
+          if (subscriptionVersion === sessionEventSubscriptionVersion) connectionState.value = 'reconnecting'
+        },
         onReconnect() {
           if (
             subscriptionVersion !== sessionEventSubscriptionVersion ||
@@ -1047,11 +1072,13 @@ export function useSession() {
             return
           }
           const reconnectGeneration = sessionEventReconciler.begin(sessionId)
+          connectionState.value = 'connected'
           sessionEventGeneration = reconnectGeneration
           void reconcileSession(sessionId, reconnectGeneration)
         },
         onGiveUp() {
           if (subscriptionVersion !== sessionEventSubscriptionVersion) return
+          connectionState.value = 'offline'
           // 重连彻底失败：复位 running 状态，避免 runningCount 泄漏锁死新 agent
           setSessionRunning(sessionId, false)
           if (currentSession.value?.id === sessionId) {
@@ -1068,6 +1095,8 @@ export function useSession() {
   }
 
   function unsubscribeSessionRuntimeEvents() {
+    messagePositions.clear()
+    partPositions.clear()
     sessionEventSubscriptionVersion++
     frameDeltaBuffer.clear()
     if (sessionEventSource) {
@@ -1089,6 +1118,22 @@ export function useSession() {
       clearTimeout(timerId)
     }
     notificationTimers.clear()
+  }
+
+  async function retryHistory() {
+    const session = currentSession.value
+    if (!session) return false
+    const version = selectionVersion
+    isLoading.value = messages.value.length === 0
+    try {
+      await openSessionEventStreamAndReconcile(session.id)
+      return !historyError.value
+    } catch (error) {
+      if (version === selectionVersion) historyError.value = error instanceof Error ? error.message : '重新连接失败'
+      return false
+    } finally {
+      if (version === selectionVersion) isLoading.value = false
+    }
   }
 
   // 加载待处理的问题和权限请求
@@ -1170,6 +1215,7 @@ export function useSession() {
   async function deleteSession(sessionId: string) {
     try {
       await api.deleteSession(sessionId)
+      clearComposerDrafts(sessionId)
       sessions.value = sessions.value.filter(s => s.id !== sessionId)
       // Clean up running state tracking
       clearSession(sessionId)
@@ -1321,7 +1367,8 @@ export function useSession() {
     messages,
     isLoading,
     historyError,
-    retryHistory: () => currentSession.value ? reconcileCurrentSessionState(currentSession.value.id) : Promise.resolve(false),
+    connectionState,
+    retryHistory,
     isStreaming,
     isDraftSession,
     currentDirectory,

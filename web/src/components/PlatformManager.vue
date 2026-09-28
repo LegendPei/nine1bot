@@ -222,9 +222,15 @@ const gitLabCliGuideState = computed(() => gitLabCliGuide(
   props.selectedPlatform?.runtimeStatus.cards?.find((card) => card.id === 'cli'),
 ))
 
+const cleanFormSnapshot = ref('')
+const formSnapshot = () => JSON.stringify({ enabled: enabledDraft.value, values: formValues, clears: secretClears })
+const hasUnsavedChanges = computed(() => Boolean(props.selectedPlatform) && cleanFormSnapshot.value !== formSnapshot())
+defineExpose({ hasUnsavedChanges })
+
 watch(
   () => props.selectedPlatform,
-  (platform) => {
+  (platform, previous) => {
+    if (platform?.id === previous?.id && hasUnsavedChanges.value && !props.saving) return
     resetForm(platform)
     if (platform?.id === 'gitlab') {
       loadGitLabReviewRuns()
@@ -252,7 +258,7 @@ function resetForm(platform: PlatformDetail | null) {
   for (const key of Object.keys(jsonErrors)) delete jsonErrors[key]
   for (const key of Object.keys(actionFormValues)) delete actionFormValues[key]
   for (const key of Object.keys(actionJsonErrors)) delete actionJsonErrors[key]
-  if (!platform) return
+  if (!platform) { cleanFormSnapshot.value = formSnapshot(); return }
 
   for (const field of configFields.value) {
     const value = platform.settings[field.key]
@@ -268,9 +274,12 @@ function resetForm(platform: PlatformDetail | null) {
       actionFormValues[action.id][field.key] = fieldFormValue(field, value)
     }
   }
+  cleanFormSnapshot.value = formSnapshot()
 }
 
 function selectPlatform(id: string) {
+  if (id === props.selectedPlatformId) return
+  if (hasUnsavedChanges.value && !window.confirm('有未保存的平台配置，确定切换并丢弃吗？')) return
   emit('select', id)
 }
 

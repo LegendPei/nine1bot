@@ -1233,6 +1233,8 @@ a:hover {
 }
 
 .markdown-content table {
+  display: block;
+  overflow-x: auto;
   width: 100%;
   margin: 1em 0;
   border-collapse: collapse;
@@ -1241,6 +1243,7 @@ a:hover {
 
 .markdown-content th,
 .markdown-content td {
+  min-width: 72px;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--border-default);
   text-align: left;
@@ -1250,6 +1253,9 @@ a:hover {
   background: var(--bg-secondary);
   font-weight: 600;
 }
+
+.markdown-content pre { position: relative; padding-top: 36px; }
+.copy-code { position: absolute; right: 8px; top: 6px; padding: 3px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-elevated); color: var(--text-muted); cursor: pointer; font: inherit; font-size: 11px; }
 
 .markdown-content tr:hover td {
   background: var(--bg-secondary);
@@ -1391,4 +1397,13 @@ a:hover {
     width: 95%;
     max-height: 90vh;
   }
+}
+
+/* Keep the composer anchored while a new conversation becomes active. */
+.chat-panel.empty-layout { align-items: stretch; justify-content: flex-start; }
+.empty-center-wrapper { flex: 1; min-height: 0; max-width: none; padding: 0; gap: 0; align-items: stretch; justify-content: flex-start; }
+.empty-center-wrapper .chat-viewport { min-height: 0; }
+.empty-center-wrapper .input-container { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
