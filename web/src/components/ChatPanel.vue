@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed, onUnmounted } from 'vue'
-import { FolderOpen } from 'lucide-vue-next'
+import { readChatViewport, saveChatViewport } from '../composables/chat-viewport'
+import { ArrowDown, FolderOpen } from 'lucide-vue-next'
 import type { Message, QuestionRequest, PermissionRequest } from '../api/client'
 import MessageItem from './MessageItem.vue'
 import AgentMessageGroup from './AgentMessageGroup.vue'
@@ -102,65 +103,91 @@ function getDirectoryName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+const messageContent = ref<HTMLDivElement>()
+const following = ref(true)
+const visibleCount = ref(40)
+const visibleGroups = computed(() => displayGroups.value.slice(-visibleCount.value))
+const hiddenCount = computed(() => Math.max(0, displayGroups.value.length - visibleCount.value))
+const interactionCount = computed(() => (props.pendingQuestions?.length || 0) + (props.pendingPermissions?.length || 0))
 let scrollFrame: number | undefined
-
+let initialPosition = true
+let programmatic = false
+let resizeObserver: ResizeObserver | undefined
+let restored = readChatViewport(props.sessionId)
+function savePosition(id = props.sessionId) {
+  if (!scrollContainer.value || initialPosition) return
+  saveChatViewport(id, { top: scrollContainer.value.scrollTop, following: following.value, count: visibleCount.value })
+}
 function scheduleScrollToBottom() {
   if (scrollFrame !== undefined) return
   scrollFrame = requestAnimationFrame(() => {
     scrollFrame = undefined
-    void nextTick().then(() => scrollToBottom())
+    const el = scrollContainer.value
+    if (!el || props.isLoading || !props.messages.length) return
+    programmatic = true
+    if (initialPosition) {
+      following.value = restored?.following ?? true
+      el.scrollTop = following.value ? el.scrollHeight : restored?.top ?? 0
+      initialPosition = false
+    } else if (following.value) el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => { programmatic = false })
   })
 }
-
-// 只跟踪廉价标量（消息数 + 最后一条消息末尾 part 的文本长度），
-// 避免 deep watch 在每个 SSE delta 上全量遍历 messages
-watch(
-  () => {
-    const messages = props.messages
-    const last = messages[messages.length - 1]
-    const lastPart = last?.parts?.[last.parts.length - 1]
-    return `${messages.length}:${lastPart?.text?.length ?? 0}`
-  },
-  scheduleScrollToBottom,
-)
-
-watch(() => props.isStreaming, (streaming) => {
-  if (streaming) {
-    scheduleScrollToBottom()
-  }
+function handleScroll() {
+  const el = scrollContainer.value
+  if (!el || initialPosition || programmatic) return
+  following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+  savePosition()
+}
+function jumpToLatest() {
+  following.value = true
+  restored = undefined
+  initialPosition = false
+  const el = scrollContainer.value
+  if (el) el.scrollTop = el.scrollHeight
+  savePosition()
+}
+async function loadEarlier() {
+  const el = scrollContainer.value
+  if (!el) return
+  const height = el.scrollHeight
+  const top = el.scrollTop
+  following.value = false
+  programmatic = true
+  visibleCount.value += 40
+  await nextTick()
+  el.scrollTop = top + el.scrollHeight - height
+  requestAnimationFrame(() => { programmatic = false; savePosition() })
+}
+watch(() => props.sessionId, (id, oldId) => {
+  savePosition(oldId)
+  restored = readChatViewport(id)
+  visibleCount.value = restored?.count ?? 40
+  following.value = restored?.following ?? true
+  initialPosition = true
+  scheduleScrollToBottom()
 })
-
-// 切换会话后无条件瞬时滚到底部，避免残留旧会话的 scrollTop 落在历史中间
-watch(() => props.sessionId, () => {
-  if (scrollFrame !== undefined) {
-    cancelAnimationFrame(scrollFrame)
-    scrollFrame = undefined
-  }
-  void nextTick().then(() => scrollToBottom(true))
-})
-
+watch(() => {
+  const last = props.messages[props.messages.length - 1]
+  return [props.messages.length, last?.parts?.[last.parts.length - 1]?.text?.length, props.isLoading, interactionCount.value]
+}, scheduleScrollToBottom, { flush: 'post', immediate: true })
+// Observe layout changes from Markdown, images and expanded tool output.
+watch(messageContent, element => {
+  resizeObserver?.disconnect()
+  if (!element || typeof ResizeObserver === 'undefined') return
+  resizeObserver = new ResizeObserver(scheduleScrollToBottom)
+  resizeObserver.observe(element)
+}, { flush: 'post' })
 onUnmounted(() => {
+  savePosition()
+  resizeObserver?.disconnect()
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
 })
-
-function scrollToBottom(force = false) {
-  if (scrollContainer.value) {
-    // Check if user is already near bottom to avoid annoying auto-scroll if they are reading history
-    const isNearBottom = scrollContainer.value.scrollHeight - scrollContainer.value.scrollTop - scrollContainer.value.clientHeight < 100
-
-    if (force || isNearBottom) {
-      scrollContainer.value.scrollTo({
-        top: scrollContainer.value.scrollHeight,
-        // 流式期间用 instant，避免每个 token 都触发一次平滑滚动动画
-        behavior: force || props.isStreaming ? 'instant' : 'smooth'
-      })
-    }
-  }
-}
 </script>
 
 <template>
-  <div class="chat-messages custom-scrollbar" ref="scrollContainer">
+  <div class="chat-viewport">
+  <div class="chat-messages custom-scrollbar" ref="scrollContainer" @scroll.passive="handleScroll">
     <div v-if="loadError" class="history-error" role="alert">
       <span>{{ loadError }}</span>
       <button class="btn btn-sm btn-ghost" @click="emit('retry')">重试加载</button>
@@ -182,7 +209,7 @@ function scrollToBottom(force = false) {
     </div>
 
     <!-- Empty State -->
-    <div v-if="validMessages.length === 0 && !isLoading && !sessionError" class="chat-empty">
+    <div v-if="validMessages.length === 0 && !isLoading && !sessionError && !loadError && !interactionCount" class="chat-empty">
       <div class="welcome-section">
         <div class="greeting-row">
           <!-- Decorative star icon -->
@@ -211,8 +238,9 @@ function scrollToBottom(force = false) {
     </div>
 
     <!-- Messages -->
-    <div class="messages-container" v-else>
-      <template v-for="group in displayGroups" :key="group.key">
+    <div class="messages-container" ref="messageContent" v-else>
+      <button v-if="hiddenCount" class="load-earlier btn btn-ghost btn-sm" @click="loadEarlier">加载更早的消息（还有 {{ hiddenCount }} 组）</button>
+      <template v-for="group in visibleGroups" :key="group.key">
         <!-- User message -->
         <MessageItem
           v-if="group.type === 'user'"
@@ -263,9 +291,20 @@ function scrollToBottom(force = false) {
       @cancel="handleDirectoryCancel"
     />
   </div>
+  <div v-if="!following || interactionCount" class="scroll-actions">
+    <button v-if="interactionCount" class="pending-shortcut" @click="jumpToLatest">{{ interactionCount }} 项需要确认</button>
+    <button v-if="!following" class="jump-latest" @click="jumpToLatest"><ArrowDown :size="15" />回到最新</button>
+  </div>
+  </div>
 </template>
 
 <style scoped>
+.chat-viewport { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; }
+.scroll-actions { position: absolute; bottom: 16px; right: 24px; display: flex; gap: 8px; z-index: var(--z-sticky); }
+.jump-latest, .pending-shortcut { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-default); padding: 8px 12px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-sm); cursor: pointer; font-size: var(--text-13); }
+.pending-shortcut { color: var(--accent); }
+.load-earlier { align-self: center; margin-bottom: 16px; }
+
 .history-error { display: flex; align-items: center; gap: 12px; margin: 16px auto; padding: 12px 16px; max-width: var(--input-max-width); color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
 .chat-messages {
   flex: 1;
@@ -390,8 +429,7 @@ function scrollToBottom(force = false) {
   padding: 8px var(--space-lg);
   max-width: var(--input-max-width);
   width: 100%;
-  opacity: 0;
-  animation: fade-up 0.3s var(--ease-smooth, ease) forwards;
+
 }
 
 .pending-requests {

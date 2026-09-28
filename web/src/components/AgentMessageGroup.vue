@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+import MarkdownText from './MarkdownText.vue'
 import type { Message, MessagePart, FilePart } from '../api/client'
 import AgentSteps from './AgentSteps.vue'
 import { X, FileDown, File, Eye } from 'lucide-vue-next'
@@ -60,36 +59,6 @@ const textOutputs = computed<OutputItem[]>(() => {
   }
   return outputs
 })
-
-const markdownCache = new Map<string, string>()
-const MARKDOWN_CACHE_LIMIT = 200
-
-function formatText(text: string): string {
-  // 流式期间文本持续增长，中间态进缓存只会冲刷 FIFO，直接渲染
-  if (props.isStreaming) {
-    try {
-      return DOMPurify.sanitize(marked.parse(text) as string)
-    } catch {
-      return DOMPurify.sanitize(text)
-    }
-  }
-
-  const cached = markdownCache.get(text)
-  if (cached !== undefined) return cached
-
-  let rendered: string
-  try {
-    rendered = DOMPurify.sanitize(marked.parse(text) as string)
-  } catch {
-    rendered = DOMPurify.sanitize(text)
-  }
-  markdownCache.set(text, rendered)
-  if (markdownCache.size > MARKDOWN_CACHE_LIMIT) {
-    const oldest = markdownCache.keys().next().value
-    if (oldest !== undefined) markdownCache.delete(oldest)
-  }
-  return rendered
-}
 
 function isImageFile(part: MessagePart): boolean {
   return ((part as any).mime || '').startsWith('image/')
@@ -193,10 +162,10 @@ async function openPreview(meta: PreviewMeta, idx: number) {
 
     <!-- Text / file outputs: always visible -->
     <template v-for="item in textOutputs" :key="item.type === 'text' ? item.id : (item.part as any).id">
-      <div
+      <MarkdownText
         v-if="item.type === 'text'"
-        class="markdown-content"
-        v-html="formatText(item.text)"
+        :text="item.text"
+        :streaming="isStreaming"
       />
       <div v-else-if="item.type === 'file'" class="file-attachment">
         <img

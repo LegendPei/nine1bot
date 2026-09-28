@@ -23,6 +23,7 @@ import {
   loadSessionRecoverySnapshot,
 } from './sessionEventReconciler'
 import { createFrameDeltaBuffer } from './streaming-render-buffer'
+import { moveComposerDraft, clearComposerDrafts } from './composer-drafts'
 
 export type SessionNotification = {
   id: string
@@ -41,6 +42,7 @@ export function useSession() {
   const isLoading = ref(false)
   const historyError = ref<string | null>(null)
   const currentDirectory = ref('')
+  const composerKey = ref(`draft-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
   // 是否处于草稿模式（新建会话但未发送消息）
   const isDraftSession = ref(false)
@@ -101,11 +103,7 @@ export function useSession() {
       if (partIndex === -1) return
       const part = message.parts[partIndex]
       if (field !== 'text') return
-      message.parts[partIndex] = {
-        ...part,
-        text: (part.text ?? '') + delta,
-      }
-      messages.value[messageIndex] = { ...message }
+      part.text = (part.text ?? '') + delta
     },
   })
 
@@ -247,6 +245,7 @@ export function useSession() {
   function createSession(directory: string) {
     // 使任何在途的选择/创建请求失效，防止其返回后抢占新草稿
     selectionVersion++
+    composerKey.value = `draft-${Date.now()}-${selectionVersion}`
     isLoading.value = false
     historyError.value = null
     // 进入草稿模式，清空当前会话状态
@@ -409,11 +408,13 @@ export function useSession() {
     pageContext?: Awaited<ReturnType<typeof collectActivePageContext>>
   ): Promise<Session> {
     const requestVersion = ++selectionVersion
+    const draftKey = composerKey.value
     try {
       isLoading.value = true
       setApiDirectory(directory)
       reconnectEventsForDirectory()
       const session = await api.createSession(directory, pageContext)
+      moveComposerDraft(draftKey, session.id)
       // 创建请求在途期间用户可能已选择其他会话：新会话照常加入列表，
       // 但不抢占 currentSession、不订阅其事件流
       if (requestVersion !== selectionVersion) {
@@ -421,6 +422,7 @@ export function useSession() {
         return session
       }
       currentSession.value = session
+      composerKey.value = session.id
       isDraftSession.value = false
       // 使用服务器返回的实际目录，而不是传入的参数
       currentDirectory.value = session.directory
@@ -457,6 +459,7 @@ export function useSession() {
       todoItems.value = []
       seenUserMessageIds.clear()
       currentSession.value = session
+      composerKey.value = session.id
       currentDirectory.value = session.directory
       setApiDirectory(currentDirectory.value)
       reconnectEventsForDirectory()
@@ -1322,6 +1325,8 @@ export function useSession() {
     isStreaming,
     isDraftSession,
     currentDirectory,
+    composerKey,
+    clearDrafts: clearComposerDrafts,
     streamingMessage,
     pendingQuestions,
     pendingPermissions,

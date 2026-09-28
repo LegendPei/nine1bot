@@ -44,6 +44,8 @@ const {
   sessionsLoading,
   historyError,
   retryHistory,
+  composerKey,
+  clearDrafts,
   sessionsLoadError,
   currentSession,
   messages,
@@ -511,6 +513,7 @@ function stopAuthenticatedRuntime() {
   authenticatedRuntimeStarted = false
   authenticatedRuntimeGeneration++
   unsubscribe()
+  clearDrafts()
   if (globalEventSource) {
     globalEventSource.close()
     globalEventSource = null
@@ -731,8 +734,12 @@ async function handleSend(content: string, files?: Array<{ type: 'file'; mime: s
     finalContent = `[规划模式] 请先制定详细的执行计划，列出所有待办事项，等待我确认后再执行。\n\n${content}`
   }
 
-  const success = await sendMessage(finalContent, model, files)
-  onResult?.(success)
+  try {
+    onResult?.(await sendMessage(finalContent, model, files))
+  } catch (error) {
+    console.error('Failed to send message:', error)
+    onResult?.(false)
+  }
 }
 
 async function ensureCurrentSessionId() {
@@ -1081,6 +1088,7 @@ function handlePromptSelect(prompt: string) {
         @change-directory="changeDirectory"
       />
       <InputBox
+              :draftKey="composerKey"
         :disabled="isLoading"
         :isStreaming="isStreaming"
         :centered="messages.length === 0"
@@ -1256,6 +1264,7 @@ function handlePromptSelect(prompt: string) {
               @change-directory="changeDirectory"
             />
             <InputBox
+              :draftKey="composerKey"
               :disabled="isLoading"
               :isStreaming="isStreaming"
               :centered="isEmptyState"
