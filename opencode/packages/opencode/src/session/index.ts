@@ -17,6 +17,7 @@ import { MessageV2 } from "./message-v2"
 import { Instance } from "../project/instance"
 import { SessionPrompt } from "./prompt"
 import { RunLease } from "./run-lease"
+import { SessionRequest } from "./request"
 import { fn } from "@/util/fn"
 import { Command } from "../command"
 import { Snapshot } from "@/snapshot"
@@ -437,6 +438,7 @@ export namespace Session {
           await Storage.remove(part)
         }
         await Storage.remove(msg)
+        await SessionRequest.remove(msg.at(-1)!)
       }
       await Storage.remove(["session", project.id, sessionID])
       try {
@@ -468,6 +470,7 @@ export namespace Session {
     }),
     async (input) => {
       await Storage.remove(["message", input.sessionID, input.messageID])
+      await SessionRequest.remove(input.messageID)
       Bus.publish(MessageV2.Event.Removed, {
         sessionID: input.sessionID,
         messageID: input.messageID,

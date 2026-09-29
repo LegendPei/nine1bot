@@ -1,3 +1,4 @@
+import { SessionRequest } from "../../session/request"
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { describeRoute, resolver, validator } from "hono-openapi"
@@ -350,8 +351,6 @@ async function compileControllerPrompt(input: {
     parts: body.parts as SessionPrompt.PromptInput["parts"],
   }
 
-  SessionPrompt.assertNotBusy(input.sessionID)
-
   if (!(await RuntimeFeatureFlags.agentRunSpecEnabled())) {
     return {
       ...promptBody,
@@ -369,12 +368,12 @@ async function compileControllerPrompt(input: {
 }
 
 export async function sendControllerMessage(sessionID: string, body: RuntimeControllerProtocol.MessageSendRequest) {
-  const turnSnapshotId = ulid()
+  let turnSnapshotId = ulid()
   let prompt: SessionPrompt.PromptInput
   let preparedBody = body
   let contextEnrichment: RuntimeControllerProtocol.ContextEnrichmentSummary | undefined
   try {
-    SessionPrompt.assertNotBusy(sessionID)
+    if (!(await SessionRequest.isAccepted(sessionID, body.messageID))) SessionPrompt.assertNotBusy(sessionID)
     const configuredBody = await applyBrowserExtensionPrompt(sessionID, body)
     const prepared = await prepareFeishuControllerMessageContext(configuredBody, {
       cacheScope: sessionID,
@@ -406,7 +405,8 @@ export async function sendControllerMessage(sessionID: string, body: RuntimeCont
   }
 
   try {
-    await SessionPrompt.promptAsync(prompt)
+    const accepted = await SessionPrompt.promptAsync(prompt)
+    if (accepted?.replayed && accepted.turnSnapshotId) turnSnapshotId = accepted.turnSnapshotId
   } catch (error) {
     RuntimeControllerEvents.clearTurn(sessionID, turnSnapshotId)
     if (error instanceof Session.BusyError) {

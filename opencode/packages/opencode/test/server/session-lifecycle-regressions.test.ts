@@ -124,3 +124,28 @@ test("creation uses the requested directory's project even when the header names
   expect((await request(f.nested, `/session/${created.sessionId}`)).status).toBe(200)
   expect((await request(f.directory, `/session/${created.sessionId}`)).status).toBe(404)
 })
+
+test("a session event stream opened from another project subdirectory receives the owner's updates", async () => {
+  const f = await setup(true)
+  const session = await inDir(f.directory, () => Session.create({}))
+  const controller = new AbortController()
+  const response = await Server.App().request(`/nine1bot/agent/sessions/${session.id}/events`, {
+    headers: { "x-opencode-directory": f.nested }, signal: controller.signal,
+  })
+  const reader = response.body!.getReader()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await reader.read()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await inDir(f.directory, () => Session.update(session.id, draft => { draft.title = "owner-title-update" }))
+    const event = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("owner event not delivered")), 1500) }),
+    ])
+    expect(new TextDecoder().decode(event.value)).toContain("owner-title-update")
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+    await reader.cancel().catch(() => {})
+  }
+})

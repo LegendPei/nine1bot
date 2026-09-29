@@ -61,6 +61,7 @@ import { RuntimeResourceResolver } from "@/runtime/resource/resolver"
 import { PlatformToolAssembly } from "@/runtime/tool/assembly"
 import { RuntimeControllerEvents } from "@/runtime/controller/events"
 import { RunLease } from "./run-lease"
+import { SessionRequest } from "./request"
 import { RuntimeMetricsEvents } from "@/runtime/metrics/events"
 
 // @ts-ignore
@@ -397,6 +398,8 @@ export namespace SessionPrompt {
   }
 
   async function acceptPrompt(input: PromptInput, timing?: RuntimeTiming.Trace) {
+    using requestLock = await SessionRequest.lock(input.messageID)
+    await SessionRequest.assertNew(input)
     const lease = RunLease.reserve(input.sessionID)
     try {
       timing?.mark("busy.reserved")
@@ -461,6 +464,7 @@ export namespace SessionPrompt {
         timing?.mark("legacy_tools_permissions.applied", { count: permissions.length })
       }
 
+      await SessionRequest.accept(input)
       return {
         lease,
         message,
@@ -568,6 +572,12 @@ export namespace SessionPrompt {
   }
 
   export const prompt = fn(PromptInput, async (input) => {
+    const replay = await SessionRequest.replay(input)
+    if (replay) {
+      const messages = await Session.messages({ sessionID: input.sessionID })
+      return messages.findLast((message) => message.info.role === "assistant" && message.info.parentID === input.messageID)
+        ?? await MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID! })
+    }
     const timing = RuntimeTiming.start({ sessionID: input.sessionID, operation: "prompt", source: "session.prompt" })
     const accepted = await acceptPrompt(input, timing)
     if (input.noReply === true) {
@@ -592,6 +602,8 @@ export namespace SessionPrompt {
   })
 
   export const promptAsync = fn(PromptInput, async (input) => {
+    const replay = await SessionRequest.replay(input)
+    if (replay) return { replayed: true as const, turnSnapshotId: replay.turnSnapshotId }
     const timing = RuntimeTiming.start({
       sessionID: input.sessionID,
       operation: "prompt_async",

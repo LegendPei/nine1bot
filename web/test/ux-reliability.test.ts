@@ -33,6 +33,17 @@ function setupSession() {
 }
 
 describe('chat and settings reliability', () => {
+  it('retains a busy conversation and displays the backend deletion failure', async () => {
+    const state = setupSession()
+    state.sessions.value = [session('A')]
+    await state.selectSession(session('A'))
+    api.deleteSession = async () => { throw new Error('会话正在运行，请先停止任务再删除') }
+    await expect(state.deleteSession('A')).rejects.toThrow('请先停止')
+    expect(state.sessions.value).toHaveLength(1)
+    expect(state.currentSession.value?.id).toBe('A')
+    expect(state.sessionNotifications.value.at(-1)?.message).toContain('请先停止')
+  })
+
   it('updates titles from events for current, background and draft-mode conversations', async () => {
     const state = setupSession()
     let receive!: Parameters<typeof api.subscribeEvents>[0]

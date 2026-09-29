@@ -566,7 +566,7 @@ test("updates config and writes to file", async () => {
       try {
         await Config.update(newConfig as any)
 
-        const writtenConfig = JSON.parse(await Bun.file(path.join(tmp.path, "config.json")).text())
+        const writtenConfig = JSON.parse(await Bun.file(path.join(tmp.path, "opencode.json")).text())
         expect(writtenConfig.model).toBe("updated/model")
         expect(disposed.events).toContainEqual(expect.objectContaining({
           directory: tmp.path,
