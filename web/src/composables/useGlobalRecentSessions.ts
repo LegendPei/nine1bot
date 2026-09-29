@@ -152,6 +152,12 @@ function resetGlobalRecentSessions() {
   lastLoadedAtState.value = null
 }
 
+function applyRecentSessionTitle(updated: Pick<Session, 'id' | 'title'>) {
+  if (!updated || typeof updated.id !== 'string' || typeof updated.title !== 'string') return
+  const session = recentSessionsState.value.find(session => session.id === updated.id)
+  if (session) session.title = updated.title
+}
+
 export function useGlobalRecentSessions() {
   return {
     recentSessions: computed(() => recentSessionsState.value),
@@ -163,5 +169,6 @@ export function useGlobalRecentSessions() {
     startGlobalRecentPolling,
     stopGlobalRecentPolling,
     resetGlobalRecentSessions,
+    applyRecentSessionTitle,
   }
 }

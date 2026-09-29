@@ -677,10 +677,21 @@ export function useSession() {
     }
   }
 
+  function applySessionTitle(updated: Pick<Session, 'id' | 'title'>) {
+    if (!updated || typeof updated.id !== 'string' || typeof updated.title !== 'string') return
+    if (currentSession.value?.id === updated.id) currentSession.value.title = updated.title
+    const listed = sessions.value.find(session => session.id === updated.id)
+    if (listed) listed.title = updated.title
+  }
+
   function handleSSEEvent(event: SSEEvent) {
     const { type, properties } = event
 
     switch (type) {
+      case 'session.updated':
+        applySessionTitle(properties?.info)
+        break
+
       case 'message.created':
         // 新消息创建
         if (properties.message) {
@@ -996,6 +1007,8 @@ export function useSession() {
     }
 
     eventSource = api.subscribeEvents((event: SSEEvent) => {
+      // Metadata must also update background conversations and the list while composing a draft.
+      if (event.type === 'session.updated') applySessionTitle(event.properties?.info)
       // ALWAYS process for parallel session tracking (status events for ALL sessions)
       handleGlobalSSEEvent(event)
 
@@ -1396,6 +1409,7 @@ export function useSession() {
     clearSessionError,
     deleteSession,
     renameSession,
+    applySessionTitle,
     // 工作目录管理
     changeDirectory,
     canChangeDirectory,

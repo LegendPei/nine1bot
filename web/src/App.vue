@@ -50,6 +50,7 @@ const {
   clearDrafts,
   sessionsLoadError,
   currentSession,
+  applySessionTitle,
   messages,
   isLoading,
   isStreaming,
@@ -202,6 +203,7 @@ const {
   startGlobalRecentPolling,
   stopGlobalRecentPolling,
   resetGlobalRecentSessions,
+  applyRecentSessionTitle,
 } = useGlobalRecentSessions()
 
 // 文件查看器状态
@@ -415,6 +417,11 @@ function subscribeGlobalEvents() {
 
   globalEventSource = api.subscribeGlobalEvents((event: GlobalSSEEventEnvelope) => {
     const payload = event.payload
+    if (payload?.type === 'session.updated') {
+      applySessionTitle(payload.properties?.info)
+      applyRecentSessionTitle(payload.properties?.info)
+      return
+    }
     if (payload?.type === 'project.context.updated') {
       const projectID = payload.properties?.projectID
       if (typeof projectID === 'string' && projectID.length > 0) {

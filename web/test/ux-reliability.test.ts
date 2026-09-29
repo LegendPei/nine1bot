@@ -33,6 +33,29 @@ function setupSession() {
 }
 
 describe('chat and settings reliability', () => {
+  it('updates titles from events for current, background and draft-mode conversations', async () => {
+    const state = setupSession()
+    let receive!: Parameters<typeof api.subscribeEvents>[0]
+    api.subscribeEvents = handler => {
+      receive = handler
+      return { ready: Promise.resolve(), close() {}, connectionGeneration: () => 1 }
+    }
+    state.sessions.value = [session('A'), session('B')]
+    await state.selectSession(session('A'))
+    state.subscribeToEvents()
+    receive({ type: 'session.updated', properties: { info: { ...session('A'), title: '自动生成标题' } } })
+    expect(state.currentSession.value?.title).toBe('自动生成标题')
+    expect(state.sessions.value[0].title).toBe('自动生成标题')
+    receive({ type: 'session.updated', properties: { info: { ...session('B'), title: '后台会话标题' } } })
+    expect(state.currentSession.value?.id).toBe('A')
+    expect(state.currentSession.value?.title).toBe('自动生成标题')
+    expect(state.sessions.value[1].title).toBe('后台会话标题')
+    state.createSession('/workspace/draft')
+    receive({ type: 'session.updated', properties: { info: { ...session('A'), title: '草稿期间更新' } } })
+    expect(state.currentSession.value).toBeNull()
+    expect(state.sessions.value[0].title).toBe('草稿期间更新')
+  })
+
   it('never sends a pending draft to the session selected while creation was in flight', async () => {
     const state = setupSession()
     const created = deferred<Session>()
