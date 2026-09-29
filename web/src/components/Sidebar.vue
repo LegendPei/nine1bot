@@ -176,7 +176,7 @@ function contextMenuDelete() {
         <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="Nine1Bot" class="brand-logo" />
         <span class="brand-text">Nine1Bot</span>
       </div>
-      <button class="collapse-btn" @click="emit('toggle-collapse')" :title="collapsed ? '展开' : '折叠'">
+      <button class="collapse-btn" @click="emit('toggle-collapse')" :title="mobileOpen ? '关闭侧边栏' : collapsed ? '展开' : '折叠'">
         <PanelLeftClose v-if="!collapsed" :size="18" />
         <PanelLeft v-else :size="18" />
       </button>

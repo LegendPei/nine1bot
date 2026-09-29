@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, defineAsyncComponent } from 'vue'
 import { useSession } from './composables/useSession'
+import { useSidebarLayout } from './composables/useSidebarLayout'
 import { useFiles } from './composables/useFiles'
 import { useSettings } from './composables/useSettings'
 import { useAppMode } from './composables/useAppMode'
@@ -225,9 +226,7 @@ const showMetricsPage = ref(false)
 // Automations page
 const showAutomationsPage = ref(false)
 
-const sidebarCollapsed = ref(false)
-// 移动端（≤768px）侧边栏抽屉开关
-const sidebarMobileOpen = ref(false)
+const { sidebarCollapsed, sidebarMobileOpen, toggleSidebar } = useSidebarLayout()
 const projectContextRevision = ref(0)
 const extensionPageContext = ref<RequestPagePayload | undefined>()
 const extensionPageLoading = ref(false)
@@ -679,6 +678,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     if (showPlanPanel.value) showPlanPanel.value = false
     else if (showTodoList.value) showTodoList.value = false
     else if (showMcpPanel.value) showMcpPanel.value = false
+    else if (sidebarMobileOpen.value) sidebarMobileOpen.value = false
   }
 }
 
@@ -758,10 +758,6 @@ function handleNewSession() {
   showAutomationsPage.value = false
   void refreshExtensionPageContext()
   createSession(currentDirectory.value || '.')
-}
-
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
 }
 
 // Mode switch handler — auto navigate to new chat
@@ -1214,7 +1210,7 @@ function handlePromptSelect(prompt: string) {
         :retryInfo="retryInfo"
         :showMetrics="showMetricsPage"
         @toggle-sidebar="toggleSidebar"
-        @toggle-mobile-sidebar="sidebarMobileOpen = !sidebarMobileOpen"
+        @toggle-mobile-sidebar="toggleSidebar"
         @abort="abortCurrentSession"
         @toggle-metrics="handleToggleMetrics"
       />
