@@ -302,10 +302,24 @@ export namespace Server {
           } catch {
             // fallback to original value
           }
+          if (c.req.method === "POST" && ["/session", "/nine1bot/agent/sessions"].includes(c.req.path)) {
+            const body = await c.req.raw.clone().json().catch(() => undefined)
+            if (typeof body?.directory === "string") directory = body.directory
+          }
           return Instance.provide({
             directory,
             init: InstanceBootstrap,
             async fn() {
+              // A session owns its execution directory. Requests from another directory
+              // in the same project must use the same bus, permissions and tool context.
+              const sessionID = c.req.path.match(/^\/(?:session|nine1bot\/agent\/sessions)\/(ses_[^/]+)(?:\/|$)/)?.[1]
+              if (sessionID) {
+                const session = await Session.get(sessionID)
+                const owner = await Instance.normalizeDirectory(session.directory)
+                if (owner !== Instance.directory) {
+                  return Instance.provide({ directory: owner, init: InstanceBootstrap, fn: () => next() })
+                }
+              }
               return next()
             },
           })

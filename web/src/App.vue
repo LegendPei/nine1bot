@@ -882,8 +882,12 @@ async function handleAutomationSelectSession(session: Session) {
 }
 
 async function handleDeleteSession(sessionId: string) {
-  await deleteSession(sessionId)
-  await refreshSidebarRecents()
+  try {
+    await deleteSession(sessionId)
+    await refreshSidebarRecents()
+  } catch {
+    // useSession displays the persistent error and retains the conversation.
+  }
 }
 
 async function handleRenameSession(sessionId: string, title: string) {

@@ -16,6 +16,7 @@ import { Log } from "../util/log"
 import { MessageV2 } from "./message-v2"
 import { Instance } from "../project/instance"
 import { SessionPrompt } from "./prompt"
+import { RunLease } from "./run-lease"
 import { fn } from "@/util/fn"
 import { Command } from "../command"
 import { Snapshot } from "@/snapshot"
@@ -255,7 +256,7 @@ export namespace Session {
       slug: Slug.create(),
       version: Installation.VERSION,
       projectID: Instance.project.id,
-      directory: input.directory,
+      directory: await Instance.normalizeDirectory(input.directory),
       parentID: input.parentID,
       title: input.title ?? createDefaultTitle(!!input.parentID),
       permission: input.permission,
@@ -423,13 +424,14 @@ export namespace Session {
 
   export const remove = fn(Identifier.schema("session"), async (sessionID) => {
     const project = Instance.project
+    const lease = RunLease.reserve(sessionID)
     try {
       const session = await get(sessionID)
       for (const child of await children(sessionID)) {
         await remove(child.id)
       }
       await unshare(sessionID).catch(() => {})
-      await fs.rm(uploadsDirectory(session), { recursive: true, force: true }).catch(() => {})
+      await fs.rm(uploadsDirectory(session), { recursive: true, force: true })
       for (const msg of await Storage.list(["message", sessionID])) {
         for (const part of await Storage.list(["part", msg.at(-1)!])) {
           await Storage.remove(part)
@@ -446,8 +448,8 @@ export namespace Session {
       Bus.publish(Event.Deleted, {
         info: session,
       })
-    } catch (e) {
-      log.error(e)
+    } finally {
+      RunLease.release(sessionID, lease.id)
     }
   })
 

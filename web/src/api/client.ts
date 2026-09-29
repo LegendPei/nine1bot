@@ -1314,7 +1314,8 @@ export const api = {
       method: 'DELETE'
     })
     if (!res.ok) {
-      throw new Error(`Failed to delete session: ${res.status}`)
+      if (res.status === 409) throw new Error('会话正在运行，请先停止任务再删除')
+      throw new Error(`删除会话失败: ${res.status}`)
     }
     return true
   },

@@ -10,39 +10,48 @@ export namespace RunLease {
     controller: AbortController
   }
 
-  const state = Instance.state(
-    () => ({}) as Record<string, Info>,
-    async (current) => Object.values(current).forEach((lease) => lease.controller.abort()),
+  // Session IDs are global; per-directory maps allow aliases/subdirectories to
+  // execute the same persisted session concurrently.
+  const active = new Map<string, { lease: Info; release: () => void }>()
+  const owned = Instance.state(
+    () => new Set<string>(),
+    async (ids) => {
+      for (const id of ids) active.get(id)?.lease.controller.abort()
+    },
   )
 
   export function reserve(sessionID: string): Info {
-    if (state()[sessionID]) throw new Session.BusyError(sessionID)
-    const lease = {
-      id: randomUUID(),
-      sessionID,
-      controller: new AbortController(),
-    }
-    state()[sessionID] = lease
+    if (active.has(sessionID)) throw new Session.BusyError(sessionID)
+    const lease = { id: randomUUID(), sessionID, controller: new AbortController() }
+    const ids = owned()
+    ids.add(sessionID)
+    active.set(sessionID, {
+      lease,
+      release: Instance.bind(() => {
+        ids.delete(sessionID)
+        SessionStatus.set(sessionID, { type: "idle" })
+      }),
+    })
     SessionStatus.set(sessionID, { type: "busy" })
     return lease
   }
 
   export function current(sessionID: string) {
-    return state()[sessionID]
+    return active.get(sessionID)?.lease
   }
 
   export function cancel(sessionID: string): boolean {
-    const lease = state()[sessionID]
+    const lease = current(sessionID)
     if (!lease) return false
     lease.controller.abort()
     return true
   }
 
   export function release(sessionID: string, leaseID: string): boolean {
-    const lease = state()[sessionID]
-    if (!lease || lease.id !== leaseID) return false
-    delete state()[sessionID]
-    SessionStatus.set(sessionID, { type: "idle" })
+    const entry = active.get(sessionID)
+    if (!entry || entry.lease.id !== leaseID) return false
+    active.delete(sessionID)
+    entry.release()
     return true
   }
 }

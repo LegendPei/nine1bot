@@ -311,6 +311,7 @@ export function useSession() {
         }
       } catch (error) {
         console.error('Failed to change directory:', error)
+        pushSessionNotification({ sessionId: currentSession.value.id, message: error instanceof Error ? error.message : '修改目录失败', type: 'error' })
         throw error
       }
     } else if (messages.value.length > 0) {
@@ -1245,6 +1246,7 @@ export function useSession() {
       }
     } catch (error) {
       console.error('Failed to delete session:', error)
+      pushSessionNotification({ sessionId, message: error instanceof Error ? error.message : '删除会话失败', type: 'error' })
       throw error
     }
   }

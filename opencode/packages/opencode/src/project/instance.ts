@@ -1,3 +1,5 @@
+import fs from "node:fs/promises"
+import path from "node:path"
 import { Log } from "@/util/log"
 import { Context } from "../util/context"
 import { Project } from "./project"
@@ -15,14 +17,26 @@ const context = Context.create<Context>("instance")
 const cache = new Map<string, Promise<Context>>()
 
 export const Instance = {
+  async normalizeDirectory(directory: string) {
+    const absolute = path.resolve(directory)
+    return fs.realpath(absolute).catch((error) => {
+      if (error.code === "ENOENT") return absolute
+      throw error
+    })
+  },
+  bind<R>(fn: () => R): () => R {
+    const current = context.use()
+    return () => context.provide(current, fn)
+  },
   async provide<R>(input: { directory: string; init?: () => Promise<any>; fn: () => R }): Promise<R> {
-    let existing = cache.get(input.directory)
+    const directory = await Instance.normalizeDirectory(input.directory)
+    let existing = cache.get(directory)
     if (!existing) {
       Log.Default.info("creating instance", { directory: input.directory })
       existing = iife(async () => {
-        const { project, sandbox } = await Project.fromDirectory(input.directory)
+        const { project, sandbox } = await Project.fromDirectory(directory)
         const ctx = {
-          directory: input.directory,
+          directory,
           worktree: sandbox,
           project,
         }
@@ -31,7 +45,7 @@ export const Instance = {
         })
         return ctx
       })
-      cache.set(input.directory, existing)
+      cache.set(directory, existing)
     }
     const ctx = await existing
     return context.provide(ctx, async () => {
