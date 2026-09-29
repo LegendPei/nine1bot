@@ -68,6 +68,15 @@ export namespace JsonFile {
 
   export async function write(filename: string, text: string, mode = 0o600) {
     await fs.mkdir(path.dirname(filename), { recursive: true })
+    // Atomic replacement would otherwise bypass the target file's read-only mode.
+    // Honor an explicit chmod even when the containing directory is writable.
+    const current = await fs.stat(filename).catch((error) => {
+      if (error.code === "ENOENT") return undefined
+      throw error
+    })
+    if (current && (current.mode & 0o222) === 0) {
+      throw Object.assign(new Error(`Configuration file is read-only: ${filename}`), { code: "EACCES" })
+    }
     const temporary = `${filename}.${randomUUID()}.tmp`
     try {
       await fs.writeFile(temporary, text, { mode, flag: "wx" })
