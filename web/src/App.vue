@@ -1,31 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, defineAsyncComponent } from 'vue'
 import { useSession } from './composables/useSession'
+import { useSidebarLayout } from './composables/useSidebarLayout'
 import { useFiles } from './composables/useFiles'
 import { useSettings } from './composables/useSettings'
-import { useAppMode } from './composables/useAppMode'
 import { useClientSurface } from './composables/useClientSurface'
-import { useSessionMode } from './composables/useSessionMode'
 import { useProjects } from './composables/useProjects'
 import { useGlobalRecentSessions } from './composables/useGlobalRecentSessions'
 import { collectActivePageContext, type RequestPagePayload } from './api/page-context'
-import { api, type EventStreamSubscription, type GlobalSSEEventEnvelope, type Session } from './api/client'
+import { api, setApiDirectory, type EventStreamSubscription, type GlobalSSEEventEnvelope, type Session } from './api/client'
 import Header from './components/Header.vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import InputBox from './components/InputBox.vue'
 import PromptCategories from './components/PromptCategories.vue'
-import SearchOverlay from './components/SearchOverlay.vue'
-import ProjectsPage from './components/ProjectsPage.vue'
-import AutomationsPage from './components/AutomationsPage.vue'
-import SettingsPanel from './components/SettingsPanel.vue'
-import BrowserExtensionSettingsPanel from './components/BrowserExtensionSettingsPanel.vue'
 import SessionNotifications from './components/SessionNotifications.vue'
 import AccessLogin from './components/AccessLogin.vue'
-import FileViewer from './components/FileViewer.vue'
 import TodoList from './components/TodoList.vue'
 import PlanPanel from './components/PlanPanel.vue'
-import McpProjectPanel from './components/McpProjectPanel.vue'
 import RightPanel from './components/RightPanel.vue'
 import { useAgentTerminal } from './composables/useAgentTerminal'
 import { useFilePreview } from './composables/useFilePreview'
@@ -38,10 +30,25 @@ import { parseSettingsDeepLink } from './utils/settings-deeplink'
 import { MAX_PARALLEL_AGENTS } from './composables/useParallelSessions'
 
 const MetricsDashboard = defineAsyncComponent(() => import('./components/MetricsDashboard.vue'))
+const SearchOverlay = defineAsyncComponent(() => import('./components/SearchOverlay.vue'))
+const ProjectsPage = defineAsyncComponent(() => import('./components/ProjectsPage.vue'))
+const AutomationsPage = defineAsyncComponent(() => import('./components/AutomationsPage.vue'))
+const SettingsPanel = defineAsyncComponent(() => import('./components/SettingsPanel.vue'))
+const BrowserExtensionSettingsPanel = defineAsyncComponent(() => import('./components/BrowserExtensionSettingsPanel.vue'))
+const FileViewer = defineAsyncComponent(() => import('./components/FileViewer.vue'))
+const McpProjectPanel = defineAsyncComponent(() => import('./components/McpProjectPanel.vue'))
 
 const {
   sessions,
+  sessionsLoading,
+  historyError,
+  connectionState,
+  retryHistory,
+  composerKey,
+  clearDrafts,
+  sessionsLoadError,
   currentSession,
+  applySessionTitle,
   messages,
   isLoading,
   isStreaming,
@@ -52,6 +59,7 @@ const {
   sessionError,
   retryInfo,
   loadSessions,
+  invalidateSessionsLoad,
   createSession,
   ensureSession,
   selectSession,
@@ -115,6 +123,8 @@ const {
 
 const {
   showSettings,
+  settingsError,
+  savingModel,
   openSettings,
   closeSettings,
   activeTab: settingsTab,
@@ -161,15 +171,10 @@ watch([insecureTransport, accessAuthenticated], ([insecure, authenticated]) => {
 // 主题在 App 根初始化一次：启动即应用 data-theme，不随设置面板卸载失效
 useTheme()
 
-// App mode (chat / agent)
-const { mode: appMode, setMode: setAppMode } = useAppMode()
-
-// Session ↔ mode mapping
-const { setMode: setSessionMode } = useSessionMode()
-
 // Projects
 const {
   projects,
+  isLoading: projectsLoading,
   currentProject,
   loadProjects,
   selectProject,
@@ -183,10 +188,14 @@ const {
 
 const {
   recentSessions: globalRecentSessions,
+  isLoading: globalRecentSessionsLoading,
+  loadError: globalRecentSessionsLoadError,
   loadGlobalRecentSessions,
   refreshGlobalRecentSessions,
   startGlobalRecentPolling,
   stopGlobalRecentPolling,
+  resetGlobalRecentSessions,
+  applyRecentSessionTitle,
 } = useGlobalRecentSessions()
 
 // 文件查看器状态
@@ -211,9 +220,7 @@ const showMetricsPage = ref(false)
 // Automations page
 const showAutomationsPage = ref(false)
 
-const sidebarCollapsed = ref(false)
-// 移动端（≤768px）侧边栏抽屉开关
-const sidebarMobileOpen = ref(false)
+const { sidebarCollapsed, sidebarMobileOpen, toggleSidebar } = useSidebarLayout()
 const projectContextRevision = ref(0)
 const extensionPageContext = ref<RequestPagePayload | undefined>()
 const extensionPageLoading = ref(false)
@@ -227,10 +234,6 @@ const extensionRelayStatus = ref({
 })
 
 const sidebarSessions = computed(() => {
-  if (appMode.value !== 'agent') {
-    return sessions.value
-  }
-
   const merged = new Map<string, Session>()
   for (const session of globalRecentSessions.value) {
     merged.set(session.id, session)
@@ -246,12 +249,14 @@ const sidebarSessions = computed(() => {
   return Array.from(merged.values()).sort((a, b) => b.time.updated - a.time.updated)
 })
 
-const searchRecentSessions = computed(() => {
-  if (appMode.value === 'agent') {
-    return sidebarSessions.value.slice(0, 300)
-  }
-  return sessions.value.slice(0, 300)
-})
+const sidebarSessionsLoading = computed(() =>
+  sessionsLoading.value || projectsLoading.value || globalRecentSessionsLoading.value
+)
+const sidebarSessionsError = computed(() =>
+  sessionsLoadError.value || globalRecentSessionsLoadError.value
+)
+
+const searchRecentSessions = computed(() => sidebarSessions.value.slice(0, 300))
 
 // Empty state detection for centered layout
 const isEmptyState = computed(() =>
@@ -302,10 +307,65 @@ let unregisterTerminalHandler: (() => void) | null = null
 let unregisterPreviewHandler: (() => void) | null = null
 let globalEventSource: EventStreamSubscription | null = null
 let projectsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let sessionsRetryTimer: ReturnType<typeof setTimeout> | null = null
+let sessionsRetryDelayMs = 1500
+let globalRecentsRetryTimer: ReturnType<typeof setTimeout> | null = null
+let globalRecentsRetryDelayMs = 1500
 let authenticatedRuntimeStarted = false
+let authenticatedRuntimeGeneration = 0
 
-async function refreshGlobalRecentsIfAgent() {
-  if (appMode.value !== 'agent') return
+function scheduleSessionsRetry() {
+  if (!authenticatedRuntimeStarted || sessionsRetryTimer) return
+  sessionsRetryTimer = setTimeout(async () => {
+    sessionsRetryTimer = null
+    if (!authenticatedRuntimeStarted || !sessionsLoadError.value) return
+    if (sessionsLoading.value) {
+      scheduleSessionsRetry()
+      return
+    }
+    const loaded = await loadSessions()
+    if (loaded) {
+      sessionsRetryDelayMs = 1500
+    } else if (sessionsLoadError.value) {
+      sessionsRetryDelayMs = Math.min(sessionsRetryDelayMs * 2, 30000)
+      scheduleSessionsRetry()
+    }
+  }, sessionsRetryDelayMs)
+}
+
+watch(sessionsLoadError, (failed) => {
+  if (failed) scheduleSessionsRetry()
+  else sessionsRetryDelayMs = 1500
+})
+
+function scheduleGlobalRecentsRetry() {
+  if (!authenticatedRuntimeStarted || globalRecentsRetryTimer) return
+  globalRecentsRetryTimer = setTimeout(async () => {
+    globalRecentsRetryTimer = null
+    if (!authenticatedRuntimeStarted || !globalRecentSessionsLoadError.value) return
+    if (globalRecentSessionsLoading.value) {
+      scheduleGlobalRecentsRetry()
+      return
+    }
+    await refreshGlobalRecentSessions().catch((error) => {
+      console.error('Failed to retry global recent sessions:', error)
+    })
+    if (globalRecentSessionsLoadError.value) {
+      globalRecentsRetryDelayMs = Math.min(globalRecentsRetryDelayMs * 2, 30000)
+      scheduleGlobalRecentsRetry()
+    } else {
+      globalRecentsRetryDelayMs = 1500
+    }
+  }, globalRecentsRetryDelayMs)
+}
+
+watch(globalRecentSessionsLoadError, (failed) => {
+  if (failed) scheduleGlobalRecentsRetry()
+  else globalRecentsRetryDelayMs = 1500
+})
+
+async function refreshSidebarRecents() {
+  if (isBrowserExtension.value) return
   await refreshGlobalRecentSessions().catch((error) => {
     console.error('Failed to refresh global recent sessions:', error)
   })
@@ -340,6 +400,11 @@ function subscribeGlobalEvents() {
 
   globalEventSource = api.subscribeGlobalEvents((event: GlobalSSEEventEnvelope) => {
     const payload = event.payload
+    if (payload?.type === 'session.updated') {
+      applySessionTitle(payload.properties?.info)
+      applyRecentSessionTitle(payload.properties?.info)
+      return
+    }
     if (payload?.type === 'project.context.updated') {
       const projectID = payload.properties?.projectID
       if (typeof projectID === 'string' && projectID.length > 0) {
@@ -438,7 +503,9 @@ function openCurrentExtensionSessionInMainWeb() {
 function stopAuthenticatedRuntime() {
   if (!authenticatedRuntimeStarted) return
   authenticatedRuntimeStarted = false
+  authenticatedRuntimeGeneration++
   unsubscribe()
+  clearDrafts()
   if (globalEventSource) {
     globalEventSource.close()
     globalEventSource = null
@@ -447,8 +514,18 @@ function stopAuthenticatedRuntime() {
     clearTimeout(projectsRefreshTimer)
     projectsRefreshTimer = null
   }
+  if (sessionsRetryTimer) {
+    clearTimeout(sessionsRetryTimer)
+    sessionsRetryTimer = null
+  }
+  if (globalRecentsRetryTimer) {
+    clearTimeout(globalRecentsRetryTimer)
+    globalRecentsRetryTimer = null
+  }
   document.removeEventListener('keydown', handleGlobalKeydown)
   stopGlobalRecentPolling()
+  resetGlobalRecentSessions()
+  invalidateSessionsLoad()
   if (stopSessionWatch) {
     stopSessionWatch()
     stopSessionWatch = null
@@ -463,6 +540,9 @@ function stopAuthenticatedRuntime() {
   }
   sessions.value = []
   currentSession.value = null
+  currentDirectory.value = ''
+  setApiDirectory('')
+  setFilesDirectory(undefined)
   messages.value = []
   files.value = []
   clearFileContent()
@@ -472,6 +552,8 @@ function stopAuthenticatedRuntime() {
 async function startAuthenticatedRuntime() {
   if (authenticatedRuntimeStarted) return
   authenticatedRuntimeStarted = true
+  const generation = ++authenticatedRuntimeGeneration
+  document.addEventListener('keydown', handleGlobalKeydown)
 
   // 先注册事件处理器，确保在 SSE 连接建立时能接收到 server.connected 事件
   unregisterTerminalHandler = registerEventHandler(handleTerminalEvent)
@@ -489,25 +571,31 @@ async function startAuthenticatedRuntime() {
     }
   }, { immediate: true })
 
-  // Sync parallel session status from backend (for page refresh recovery)
-  await syncSessionStatus()
-
-  // 不传 directory 参数以加载所有会话
-  await loadSessions()
+  // These requests are independent. Start history first so a slow status,
+  // project or provider request cannot keep the sidebar empty.
+  const initialSessions = loadSessions()
+  void syncSessionStatus()
   if (!isBrowserExtension.value) {
-    await loadFiles('.')
-    await loadProjects()
-  }
-  if (!isBrowserExtension.value && appMode.value === 'agent') {
-    await loadGlobalRecentSessions().catch((error) => {
-      console.error('Failed to load global recent sessions:', error)
+    void loadFiles('.')
+    const projectsLoad = loadProjects().then(() => true).catch((error) => {
+      console.error('Failed to load projects:', error)
+      return false
     })
     startGlobalRecentPolling()
+    void projectsLoad.then((loaded) => {
+      if (generation !== authenticatedRuntimeGeneration) return
+      if (globalRecentSessionsLoading.value) return
+      return loadGlobalRecentSessions(loaded ? projects.value : undefined)
+    }).catch((error) => {
+      console.error('Failed to load global recent sessions:', error)
+    })
   }
 
-  // 加载模型 providers 和配置（确保模型选择器立即可用）
-  await loadProviders()
-  await loadConfig()
+  // Model configuration can load while the history and current session settle.
+  void loadProviders().then(loadConfig)
+
+  await initialSessions
+  if (generation !== authenticatedRuntimeGeneration) return
 
   const requestedSessionId = initialSessionIdFromUrl()
 
@@ -523,13 +611,13 @@ async function startAuthenticatedRuntime() {
     createSession('.')
   }
 
+  if (generation !== authenticatedRuntimeGeneration) return
+
   // 加载待处理的问题和权限请求
   if (!isBrowserExtension.value || currentSession.value) {
     await loadPendingRequests()
   }
 
-  // Cmd+K / Ctrl+K 搜索（仅主界面）与 Escape 关闭浮层
-  document.addEventListener('keydown', handleGlobalKeydown)
 }
 
 async function handleAccessLogout() {
@@ -578,32 +666,16 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     if (showPlanPanel.value) showPlanPanel.value = false
     else if (showTodoList.value) showTodoList.value = false
     else if (showMcpPanel.value) showMcpPanel.value = false
+    else if (sidebarMobileOpen.value) sidebarMobileOpen.value = false
   }
 }
 
-// Tag new sessions with current app mode
-watch(currentSession, (newSession, oldSession) => {
-  if (newSession && !oldSession) {
-    // A new session was just created (transitioned from draft/null to real session)
-    setSessionMode(newSession.id, appMode.value)
-  }
-})
-
 // 监听当前目录变化，更新文件树工作目录
-watch(currentDirectory, async (newDir) => {
+watch(currentDirectory, (newDir) => {
+  if (!authenticatedRuntimeStarted) return
   setFilesDirectory(newDir || undefined)
-  await loadFiles('.')
-})
-
-watch(appMode, (newMode) => {
-  if (newMode === 'agent') {
-    void refreshGlobalRecentSessions().catch((error) => {
-      console.error('Failed to refresh global recent sessions:', error)
-    })
-    startGlobalRecentPolling()
-    return
-  }
-  stopGlobalRecentPolling()
+  void loadFiles('.')
+  void loadProviders().then(loadConfig)
 })
 
 async function handleSend(content: string, files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode?: boolean, onResult?: (success: boolean) => void) {
@@ -629,8 +701,12 @@ async function handleSend(content: string, files?: Array<{ type: 'file'; mime: s
     finalContent = `[规划模式] 请先制定详细的执行计划，列出所有待办事项，等待我确认后再执行。\n\n${content}`
   }
 
-  const success = await sendMessage(finalContent, model, files)
-  onResult?.(success)
+  try {
+    onResult?.(await sendMessage(finalContent, model, files))
+  } catch (error) {
+    console.error('Failed to send message:', error)
+    onResult?.(false)
+  }
 }
 
 async function ensureCurrentSessionId() {
@@ -644,20 +720,6 @@ function handleNewSession() {
   showMetricsPage.value = false
   showAutomationsPage.value = false
   void refreshExtensionPageContext()
-  createSession(currentDirectory.value || '.')
-}
-
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-}
-
-// Mode switch handler — auto navigate to new chat
-function handleSwitchMode(newMode: 'chat' | 'agent') {
-  sidebarMobileOpen.value = false
-  setAppMode(newMode)
-  showProjectsPage.value = false
-  showMetricsPage.value = false
-  showAutomationsPage.value = false
   createSession(currentDirectory.value || '.')
 }
 
@@ -682,7 +744,7 @@ async function handleSelectProject(projectId: string) {
     createSession(directory)
   }
   await loadSessions()
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 function handleOpenProjects() {
@@ -758,7 +820,7 @@ async function handleCreateProject(name: string, instructions: string, directory
   showProjectsPage.value = false
   showAutomationsPage.value = false
   await loadSessions()
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 async function handleUpdateProject(projectId: string, updates: { name?: string; instructions?: string }, done?: () => void) {
@@ -783,6 +845,7 @@ function handleSearchSelect(sessionId: string) {
 }
 
 function handleProjectNewSession(projectId: string) {
+  sidebarMobileOpen.value = false
   const project = getProject(projectId)
   if (!project) return
   showProjectsPage.value = false
@@ -793,7 +856,7 @@ function handleProjectNewSession(projectId: string) {
 
 async function handleDeleteProject(projectId: string) {
   await forgetProject(projectId)
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 async function handleProjectSelectSession(session: Session) {
@@ -819,13 +882,17 @@ async function handleAutomationSelectSession(session: Session) {
 }
 
 async function handleDeleteSession(sessionId: string) {
-  await deleteSession(sessionId)
-  await refreshGlobalRecentsIfAgent()
+  try {
+    await deleteSession(sessionId)
+    await refreshSidebarRecents()
+  } catch {
+    // useSession displays the persistent error and retains the conversation.
+  }
 }
 
 async function handleRenameSession(sessionId: string, title: string) {
   await renameSession(sessionId, title)
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 // 处理消息部分删除
@@ -957,6 +1024,8 @@ function handlePromptSelect(prompt: string) {
       </div>
 
       <ChatPanel
+              :loadError="historyError"
+              @retry="retryHistory"
         :messages="messages"
         :isLoading="isLoading"
         :isStreaming="isStreaming"
@@ -977,6 +1046,9 @@ function handlePromptSelect(prompt: string) {
         @change-directory="changeDirectory"
       />
       <InputBox
+              :draftKey="composerKey"
+              :modelError="settingsError"
+              :savingModel="savingModel"
         :disabled="isLoading"
         :isStreaming="isStreaming"
         :centered="messages.length === 0"
@@ -989,6 +1061,7 @@ function handlePromptSelect(prompt: string) {
         @abort="abortCurrentSession"
         @select-model="handleSelectModel"
         @open-mcp="handleOpenMcp"
+              @open-model-settings="settingsTab = 'auth'; openSettings()"
         @toggle-mcp-panel="toggleMcpPanel"
         @open-skills="handleOpenSkills"
         @compress-session="handleSummarize"
@@ -1038,11 +1111,12 @@ function handlePromptSelect(prompt: string) {
       :collapsed="sidebarCollapsed"
       :mobileOpen="sidebarMobileOpen"
       :sessions="sidebarSessions"
+      :sessionsLoading="sidebarSessionsLoading"
+      :sessionsLoadError="sidebarSessionsError"
       :currentSession="currentSession"
       :isDraftSession="isDraftSession"
       :files="files"
       :filesLoading="filesLoading"
-      :mode="appMode"
       :projects="projects"
       :currentProjectId="currentProject?.id || null"
       :currentDirectory="currentDirectory"
@@ -1054,6 +1128,7 @@ function handlePromptSelect(prompt: string) {
       @toggle-collapse="toggleSidebar"
       @select-session="handleSidebarSelectSession"
       @new-session="handleNewSession"
+      @project-new-session="handleProjectNewSession"
       @toggle-directory="toggleDirectory"
       @delete-session="handleDeleteSession"
       @rename-session="handleRenameSession"
@@ -1062,7 +1137,6 @@ function handlePromptSelect(prompt: string) {
       @open-settings="openSettings"
       @open-search="showSearch = true"
       @change-directory="changeDirectory"
-      @switch-mode="handleSwitchMode"
       @select-project="handleSelectProject"
       @open-projects="handleOpenProjects"
       @open-metrics="handleOpenMetrics"
@@ -1081,13 +1155,17 @@ function handlePromptSelect(prompt: string) {
       <!-- Header -->
       <Header
         :session="currentSession"
+        :directory="currentDirectory"
+        :projectName="projects.find(project => project.id === currentSession?.projectID)?.name"
+        :pendingCount="pendingQuestions.length + pendingPermissions.length"
+        :connectionState="connectionState"
         :isStreaming="isStreaming"
         :sidebarCollapsed="sidebarCollapsed"
         :isSummarizing="isSummarizing"
         :retryInfo="retryInfo"
         :showMetrics="showMetricsPage"
         @toggle-sidebar="toggleSidebar"
-        @toggle-mobile-sidebar="sidebarMobileOpen = !sidebarMobileOpen"
+        @toggle-mobile-sidebar="toggleSidebar"
         @abort="abortCurrentSession"
         @toggle-metrics="handleToggleMetrics"
       />
@@ -1128,6 +1206,8 @@ function handlePromptSelect(prompt: string) {
         <template v-else>
           <div class="conversation-content" :class="{ 'empty-center-wrapper': isEmptyState }">
             <ChatPanel
+              :loadError="historyError"
+              @retry="retryHistory"
               :messages="messages"
               :isLoading="isLoading"
               :isStreaming="isStreaming"
@@ -1137,7 +1217,6 @@ function handlePromptSelect(prompt: string) {
               :sessionError="sessionError"
               :currentDirectory="currentDirectory"
               :canChangeDirectory="canChangeDirectory()"
-              :mode="appMode"
               @question-answered="(id, answers) => answerQuestion(id, answers)"
               @question-rejected="rejectQuestion"
               @permission-responded="respondPermission"
@@ -1148,6 +1227,9 @@ function handlePromptSelect(prompt: string) {
               @change-directory="changeDirectory"
             />
             <InputBox
+              :draftKey="composerKey"
+              :modelError="settingsError"
+              :savingModel="savingModel"
               :disabled="isLoading"
               :isStreaming="isStreaming"
               :centered="isEmptyState"
@@ -1155,11 +1237,11 @@ function handlePromptSelect(prompt: string) {
               :providers="providers"
               :currentProvider="currentProvider"
               :currentModel="currentModel"
-              :mode="appMode"
               @send="handleSend"
               @abort="abortCurrentSession"
               @select-model="handleSelectModel"
               @open-mcp="handleOpenMcp"
+              @open-model-settings="settingsTab = 'auth'; openSettings()"
               @toggle-mcp-panel="toggleMcpPanel"
               @open-skills="handleOpenSkills"
               @compress-session="handleSummarize"

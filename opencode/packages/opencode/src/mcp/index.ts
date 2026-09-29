@@ -843,7 +843,7 @@ export namespace MCP {
       )
 
       // 启动配置文件监听（用于热更新）
-      startMcpConfigWatcher()
+      startMcpConfigWatcher(config)
       startMcpHealthMonitor()
 
       return {
@@ -921,6 +921,7 @@ export namespace MCP {
   export async function add(name: string, mcp: Config.Mcp) {
     const s = await state()
     const result = await create(name, mcp)
+    if (!result?.mcpClient && s.clients[name]) await disconnect(name)
     if (!result) {
       const status = {
         status: "failed" as const,

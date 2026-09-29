@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { Send, Square, Paperclip, X, FileText, ClipboardList, Plus, ChevronDown, Check, Server, Zap, Minimize2, ListTodo } from 'lucide-vue-next'
-import { useFileUpload } from '../composables/useFileUpload'
+import { getComposerDraft, beginSend, finishSend, restoreAttempt, type ComposerDraft, type SendAttempt } from '../composables/composer-drafts'
 import type { Provider } from '../api/client'
 
 const props = defineProps<{
   disabled: boolean
+  draftKey?: string
+  modelError?: string
+  savingModel?: boolean
   isStreaming: boolean
   centered?: boolean
   ensureSession?: () => Promise<string | null>
   providers?: Provider[]
   currentProvider?: string
   currentModel?: string
-  mode?: 'chat' | 'agent'
 }>()
 
 const emit = defineEmits<{
@@ -20,6 +22,7 @@ const emit = defineEmits<{
   abort: []
   'select-model': [providerId: string, modelId: string]
   'open-mcp': []
+  'open-model-settings': []
   'toggle-mcp-panel': []
   'open-skills': []
   'compress-session': []
@@ -28,9 +31,9 @@ const emit = defineEmits<{
 }>()
 
 // Plan Mode 状态
-const isPlanMode = ref(false)
-
-const input = ref('')
+const draft = computed(() => getComposerDraft(props.draftKey || 'default', async () => await props.ensureSession?.() ?? null))
+const isPlanMode = computed({ get: () => draft.value.planMode, set: value => { draft.value.planMode = value } })
+const input = computed({ get: () => draft.value.text, set: value => { draft.value.text = value } })
 const textareaRef = ref<HTMLTextAreaElement>()
 const fileInputRef = ref<HTMLInputElement>()
 const isDragging = ref(false)
@@ -43,16 +46,19 @@ const plusMenuRef = ref<HTMLElement>()
 const showModelDropdown = ref(false)
 const modelDropdownRef = ref<HTMLElement>()
 
-const { attachments, uploadError, addFiles, removeFile, clearAll, clearError, toMessageParts } = useFileUpload({
-  ensureSessionId: async () => await props.ensureSession?.() ?? null
-})
+const attachments = computed(() => draft.value.uploads.attachments.value)
+const uploadError = computed(() => draft.value.uploads.uploadError.value)
+const addFiles = (files: FileList | File[]) => draft.value.uploads.addFiles(files)
+const removeFile = (id: string) => draft.value.uploads.removeFile(id)
+const clearError = () => draft.value.uploads.clearError()
+const isSending = computed(() => draft.value.attempts.some(attempt => attempt.status === 'sending'))
 
 // Can send if there is content and every attachment is ready
 const canSend = computed(() => {
   const hasText = input.value.trim().length > 0
   const hasAttachments = attachments.value.length > 0
   const allAttachmentsReady = attachments.value.every(a => a.status === 'ready')
-  return (hasText || hasAttachments) && allAttachmentsReady && !props.disabled
+  return (hasText || hasAttachments) && allAttachmentsReady && !props.disabled && !props.isStreaming && !isSending.value
 })
 
 function getCurrentModelName(): string {
@@ -79,25 +85,14 @@ function selectModel(providerId: string, modelId: string) {
 
 function handleSend() {
   if (!canSend.value) return
+  const owner = draft.value
+  performSend(owner, beginSend(owner))
+}
 
-  const content = input.value.trim()
-  const fileParts = toMessageParts()
-  const planMode = isPlanMode.value
-
-  input.value = ''
-  clearAll()
-  isPlanMode.value = false
-
-  if (textareaRef.value) {
-    textareaRef.value.style.height = 'auto'
-  }
-
-  // 发送失败时由父级回调恢复草稿文本
-  emit('send', content, fileParts, planMode, (success: boolean) => {
-    if (!success) {
-      input.value = content
-    }
-  })
+function performSend(owner: ComposerDraft, attempt: SendAttempt) {
+  attempt.status = 'sending'
+  const files = attempt.attachments.filter(file => file.url).map(file => ({ type: 'file' as const, mime: file.mime, filename: file.filename, url: file.url! }))
+  emit('send', attempt.text, files, attempt.planMode, success => finishSend(owner, attempt, success))
 }
 
 function togglePlanMode() {
@@ -109,11 +104,7 @@ function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing || e.keyCode === 229) return
     e.preventDefault()
-    if (props.isStreaming) {
-      emit('abort')
-    } else {
-      handleSend()
-    }
+    if (!props.isStreaming) handleSend()
   }
 }
 
@@ -124,7 +115,12 @@ function adjustHeight() {
   }
 }
 
-watch(input, adjustHeight)
+watch(input, () => nextTick(adjustHeight), { flush: 'post' })
+watch(() => props.draftKey, () => {
+  showPlusMenu.value = false
+  showModelDropdown.value = false
+  void nextTick(adjustHeight)
+})
 
 // File upload handlers
 function handleFileSelect() {
@@ -220,6 +216,16 @@ function formatSize(bytes: number): string {
     @dragover="handleDragOver"
     @dragleave="handleDragLeave"
   >
+    <div v-for="attempt in draft.attempts" :key="attempt.id" class="send-attempt" :class="attempt.status" role="status">
+      <div class="attempt-text">{{ attempt.text || attempt.attachments.map(file => file.filename).join('、') }}</div>
+      <div class="attempt-actions">
+        <span>{{ attempt.status === 'sending' ? '正在发送…' : '发送未完成，内容已保留' }}</span>
+        <template v-if="attempt.status === 'failed'">
+          <button class="btn btn-sm btn-ghost" :disabled="disabled || isStreaming || isSending" @click="performSend(draft, attempt)">重试</button>
+          <button v-if="!input && !attachments.length" class="btn btn-sm btn-ghost" @click="restoreAttempt(draft, attempt)">编辑</button>
+        </template>
+      </div>
+    </div>
     <!-- Drag overlay -->
     <div v-if="isDragging" class="drag-overlay">
       <div class="drag-content">
@@ -258,6 +264,7 @@ function formatSize(bytes: number): string {
     <div v-if="uploadError" class="upload-error">
       {{ uploadError }}
     </div>
+    <div v-if="modelError" class="upload-error" role="alert">{{ modelError }}</div>
 
     <!-- Plan Mode 指示器 -->
     <div v-if="isPlanMode" class="plan-mode-indicator">
@@ -285,7 +292,7 @@ function formatSize(bytes: number): string {
           ref="textareaRef"
           v-model="input"
           :disabled="disabled && !isStreaming"
-          :placeholder="isStreaming ? '按 Enter 停止响应...' : '有什么可以帮你的？'"
+          :placeholder="isStreaming ? '可以继续输入，回复结束后发送…' : '有什么可以帮你的？'"
           rows="1"
           @keydown="handleKeydown"
           @paste="handlePaste"
@@ -326,16 +333,14 @@ function formatSize(bytes: number): string {
                 <Minimize2 :size="16" />
                 <span>压缩会话</span>
               </button>
-              <template v-if="mode === 'agent'">
-                <div class="plus-menu-divider"></div>
-                <button class="plus-menu-item" :class="{ active: isPlanMode }" @click="togglePlanMode">
-                  <ClipboardList :size="16" />
-                  <span>Plan 模式</span>
-                  <span v-if="isPlanMode" class="plus-menu-check">
-                    <Check :size="14" />
-                  </span>
-                </button>
-              </template>
+              <div class="plus-menu-divider"></div>
+              <button class="plus-menu-item" :class="{ active: isPlanMode }" @click="togglePlanMode">
+                <ClipboardList :size="16" />
+                <span>Plan 模式</span>
+                <span v-if="isPlanMode" class="plus-menu-check">
+                  <Check :size="14" />
+                </span>
+              </button>
             </div>
           </div>
 
@@ -361,12 +366,12 @@ function formatSize(bytes: number): string {
         <!-- Right: Model selector + Send -->
         <div class="toolbar-right">
           <!-- Model Selector -->
-          <div class="model-selector-inline" ref="modelDropdownRef" v-if="providers && providers.length > 0">
+          <div class="model-selector-inline" ref="modelDropdownRef" v-if="providers?.some(provider => provider.authenticated)">
             <button
               class="model-trigger-inline"
               @click.stop="showModelDropdown = !showModelDropdown"
             >
-              <span class="model-name-inline">{{ getCurrentModelName() }}</span>
+              <span class="model-name-inline">{{ savingModel ? '保存模型中…' : getCurrentModelName() }}</span>
               <ChevronDown :size="12" class="model-chevron" :class="{ open: showModelDropdown }" />
             </button>
             <!-- Model Dropdown -->
@@ -389,11 +394,11 @@ function formatSize(bytes: number): string {
           <!-- 无可用 provider 时保留一个禁用入口，避免模型选择能力静默消失 -->
           <div v-else class="model-selector-inline">
             <button
-              class="model-trigger-inline model-trigger-disabled"
-              disabled
-              title="尚未配置模型提供商，请在设置中添加"
+              class="model-trigger-inline"
+              @click="emit('open-model-settings')"
+              title="连接模型供应商"
             >
-              <span class="model-name-inline">未配置模型</span>
+              <span class="model-name-inline">连接模型</span>
             </button>
           </div>
 
@@ -421,6 +426,11 @@ function formatSize(bytes: number): string {
 </template>
 
 <style scoped>
+.send-attempt { border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 10px; background: var(--bg-elevated); }
+.send-attempt.failed { border-color: var(--error); }
+.attempt-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow: auto; font-size: var(--text-13); }
+.attempt-actions { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: var(--text-sm); margin-top: 8px; }
+
 .input-container {
   width: 100%;
   max-width: var(--input-max-width);

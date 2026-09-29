@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed, onUnmounted } from 'vue'
-import { FolderOpen } from 'lucide-vue-next'
+import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue'
+import { readChatViewport, saveChatViewport } from '../composables/chat-viewport'
+import { isAtBottom, isTypingTarget, nextFollowing, UP_KEYS } from '../composables/scroll-follow'
+import { ArrowDown, FolderOpen } from 'lucide-vue-next'
 import type { Message, QuestionRequest, PermissionRequest } from '../api/client'
 import MessageItem from './MessageItem.vue'
 import AgentMessageGroup from './AgentMessageGroup.vue'
@@ -11,6 +13,7 @@ import DirectoryBrowser from './DirectoryBrowser.vue'
 const props = defineProps<{
   messages: Message[]
   isLoading: boolean
+  loadError?: string | null
   isStreaming: boolean
   sessionId?: string
   pendingQuestions?: QuestionRequest[]
@@ -18,10 +21,10 @@ const props = defineProps<{
   sessionError?: { message: string; dismissable?: boolean } | null
   currentDirectory?: string
   canChangeDirectory?: boolean
-  mode?: 'chat' | 'agent'
 }>()
 
 const emit = defineEmits<{
+  (e: 'retry'): void
   (e: 'questionAnswered', requestId: string, answers: string[][]): void
   (e: 'questionRejected', requestId: string): void
   (e: 'permissionResponded', requestId: string, response: 'once' | 'always' | 'reject'): void
@@ -100,65 +103,145 @@ function getDirectoryName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+const messageContent = ref<HTMLDivElement>()
+const following = ref(true)
+const visibleCount = ref(40)
+const visibleGroups = computed(() => displayGroups.value.slice(-visibleCount.value))
+const hiddenCount = computed(() => Math.max(0, displayGroups.value.length - visibleCount.value))
+const interactionCount = computed(() => (props.pendingQuestions?.length || 0) + (props.pendingPermissions?.length || 0))
 let scrollFrame: number | undefined
-
+let initialPosition = true
+let programmatic = false
+let resizeObserver: ResizeObserver | undefined
+/* 算滚动方向用的基线。程序化写入之后也要同步，否则下一次真实滚动会拿旧值算方向。 */
+let lastTop = 0
+let touchY = 0
+let restored = readChatViewport(props.sessionId)
+function savePosition(id = props.sessionId) {
+  if (!scrollContainer.value || initialPosition) return
+  saveChatViewport(id, { top: scrollContainer.value.scrollTop, following: following.value, count: visibleCount.value })
+}
 function scheduleScrollToBottom() {
   if (scrollFrame !== undefined) return
   scrollFrame = requestAnimationFrame(() => {
     scrollFrame = undefined
-    void nextTick().then(() => scrollToBottom())
+    const el = scrollContainer.value
+    if (!el || props.isLoading || !props.messages.length) return
+    programmatic = true
+    if (initialPosition) {
+      following.value = restored?.following ?? true
+      el.scrollTop = following.value ? el.scrollHeight : restored?.top ?? 0
+      initialPosition = false
+    } else if (following.value) el.scrollTop = el.scrollHeight
+    lastTop = el.scrollTop
+    requestAnimationFrame(() => { programmatic = false })
   })
 }
-
-// 只跟踪廉价标量（消息数 + 最后一条消息末尾 part 的文本长度），
-// 避免 deep watch 在每个 SSE delta 上全量遍历 messages
-watch(
-  () => {
-    const messages = props.messages
-    const last = messages[messages.length - 1]
-    const lastPart = last?.parts?.[last.parts.length - 1]
-    return `${messages.length}:${lastPart?.text?.length ?? 0}`
-  },
-  scheduleScrollToBottom,
-)
-
-watch(() => props.isStreaming, (streaming) => {
-  if (streaming) {
-    scheduleScrollToBottom()
+function handleScroll() {
+  const el = scrollContainer.value
+  if (!el) return
+  if (initialPosition || programmatic) {
+    lastTop = el.scrollTop
+    return
   }
-})
-
-// 切换会话后无条件瞬时滚到底部，避免残留旧会话的 scrollTop 落在历史中间
-watch(() => props.sessionId, () => {
-  if (scrollFrame !== undefined) {
-    cancelAnimationFrame(scrollFrame)
-    scrollFrame = undefined
+  const delta = el.scrollTop - lastTop
+  lastTop = el.scrollTop
+  following.value = nextFollowing(following.value, delta, isAtBottom(el))
+  savePosition()
+}
+/** 明确的上翻意图（滚轮 / 触摸 / 键盘）：不等滚动落地就松手 */
+function releaseFollow() {
+  if (!following.value) return
+  following.value = false
+  savePosition()
+}
+function handleWheel(event: WheelEvent) {
+  if (event.deltaY < 0) releaseFollow()
+}
+function handleTouchStart(event: TouchEvent) {
+  touchY = event.touches[0]?.clientY ?? 0
+}
+function handleTouchMove(event: TouchEvent) {
+  const y = event.touches[0]?.clientY ?? touchY
+  // 手指往下拖 = 内容往上走 = 想看前面的内容
+  if (y - touchY > 2) releaseFollow()
+  touchY = y
+}
+/* 键位要挂在 window 上：消息流没有 tabindex，焦点通常在 body，事件不会冒到它身上 */
+function handleKeydown(event: KeyboardEvent) {
+  if (!UP_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(document.activeElement)) return
+  const el = scrollContainer.value
+  // 不可见（并行会话里的另一路）或根本不能滚，就别抢滚动条
+  if (!el || !el.clientHeight || el.scrollHeight <= el.clientHeight) return
+  releaseFollow()
+}
+function jumpToLatest() {
+  following.value = true
+  restored = undefined
+  initialPosition = false
+  const el = scrollContainer.value
+  if (el) {
+    el.scrollTop = el.scrollHeight
+    lastTop = el.scrollTop
   }
-  void nextTick().then(() => scrollToBottom(true))
+  savePosition()
+}
+async function loadEarlier() {
+  const el = scrollContainer.value
+  if (!el) return
+  const height = el.scrollHeight
+  const top = el.scrollTop
+  following.value = false
+  programmatic = true
+  visibleCount.value += 40
+  await nextTick()
+  el.scrollTop = top + el.scrollHeight - height
+  lastTop = el.scrollTop
+  requestAnimationFrame(() => { programmatic = false; savePosition() })
+}
+watch(() => props.sessionId, (id, oldId) => {
+  savePosition(oldId)
+  restored = readChatViewport(id)
+  visibleCount.value = restored?.count ?? 40
+  following.value = restored?.following ?? true
+  initialPosition = true
+  scheduleScrollToBottom()
 })
-
+watch(() => {
+  const last = props.messages[props.messages.length - 1]
+  return [props.messages.length, last?.parts?.[last.parts.length - 1]?.text?.length, props.isLoading, interactionCount.value]
+}, scheduleScrollToBottom, { flush: 'post', immediate: true })
+// Observe layout changes from Markdown, images and expanded tool output.
+watch(messageContent, element => {
+  resizeObserver?.disconnect()
+  if (!element || typeof ResizeObserver === 'undefined') return
+  resizeObserver = new ResizeObserver(scheduleScrollToBottom)
+  resizeObserver.observe(element)
+}, { flush: 'post' })
+onMounted(() => window.addEventListener('keydown', handleKeydown))
 onUnmounted(() => {
+  savePosition()
+  window.removeEventListener('keydown', handleKeydown)
+  resizeObserver?.disconnect()
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
 })
-
-function scrollToBottom(force = false) {
-  if (scrollContainer.value) {
-    // Check if user is already near bottom to avoid annoying auto-scroll if they are reading history
-    const isNearBottom = scrollContainer.value.scrollHeight - scrollContainer.value.scrollTop - scrollContainer.value.clientHeight < 100
-
-    if (force || isNearBottom) {
-      scrollContainer.value.scrollTo({
-        top: scrollContainer.value.scrollHeight,
-        // 流式期间用 instant，避免每个 token 都触发一次平滑滚动动画
-        behavior: force || props.isStreaming ? 'instant' : 'smooth'
-      })
-    }
-  }
-}
 </script>
 
 <template>
-  <div class="chat-messages custom-scrollbar" ref="scrollContainer">
+  <div class="chat-viewport">
+  <div
+    class="chat-messages custom-scrollbar"
+    ref="scrollContainer"
+    @scroll.passive="handleScroll"
+    @wheel.passive="handleWheel"
+    @touchstart.passive="handleTouchStart"
+    @touchmove.passive="handleTouchMove"
+  >
+    <div v-if="loadError" class="history-error" role="alert">
+      <span>{{ loadError }}</span>
+      <button class="btn btn-sm btn-ghost" @click="emit('retry')">重试加载</button>
+    </div>
     <!-- Session Error Banner -->
     <div v-if="sessionError" class="session-error-banner">
       <div class="error-content">
@@ -176,7 +259,7 @@ function scrollToBottom(force = false) {
     </div>
 
     <!-- Empty State -->
-    <div v-if="validMessages.length === 0 && !isLoading && !sessionError" class="chat-empty">
+    <div v-if="validMessages.length === 0 && !isLoading && !sessionError && !loadError && !interactionCount" class="chat-empty">
       <div class="welcome-section">
         <div class="greeting-row">
           <!-- Decorative star icon -->
@@ -186,8 +269,8 @@ function scrollToBottom(force = false) {
           <span class="greeting-text">{{ greeting }}</span>
         </div>
 
-        <!-- Directory Selector (only in code mode, subtle, below greeting) -->
-        <div v-if="canChangeDirectory && mode === 'agent'" class="directory-selector-section">
+        <!-- Directory selector below greeting -->
+        <div v-if="canChangeDirectory" class="directory-selector-section">
           <button class="directory-btn" @click="openDirectoryPicker">
             <FolderOpen :size="16" />
             <span class="directory-btn-text">
@@ -205,8 +288,9 @@ function scrollToBottom(force = false) {
     </div>
 
     <!-- Messages -->
-    <div class="messages-container" v-else>
-      <template v-for="group in displayGroups" :key="group.key">
+    <div class="messages-container" ref="messageContent" v-else>
+      <button v-if="hiddenCount" class="load-earlier btn btn-ghost btn-sm" @click="loadEarlier">加载更早的消息（还有 {{ hiddenCount }} 组）</button>
+      <template v-for="group in visibleGroups" :key="group.key">
         <!-- User message -->
         <MessageItem
           v-if="group.type === 'user'"
@@ -257,9 +341,44 @@ function scrollToBottom(force = false) {
       @cancel="handleDirectoryCancel"
     />
   </div>
+  <div v-if="!following || interactionCount" class="scroll-actions">
+    <button v-if="interactionCount" class="pending-shortcut" @click="jumpToLatest">{{ interactionCount }} 项需要确认</button>
+    <button v-if="!following" class="jump-latest" @click="jumpToLatest"><ArrowDown :size="15" />回到最新</button>
+  </div>
+  </div>
 </template>
 
 <style scoped>
+.chat-viewport { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; }
+.scroll-actions { position: absolute; bottom: 16px; right: 24px; display: flex; gap: 8px; z-index: var(--z-sticky); }
+.jump-latest, .pending-shortcut { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-default); padding: 8px 12px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-sm); cursor: pointer; font-size: var(--text-13); }
+.pending-shortcut { color: var(--accent); }
+.load-earlier { align-self: center; margin-bottom: 16px; }
+@media (max-width: 640px) {
+  .chat-viewport .messages-container { padding: 16px 4px; }
+  .chat-viewport .agent-message-row { padding: 8px 0; }
+  .chat-viewport :deep(.message-row) { padding: 12px 0; }
+  .scroll-actions { right: 8px; bottom: 8px; }
+}
+
+.history-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px auto;
+  padding: 12px 16px;
+  max-width: var(--input-max-width);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-13);
+  line-height: 1.6;
+}
+.history-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.history-error > button { flex-shrink: 0; }
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -383,8 +502,7 @@ function scrollToBottom(force = false) {
   padding: 8px var(--space-lg);
   max-width: var(--input-max-width);
   width: 100%;
-  opacity: 0;
-  animation: fade-up 0.3s var(--ease-smooth, ease) forwards;
+
 }
 
 .pending-requests {
@@ -396,9 +514,9 @@ function scrollToBottom(force = false) {
   max-width: var(--input-max-width);
   margin: var(--space-md) auto;
   padding: var(--space-md);
-  background: var(--error-subtle);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -418,9 +536,11 @@ function scrollToBottom(force = false) {
 }
 
 .error-message {
-  font-size: 0.875rem;
-  line-height: 1.5;
+  font-size: var(--text-13);
+  line-height: 1.65;
   color: var(--text-primary);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .error-actions {

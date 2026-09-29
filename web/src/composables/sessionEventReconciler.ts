@@ -75,6 +75,7 @@ export interface SessionRecoveryDependencies<
   getStatuses(): Promise<Record<string, Status>>
   getQuestions(): Promise<Question[]>
   getPermissions(): Promise<Permission[]>
+  onMessages?(messages: Message[]): void
 }
 
 export async function loadSessionRecoverySnapshot<
@@ -86,17 +87,25 @@ export async function loadSessionRecoverySnapshot<
   sessionID: string,
   dependencies: SessionRecoveryDependencies<Message, Status, Question, Permission>,
 ) {
+  const failures: string[] = []
+  const optional = async <T>(label: string, load: () => Promise<T>): Promise<T | null> => {
+    try { return await load() } catch { failures.push(label); return null }
+  }
   const [messages, statuses, questions, permissions] = await Promise.all([
-    dependencies.getMessages(sessionID),
-    dependencies.getStatuses(),
-    dependencies.getQuestions(),
-    dependencies.getPermissions(),
+    dependencies.getMessages(sessionID).then(messages => {
+      dependencies.onMessages?.(messages)
+      return messages
+    }),
+    optional('运行状态', dependencies.getStatuses),
+    optional('待回答问题', dependencies.getQuestions),
+    optional('权限请求', dependencies.getPermissions),
   ])
 
   return {
     messages,
-    status: statuses[sessionID] ?? { type: 'idle' as const },
-    questions: questions.filter((question) => question.sessionID === sessionID),
-    permissions: permissions.filter((permission) => permission.sessionID === sessionID),
+    status: statuses ? statuses[sessionID] ?? { type: 'idle' as const } : null,
+    questions: questions?.filter((question) => question.sessionID === sessionID) ?? null,
+    permissions: permissions?.filter((permission) => permission.sessionID === sessionID) ?? null,
+    ...(failures.length ? { failures } : {}),
   }
 }

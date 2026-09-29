@@ -10,6 +10,7 @@ import { ProjectSharedFiles } from "../../project/shared-files"
 import z from "zod"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { work } from "../../util/queue"
 
 export const ProjectRoutes = lazy(() =>
   new Hono()
@@ -129,16 +130,16 @@ export const ProjectRoutes = lazy(() =>
 
         const keys = await Storage.list(["session", projectID])
         const sessions: Session.Info[] = []
-        for (const key of keys) {
+        await work(8, keys, async (key) => {
           const session = await Storage.read<Session.Info>(key).catch(() => undefined)
-          if (!session) continue
-          if (query.roots && session.parentID) continue
-          if (query.start !== undefined && session.time.updated < query.start) continue
-          if (query.search && !session.title.toLowerCase().includes(query.search.toLowerCase())) continue
+          if (!session) return
+          if (query.roots && session.parentID) return
+          if (query.start !== undefined && session.time.updated < query.start) return
+          if (query.search && !session.title.toLowerCase().includes(query.search.toLowerCase())) return
           sessions.push(session)
-        }
+        })
 
-        sessions.sort((a, b) => b.time.updated - a.time.updated)
+        sessions.sort((a, b) => b.time.updated - a.time.updated || a.id.localeCompare(b.id))
         if (query.limit !== undefined) {
           return c.json(sessions.slice(0, query.limit))
         }

@@ -16,6 +16,8 @@ import { Log } from "../util/log"
 import { MessageV2 } from "./message-v2"
 import { Instance } from "../project/instance"
 import { SessionPrompt } from "./prompt"
+import { RunLease } from "./run-lease"
+import { SessionRequest } from "./request"
 import { fn } from "@/util/fn"
 import { Command } from "../command"
 import { Snapshot } from "@/snapshot"
@@ -255,7 +257,7 @@ export namespace Session {
       slug: Slug.create(),
       version: Installation.VERSION,
       projectID: Instance.project.id,
-      directory: input.directory,
+      directory: await Instance.normalizeDirectory(input.directory),
       parentID: input.parentID,
       title: input.title ?? createDefaultTitle(!!input.parentID),
       permission: input.permission,
@@ -390,12 +392,22 @@ export namespace Session {
 
   export async function* list() {
     const project = Instance.project
-    for (const item of await Storage.list(["session", project.id])) {
-      try {
-        yield await Storage.read<Info>(item)
-      } catch (e) {
-        if (Storage.NotFoundError.isInstance(e) || Storage.CorruptedError.isInstance(e)) continue
-        throw e
+    const keys = await Storage.list(["session", project.id])
+    // Preserve the storage order while reading a bounded batch concurrently.
+    const batchSize = 8
+    for (let index = 0; index < keys.length; index += batchSize) {
+      const batch = await Promise.all(
+        keys.slice(index, index + batchSize).map(async (item) => {
+          try {
+            return await Storage.read<Info>(item)
+          } catch (e) {
+            if (Storage.NotFoundError.isInstance(e) || Storage.CorruptedError.isInstance(e)) return undefined
+            throw e
+          }
+        }),
+      )
+      for (const session of batch) {
+        if (session) yield session
       }
     }
   }
@@ -413,18 +425,20 @@ export namespace Session {
 
   export const remove = fn(Identifier.schema("session"), async (sessionID) => {
     const project = Instance.project
+    const lease = RunLease.reserve(sessionID)
     try {
       const session = await get(sessionID)
       for (const child of await children(sessionID)) {
         await remove(child.id)
       }
       await unshare(sessionID).catch(() => {})
-      await fs.rm(uploadsDirectory(session), { recursive: true, force: true }).catch(() => {})
+      await fs.rm(uploadsDirectory(session), { recursive: true, force: true })
       for (const msg of await Storage.list(["message", sessionID])) {
         for (const part of await Storage.list(["part", msg.at(-1)!])) {
           await Storage.remove(part)
         }
         await Storage.remove(msg)
+        await SessionRequest.remove(msg.at(-1)!)
       }
       await Storage.remove(["session", project.id, sessionID])
       try {
@@ -436,8 +450,8 @@ export namespace Session {
       Bus.publish(Event.Deleted, {
         info: session,
       })
-    } catch (e) {
-      log.error(e)
+    } finally {
+      RunLease.release(sessionID, lease.id)
     }
   })
 
@@ -456,6 +470,7 @@ export namespace Session {
     }),
     async (input) => {
       await Storage.remove(["message", input.sessionID, input.messageID])
+      await SessionRequest.remove(input.messageID)
       Bus.publish(MessageV2.Event.Removed, {
         sessionID: input.sessionID,
         messageID: input.messageID,

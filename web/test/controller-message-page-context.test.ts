@@ -36,7 +36,9 @@ function installFetchMock() {
       body,
       signal: init?.signal,
     })
-    return jsonResponse({ accepted: true, sessionId: 'ses_1', turnSnapshotId: 'turn_1' })
+    return url === '/nine1bot/agent/sessions'
+      ? jsonResponse({ session: { id: 'ses_1', directory: body.directory || '.', time: { created: 1, updated: 1 } } })
+      : jsonResponse({ accepted: true, sessionId: 'ses_1', turnSnapshotId: 'turn_1' })
   }) as typeof fetch
 }
 

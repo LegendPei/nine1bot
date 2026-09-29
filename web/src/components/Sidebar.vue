@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { groupSessionsByProject } from '../utils/session-groups'
 import {
   PanelLeftClose, PanelLeft, MessageSquare, Plus, Search,
-  FolderOpen, Code2, Sparkles, Pencil, Trash2, X, Check,
-  Loader2, Square, ChevronRight, User, MessageCircle, EllipsisVertical, BarChart3, Webhook
+  FolderOpen, Sparkles, Pencil, Trash2, X, Check,
+  Loader2, Square, ChevronRight, User, Settings, EllipsisVertical, BarChart3, Webhook
 } from 'lucide-vue-next'
 import type { Session, FileItem } from '../api/client'
-import type { AppMode } from '../composables/useAppMode'
-import { useSessionMode } from '../composables/useSessionMode'
 import { useUserProfile } from '../composables/useUserProfile'
 
 export interface ProjectInfo {
@@ -32,11 +31,12 @@ const props = defineProps<{
   // 移动端（≤768px）抽屉式展开状态，由 App.vue 持有
   mobileOpen?: boolean
   sessions: SidebarSession[]
+  sessionsLoading: boolean
+  sessionsLoadError: boolean
   currentSession: Session | null
   isDraftSession: boolean
   files: FileItem[]
   filesLoading: boolean
-  mode: AppMode
   // Projects
   projects: ProjectInfo[]
   currentProjectId: string | null
@@ -54,6 +54,7 @@ const emit = defineEmits<{
   'toggle-collapse': []
   'select-session': [session: Session]
   'new-session': []
+  'project-new-session': [projectId: string]
   'toggle-directory': [file: FileItem]
   'delete-session': [sessionId: string]
   'rename-session': [sessionId: string, title: string]
@@ -62,15 +63,11 @@ const emit = defineEmits<{
   'open-settings': []
   'open-search': []
   'change-directory': [directory: string]
-  'switch-mode': [mode: AppMode]
   'select-project': [projectId: string]
   'open-projects': []
   'open-metrics': []
   'open-automations': []
 }>()
-
-// Session mode mapping
-const { getMode } = useSessionMode()
 
 // User profile
 const { profile, brandLogo } = useUserProfile()
@@ -87,14 +84,8 @@ const deletingSession = ref<SidebarSession | null>(null)
 
 // Right-click context menu
 const contextMenu = ref<{ x: number; y: number; session: SidebarSession } | null>(null)
-// Sessions filtered by current mode
-const filteredSessions = computed(() => {
-  // Show sessions matching current mode, or untagged (legacy) sessions
-  return props.sessions.filter(s => {
-    const sessionMode = getMode(s.id)
-    return sessionMode === props.mode || sessionMode === undefined
-  })
-})
+const collapsedProjects = ref<Record<string, boolean>>({})
+const sessionGroups = computed(() => groupSessionsByProject(props.sessions, props.projects))
 
 function cancelRename() {
   renamingSession.value = null
@@ -121,19 +112,6 @@ function doDelete() {
 
 function getSessionTitle(session: Session): string {
   return session.title || `会话 ${session.id.slice(0, 6)}`
-}
-
-function getDirectoryTail(directory: string): string {
-  const normalized = (directory || '').replace(/\\/g, '/')
-  return normalized.split('/').filter(Boolean).pop() || '.'
-}
-
-function getSessionProjectLabel(session: SidebarSession): string {
-  return session.projectDisplayName || getDirectoryTail(session.directory)
-}
-
-function getSessionProjectTitle(session: SidebarSession): string {
-  return session.projectDisplayPath || session.directory || ''
 }
 
 function isBrowserExtensionSession(session: SidebarSession): boolean {
@@ -180,7 +158,7 @@ function contextMenuDelete() {
         <img v-if="brandLogo.logoUrl" :src="brandLogo.logoUrl" alt="Nine1Bot" class="brand-logo" />
         <span class="brand-text">Nine1Bot</span>
       </div>
-      <button class="collapse-btn" @click="emit('toggle-collapse')" :title="collapsed ? '展开' : '折叠'">
+      <button class="collapse-btn" @click="emit('toggle-collapse')" :title="mobileOpen ? '关闭侧边栏' : collapsed ? '展开' : '折叠'">
         <PanelLeftClose v-if="!collapsed" :size="18" />
         <PanelLeft v-else :size="18" />
       </button>
@@ -232,7 +210,7 @@ function contextMenuDelete() {
     <!-- Recents Section -->
     <div class="sidebar-section" v-if="!collapsed">
       <div class="section-header" @click="showRecents = !showRecents">
-        <span class="section-label">最近会话</span>
+        <span class="section-label">项目</span>
         <ChevronRight :size="14" class="section-chevron" :class="{ expanded: showRecents }" />
       </div>
 
@@ -246,15 +224,29 @@ function contextMenuDelete() {
           <span class="session-title">新对话</span>
         </div>
 
-        <!-- Filtered Sessions by Mode -->
+        <section v-for="group in sessionGroups" :key="group.id" class="project-session-group">
+          <div class="project-group-heading">
+            <button class="project-group-toggle" :aria-expanded="!collapsedProjects[group.id]" :title="group.directory" @click="collapsedProjects[group.id] = !collapsedProjects[group.id]">
+              <ChevronRight :size="12" :class="{ expanded: !collapsedProjects[group.id] }" />
+              <FolderOpen :size="16" />
+              <span>{{ group.name }}</span>
+              <span class="project-session-count">{{ group.sessions.length }}</span>
+            </button>
+            <button v-if="group.projectId" class="mini-btn project-new" :title="'在 ' + group.name + ' 中新建会话'" @click="emit('project-new-session', group.projectId)"><Plus :size="14" /></button>
+          </div>
+          <div v-show="!collapsedProjects[group.id]" class="project-session-children">
+        <!-- Sessions in this project -->
         <div
-          v-for="session in filteredSessions"
+          v-for="session in group.sessions"
           :key="session.id"
           class="session-item"
           :class="{
             active: !isDraftSession && currentSession?.id === session.id,
             running: isSessionRunning(session.id)
           }"
+          role="button" tabindex="0"
+          @keydown.enter.self="emit('select-session', session)"
+          @keydown.space.self.prevent="emit('select-session', session)"
           @click="emit('select-session', session)"
           @contextmenu="openContextMenu($event, session)"
         >
@@ -262,9 +254,7 @@ function contextMenuDelete() {
           <MessageSquare v-else :size="14" class="session-icon" />
           <span class="session-title">{{ getSessionTitle(session) }}</span>
           <span v-if="isBrowserExtensionSession(session)" class="session-source-badge">浏览器</span>
-          <span v-if="mode === 'agent'" class="session-project-label" :title="getSessionProjectTitle(session)">
-            {{ getSessionProjectLabel(session) }}
-          </span>
+
 
           <!-- Session Actions (on hover) -->
           <div class="session-actions" @click.stop>
@@ -282,68 +272,31 @@ function contextMenuDelete() {
           </div>
         </div>
 
-        <!-- Empty state when no sessions match current mode -->
-        <div v-if="filteredSessions.length === 0 && !isDraftSession" class="empty-state section-empty">
-          暂无会话
+          <div v-if="!group.sessions.length" class="project-empty">暂无会话</div>
+          </div>
+        </section>
+        <!-- Empty session list -->
+        <div v-if="sessions.length === 0 && (sessionsLoading || sessionsLoadError || !isDraftSession)" class="empty-state section-empty">
+          {{ sessionsLoading ? '正在加载会话...' : sessionsLoadError ? '加载失败，正在重试...' : '暂无会话' }}
         </div>
       </div>
     </div>
 
-    <!-- Spacer to push mode switch + footer to bottom -->
     <div class="sidebar-spacer"></div>
-
-    <!-- Mode Switcher -->
-    <div class="mode-switcher" v-if="!collapsed">
-      <button
-        class="mode-btn"
-        :class="{ active: mode === 'chat' }"
-        @click="emit('switch-mode', 'chat')"
-      >
-        <MessageCircle :size="16" />
-        <span>Chat</span>
-      </button>
-      <button
-        class="mode-btn"
-        :class="{ active: mode === 'agent' }"
-        @click="emit('switch-mode', 'agent')"
-      >
-        <Code2 :size="16" />
-        <span>Agent</span>
-      </button>
-    </div>
-
-    <!-- Collapsed Mode Switcher -->
-    <div class="mode-switcher mode-switcher-collapsed" v-if="collapsed">
-      <button
-        class="nav-item-icon"
-        :class="{ active: mode === 'chat' }"
-        @click="emit('switch-mode', 'chat')"
-        title="Chat 模式"
-      >
-        <MessageCircle :size="18" />
-      </button>
-      <button
-        class="nav-item-icon"
-        :class="{ active: mode === 'agent' }"
-        @click="emit('switch-mode', 'agent')"
-        title="Agent 模式"
-      >
-        <Code2 :size="18" />
-      </button>
-    </div>
 
     <!-- User Profile Footer -->
     <div class="sidebar-footer" v-if="!collapsed">
-      <div class="user-profile" @click="emit('open-settings')">
+      <button class="user-profile" @click="emit('open-settings')" aria-label="打开设置" title="设置">
         <div class="user-avatar">
           <img v-if="profile.avatarUrl" :src="profile.avatarUrl" alt="头像" class="avatar-img" />
           <User v-else :size="16" />
         </div>
         <div class="user-info">
           <span class="user-name">{{ profile.name || '用户' }}</span>
-          <span class="user-plan">Nine1Bot</span>
+          <span class="user-plan">设置与偏好</span>
         </div>
-      </div>
+        <Settings :size="16" class="settings-icon" />
+      </button>
     </div>
 
     <!-- Collapsed Footer (avatar only) -->
@@ -437,6 +390,19 @@ function contextMenuDelete() {
 </template>
 
 <style scoped>
+.project-group-heading { display: flex; align-items: center; gap: 4px; margin: 12px 0 4px; }
+.project-group-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--text-secondary); padding: 7px 4px; cursor: pointer; text-align: left; }
+.project-group-toggle > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-group-toggle svg { flex-shrink: 0; }
+.project-group-toggle .expanded { transform: rotate(90deg); }
+.project-session-count { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+.project-session-children { padding-left: 15px; }
+.project-session-children .session-item { padding-left: 10px; }
+.project-session-children .session-icon:not(.spin) { display: none; }
+.project-empty { color: var(--text-muted); padding: 8px 12px; font-size: var(--text-sm); }
+.project-new { flex-shrink: 0; }
+.session-item:focus-within .session-actions { opacity: 1; transform: none; }
+
 /* === Sidebar (base layout lives in global style.css) === */
 .brand-area {
   display: flex;
@@ -701,54 +667,13 @@ function contextMenuDelete() {
   min-height: var(--space-sm);
 }
 
-/* === Mode Switcher === */
-.mode-switcher {
-  display: flex;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  margin: 0 var(--space-sm);
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-md);
-}
-
-.mode-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: var(--font-sans);
-  font-size: var(--text-13);
-  font-weight: 500;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-}
-
-.mode-btn:hover {
-  color: var(--text-primary);
-}
-
-.mode-btn.active {
-  background: var(--bg-composer);
-  color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-.mode-switcher-collapsed {
-  flex-direction: column;
-  align-items: center;
-  background: transparent;
-  margin: 0;
-  padding: var(--space-xs) 0;
-}
-
 /* === User Profile Footer (base .sidebar-footer lives in global style.css) === */
 .user-profile {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -757,6 +682,8 @@ function contextMenuDelete() {
   cursor: pointer;
   transition: background-color var(--transition-fast);
 }
+
+.settings-icon { margin-left: auto; color: var(--text-muted); }
 
 .user-profile:hover {
   background: var(--hover-overlay);

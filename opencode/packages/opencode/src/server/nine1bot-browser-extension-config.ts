@@ -1,5 +1,4 @@
-import { readFile, writeFile } from "fs/promises"
-import { parse as parseJsonc } from "jsonc-parser"
+import { JsonFile } from "../util/json-file"
 import z from "zod"
 import { RuntimeControllerProtocol } from "@/runtime/controller/protocol"
 
@@ -34,15 +33,6 @@ function configPath() {
   return process.env.NINE1BOT_CONFIG_PATH || ""
 }
 
-async function readNine1botConfig(pathname: string): Promise<Record<string, any>> {
-  const text = await readFile(pathname, "utf-8")
-  return (parseJsonc(text) || {}) as Record<string, any>
-}
-
-async function writeNine1botConfig(pathname: string, nextConfig: Record<string, any>) {
-  await writeFile(pathname, JSON.stringify(nextConfig, null, 2))
-}
-
 function parseModelString(value: unknown): BrowserExtensionModel | undefined {
   if (typeof value !== "string") return undefined
   const trimmed = value.trim()
@@ -59,10 +49,14 @@ function formatModelString(model: BrowserExtensionModel) {
 
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return []
-  return [...new Set(value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean))]
+  return [
+    ...new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ]
 }
 
 function normalizeBrowserExtensionConfig(config: Record<string, any>): BrowserExtensionConfig {
@@ -70,9 +64,7 @@ function normalizeBrowserExtensionConfig(config: Record<string, any>): BrowserEx
   if (!sidepanel || typeof sidepanel !== "object" || Array.isArray(sidepanel)) return {}
 
   const model = parseModelString(sidepanel.model)
-  const prompt = typeof sidepanel.prompt === "string" && sidepanel.prompt.trim()
-    ? sidepanel.prompt
-    : undefined
+  const prompt = typeof sidepanel.prompt === "string" && sidepanel.prompt.trim() ? sidepanel.prompt : undefined
   const mcpServers = normalizeStringList(sidepanel.mcpServers)
   const skills = normalizeStringList(sidepanel.skills)
   const registeredTools = normalizeStringList(sidepanel.registeredTools)
@@ -89,7 +81,7 @@ function normalizeBrowserExtensionConfig(config: Record<string, any>): BrowserEx
 export async function readBrowserExtensionConfig(): Promise<BrowserExtensionConfig> {
   const pathname = configPath()
   if (!pathname) return {}
-  const config = (await readNine1botConfig(pathname).catch(() => ({}))) as Record<string, any>
+  const config = (await JsonFile.read(pathname)).data
   return normalizeBrowserExtensionConfig(config)
 }
 
@@ -99,49 +91,47 @@ export async function patchBrowserExtensionConfig(patch: BrowserExtensionConfigP
     throw new Error("No config path")
   }
 
-  const existing = (await readNine1botConfig(pathname).catch(() => ({}))) as Record<string, any>
-  const browser = existing.browser && typeof existing.browser === "object" && !Array.isArray(existing.browser)
-    ? { ...existing.browser }
-    : {}
-  const sidepanel = browser.sidepanel && typeof browser.sidepanel === "object" && !Array.isArray(browser.sidepanel)
-    ? { ...browser.sidepanel }
-    : {}
+  const nextConfig = await JsonFile.update(pathname, (existing) => {
+    const browser =
+      existing.browser && typeof existing.browser === "object" && !Array.isArray(existing.browser)
+        ? { ...existing.browser }
+        : {}
+    const sidepanel =
+      browser.sidepanel && typeof browser.sidepanel === "object" && !Array.isArray(browser.sidepanel)
+        ? { ...browser.sidepanel }
+        : {}
 
-  if ("model" in patch) {
-    if (patch.model === null) delete sidepanel.model
-    else if (patch.model) sidepanel.model = formatModelString(patch.model)
-  }
+    if ("model" in patch) {
+      if (patch.model === null) delete sidepanel.model
+      else if (patch.model) sidepanel.model = formatModelString(patch.model)
+    }
 
-  if ("prompt" in patch) {
-    const prompt = patch.prompt?.trim()
-    if (prompt) sidepanel.prompt = prompt
-    else delete sidepanel.prompt
-  }
+    if ("prompt" in patch) {
+      const prompt = patch.prompt?.trim()
+      if (prompt) sidepanel.prompt = prompt
+      else delete sidepanel.prompt
+    }
 
-  if ("mcpServers" in patch) {
-    const mcpServers = normalizeStringList(patch.mcpServers)
-    if (mcpServers.length > 0) sidepanel.mcpServers = mcpServers
-    else delete sidepanel.mcpServers
-  }
+    if ("mcpServers" in patch) {
+      const mcpServers = normalizeStringList(patch.mcpServers)
+      if (mcpServers.length > 0) sidepanel.mcpServers = mcpServers
+      else delete sidepanel.mcpServers
+    }
 
-  if ("skills" in patch) {
-    const skills = normalizeStringList(patch.skills)
-    if (skills.length > 0) sidepanel.skills = skills
-    else delete sidepanel.skills
-  }
+    if ("skills" in patch) {
+      const skills = normalizeStringList(patch.skills)
+      if (skills.length > 0) sidepanel.skills = skills
+      else delete sidepanel.skills
+    }
 
-  if ("registeredTools" in patch) {
-    const registeredTools = normalizeStringList(patch.registeredTools)
-    if (registeredTools.length > 0) sidepanel.registeredTools = registeredTools
-    else delete sidepanel.registeredTools
-  }
+    if ("registeredTools" in patch) {
+      const registeredTools = normalizeStringList(patch.registeredTools)
+      if (registeredTools.length > 0) sidepanel.registeredTools = registeredTools
+      else delete sidepanel.registeredTools
+    }
 
-  browser.sidepanel = sidepanel
-  const nextConfig = {
-    ...existing,
-    browser,
-  }
-
-  await writeNine1botConfig(pathname, nextConfig)
+    browser.sidepanel = sidepanel
+    existing.browser = browser
+  })
   return normalizeBrowserExtensionConfig(nextConfig)
 }

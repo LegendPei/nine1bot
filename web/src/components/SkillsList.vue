@@ -1,10 +1,27 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
+import { Search, X } from 'lucide-vue-next'
 import type { Skill } from '../api/client'
 
-defineProps<{
+const props = defineProps<{
   skills: Skill[]
   loading: boolean
 }>()
+
+const searchQuery = ref('')
+const searchInput = ref<HTMLInputElement | null>(null)
+const filteredSkills = computed(() => {
+  const terms = searchQuery.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  return props.skills.filter(skill => {
+    const text = `${skill.name} ${skill.description || ''}`.toLocaleLowerCase()
+    return terms.every(term => text.includes(term))
+  })
+})
+
+function clearSearch() {
+  searchQuery.value = ''
+  searchInput.value?.focus()
+}
 </script>
 
 <template>
@@ -19,6 +36,25 @@ defineProps<{
         </svg>
         <span>需要安装网上的技能？在聊天中发送技能链接，让 Nine1Bot 帮你安装</span>
       </div>
+    </div>
+
+    <div class="skill-search-toolbar">
+      <div class="skill-search">
+        <Search :size="16" aria-hidden="true" />
+        <input
+          ref="searchInput"
+          v-model="searchQuery"
+          type="search"
+          aria-label="搜索可用技能"
+          placeholder="搜索技能名称或描述…"
+        />
+        <button v-if="searchQuery" class="btn btn-ghost btn-icon" aria-label="清空技能搜索" title="清空搜索" @click="clearSearch">
+          <X :size="16" />
+        </button>
+      </div>
+      <p v-if="!loading" class="skill-search-count text-muted text-sm" role="status">
+        {{ searchQuery.trim() ? `找到 ${filteredSkills.length} 个技能，共 ${skills.length} 个` : `共 ${skills.length} 个技能` }}
+      </p>
     </div>
 
     <div v-if="loading" class="loading-state">
@@ -36,8 +72,14 @@ defineProps<{
       <p class="empty-state-description">在聊天中发送技能仓库链接，让 Nine1Bot 帮你安装</p>
     </div>
 
+    <div v-else-if="filteredSkills.length === 0" class="empty-state">
+      <p class="empty-state-title">没有找到匹配的技能</p>
+      <p class="empty-state-description">试试其他名称或描述中的关键词</p>
+      <button class="btn btn-ghost" @click="clearSearch">清空搜索</button>
+    </div>
+
     <div v-else class="skills-grid">
-      <div v-for="skill in skills" :key="skill.name" class="skill-card card">
+      <div v-for="skill in filteredSkills" :key="skill.name" class="skill-card card">
         <div class="card-body">
           <div class="skill-header">
             <div class="skill-icon">
@@ -65,6 +107,16 @@ defineProps<{
   flex-direction: column;
   gap: var(--space-lg);
 }
+
+.skill-search-toolbar { display: flex; flex-direction: column; gap: var(--space-sm); }
+.skill-search { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; padding: 4px 10px; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-primary); }
+.skill-search:focus-within { border-color: var(--accent); }
+.skill-search > svg { flex-shrink: 0; color: var(--text-muted); }
+.skill-search input { width: 100%; min-width: 0; padding: 6px 0; border: 0; outline: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: var(--text-sm); }
+.skill-search input::placeholder { color: var(--text-muted); }
+.skill-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.skill-search button { flex-shrink: 0; }
+.skill-search-count { margin: 0; }
 
 .section-header {
   margin-bottom: var(--space-sm);
@@ -107,7 +159,7 @@ defineProps<{
 
 .skills-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
   gap: var(--space-md);
 }
 
@@ -134,11 +186,13 @@ defineProps<{
 }
 
 .skill-name {
+  overflow-wrap: anywhere;
   font-weight: 500;
   margin-bottom: var(--space-xs);
 }
 
 .skill-desc {
+  overflow-wrap: anywhere;
   line-height: 1.4;
 }
 </style>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { Search, Check, Star } from 'lucide-vue-next'
 import type { Provider } from '../api/client'
 
 const props = defineProps<{
@@ -9,265 +11,81 @@ const props = defineProps<{
   defaultModel: string
   loading: boolean
 }>()
-
 const emit = defineEmits<{
   select: [providerId: string, modelId: string]
   'set-default': [providerId: string, modelId: string]
+  'manage-providers': []
 }>()
-
-function isDefault(providerId: string, modelId: string) {
-  return props.defaultProvider === providerId && props.defaultModel === modelId
-}
+const query = ref('')
+const limit = ref(50)
+watch(query, () => { limit.value = 50 })
+const matches = computed(() => {
+  const term = query.value.trim().toLowerCase()
+  return props.providers.filter(provider => provider.authenticated).flatMap(provider =>
+    provider.models.filter(model => `${provider.name} ${model.name} ${model.id}`.toLowerCase().includes(term))
+      .map(model => ({ provider, model })),
+  )
+})
+const visible = computed(() => matches.value.slice(0, limit.value))
+const currentName = computed(() => props.providers.find(p => p.id === props.currentProvider)?.models.find(m => m.id === props.currentModel)?.name || props.currentModel || '未选择')
+const defaultName = computed(() => props.providers.find(p => p.id === props.defaultProvider)?.models.find(m => m.id === props.defaultModel)?.name || props.defaultModel || '未设置')
+function isDefault(providerId: string, modelId: string) { return props.defaultProvider === providerId && props.defaultModel === modelId }
 </script>
 
 <template>
-  <div class="model-selector">
+  <section class="model-selector">
     <div class="section-header">
-      <h3 class="section-title">AI 模型</h3>
-      <p class="section-desc text-muted text-sm">选择要使用的 AI 提供者和模型</p>
+      <div><h3>选择模型</h3><p>当前选择用于接下来发送的消息，全局默认写入 Nine1Bot 配置。</p></div>
+      <button class="btn btn-sm btn-ghost" @click="emit('manage-providers')">管理供应商</button>
     </div>
-
-    <div v-if="loading" class="loading-state">
-      <div class="loading-spinner"></div>
-      <span class="text-muted">加载中...</span>
+    <div class="model-summary">
+      <div><span>当前选择</span><strong>{{ currentName }}</strong></div>
+      <div><span>全局默认</span><strong>{{ defaultName }}</strong></div>
     </div>
-
-    <div v-else-if="providers.length === 0" class="empty-state">
-      <div class="empty-state-icon">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-        </svg>
-      </div>
-      <p class="empty-state-title">暂无可用模型</p>
-      <p class="empty-state-description">请先配置 AI 提供者认证</p>
-    </div>
-
-    <div v-else class="providers-list">
-      <div v-for="provider in providers" :key="provider.id" class="provider-section">
-        <div class="provider-header">
-          <div class="provider-info">
-            <div class="provider-icon">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-              </svg>
-            </div>
-            <span class="provider-name">{{ provider.name }}</span>
-          </div>
-          <span class="badge" :class="provider.authenticated ? 'badge-success' : 'badge-warning'">
-            {{ provider.authenticated ? '已认证' : '未认证' }}
-          </span>
-        </div>
-
-        <div class="models-grid">
-          <div
-            v-for="model in provider.models"
-            :key="model.id"
-            class="model-card"
-            :class="{ active: currentProvider === provider.id && currentModel === model.id, disabled: !provider.authenticated }"
-            @click="provider.authenticated && emit('select', provider.id, model.id)"
-          >
-            <div class="model-radio">
-              <div class="radio-outer">
-                <div v-if="currentProvider === provider.id && currentModel === model.id" class="radio-inner"></div>
-              </div>
-            </div>
-            <div class="model-info">
-              <div class="model-name-row">
-                <span class="model-name">{{ model.name || model.id }}</span>
-                <span v-if="isDefault(provider.id, model.id)" class="badge-default">默认</span>
-              </div>
-              <div class="model-meta text-xs text-muted">
-                <span v-if="model.contextWindow">{{ (model.contextWindow / 1000).toFixed(0) }}K context</span>
-                <button
-                  v-if="provider.authenticated && !isDefault(provider.id, model.id)"
-                  class="set-default-btn"
-                  @click.stop="emit('set-default', provider.id, model.id)"
-                >
-                  设为默认
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+    <label class="model-search"><Search :size="16" /><input v-model="query" placeholder="搜索模型或供应商" aria-label="搜索模型或供应商" /></label>
+    <div v-if="loading" class="model-loading" role="status">正在更新模型列表…</div>
+    <div class="models-list">
+      <div v-for="{ provider, model } in visible" :key="`${provider.id}/${model.id}`" class="model-card" :class="{ active: currentProvider === provider.id && currentModel === model.id }">
+        <button class="model-pick" :aria-pressed="currentProvider === provider.id && currentModel === model.id" @click="emit('select', provider.id, model.id)">
+          <span class="model-check"><Check v-if="currentProvider === provider.id && currentModel === model.id" :size="14" /></span>
+          <span class="model-info"><strong>{{ model.name || model.id }}</strong><small>{{ provider.name }}<template v-if="model.contextWindow"> · {{ (model.contextWindow / 1000).toFixed(0) }}K 上下文</template></small></span>
+        </button>
+        <button class="default-model-btn" :class="{ selected: isDefault(provider.id, model.id) }" :disabled="isDefault(provider.id, model.id)" :title="isDefault(provider.id, model.id) ? '全局默认模型' : '设为全局默认'" @click="emit('set-default', provider.id, model.id)"><Star :size="14" :fill="isDefault(provider.id, model.id) ? 'currentColor' : 'none'" /><span>{{ isDefault(provider.id, model.id) ? '默认' : '设为默认' }}</span></button>
       </div>
     </div>
-  </div>
+    <button v-if="matches.length > limit" class="btn btn-ghost btn-sm" @click="limit += 50">显示更多（{{ visible.length }} / {{ matches.length }}）</button>
+    <div v-if="!loading && !matches.length" class="model-empty">
+      <p>{{ query ? '没有找到匹配的模型' : '连接供应商后即可选择模型' }}</p>
+      <button v-if="!query" class="btn btn-primary btn-sm" @click="emit('manage-providers')">连接供应商</button>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.model-selector {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-lg);
-}
-
-.section-header {
-  margin-bottom: var(--space-sm);
-}
-
-.section-title {
-  font-size: 1rem;
-  font-weight: 600;
-  margin-bottom: var(--space-xs);
-}
-
-.section-desc {
-  margin: 0;
-}
-
-.loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-sm);
-  padding: var(--space-xl);
-}
-
-.providers-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xl);
-}
-
-.provider-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
-.provider-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.provider-info {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.provider-icon {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-md);
-  color: var(--text-muted);
-}
-
-.provider-name {
-  font-weight: 500;
-}
-
-.models-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: var(--space-sm);
-}
-
-.model-card {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.model-card:hover:not(.disabled) {
-  background: var(--bg-elevated);
-  border-color: var(--border-default);
-}
-
-.model-card.active {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-}
-
-.model-card.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.model-radio {
-  flex-shrink: 0;
-  padding-top: 2px;
-}
-
-.radio-outer {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--border-default);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: border-color var(--transition-fast);
-}
-
-.model-card.active .radio-outer {
-  border-color: var(--accent);
-}
-
-.radio-inner {
-  width: 8px;
-  height: 8px;
-  background: var(--accent);
-  border-radius: 50%;
-}
-
-.model-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.model-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 2px;
-}
-
-.model-name {
-  font-weight: 500;
-}
-
-.badge-default {
-  font-size: var(--text-xs);
-  padding: 1px 6px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  border-radius: var(--radius-sm);
-  font-weight: 500;
-  line-height: 1.4;
-  flex-shrink: 0;
-}
-
-.model-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.set-default-btn {
-  font-size: var(--text-xs);
-  padding: 0 4px;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: color var(--transition-fast);
-}
-
-.set-default-btn:hover {
-  color: var(--accent);
-}
+.model-selector { display: flex; flex-direction: column; gap: 18px; }
+.section-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+h3 { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
+.section-header p { font-size: 12px; color: var(--text-muted); line-height: 1.6; max-width: 380px; }
+.model-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.model-summary > div { padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-secondary); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.model-summary span { font-size: 12px; color: var(--text-muted); }
+.model-summary strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.model-search { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border-default); border-radius: 8px; padding: 10px 12px; color: var(--text-muted); }
+.model-search input { border: 0; outline: none; background: transparent; flex: 1; min-width: 0; color: var(--text-primary); font: inherit; font-size: 13px; }
+.model-search:focus-within { border-color: var(--accent); }
+.models-list { display: flex; flex-direction: column; gap: 6px; }
+.model-card { display: flex; align-items: center; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg-elevated); }
+.model-card.active { border-color: var(--accent); background: var(--accent-subtle); }
+.model-pick { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; border: 0; padding: 14px; text-align: left; background: transparent; color: var(--text-primary); cursor: pointer; }
+.model-check { display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--border-default); border-radius: 50%; flex-shrink: 0; color: var(--accent); }
+.model-card.active .model-check { border-color: var(--accent); }
+.model-info { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.model-info strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.model-info small { color: var(--text-muted); font-size: 11px; }
+.default-model-btn { display: flex; align-items: center; gap: 5px; background: transparent; border: 0; padding: 12px; color: var(--text-muted); cursor: pointer; font-size: 11px; flex-shrink: 0; }
+.default-model-btn.selected { color: var(--accent); cursor: default; }
+.model-empty { text-align: center; padding: 32px 16px; color: var(--text-muted); }
+.model-empty p { margin-bottom: 16px; }
+.model-loading { font-size: 12px; color: var(--text-muted); }
+@media (max-width: 640px) { .section-header { flex-direction: column; } .default-model-btn span { display: none; } .model-summary { gap: 8px; } }
 </style>

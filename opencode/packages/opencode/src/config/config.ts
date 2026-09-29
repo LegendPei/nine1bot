@@ -29,6 +29,7 @@ import { Bus } from "@/bus"
 import { GlobalBus } from "@/bus/global"
 import { Event } from "../server/event"
 import { State } from "../project/state"
+import { JsonFile } from "../util/json-file"
 
 export namespace Config {
   const log = Log.create({ service: "config" })
@@ -36,6 +37,12 @@ export namespace Config {
   // Custom merge function that concatenates array fields instead of replacing them
   function mergeConfigConcatArrays(target: Info, source: Info): Info {
     const merged = mergeDeep(target, source)
+    for (const [name, entry] of Object.entries(source.mcp ?? {})) {
+      if (!("type" in entry) && entry.enabled === false) {
+        merged.mcp ??= {}
+        merged.mcp[name] = { enabled: false }
+      }
+    }
     if (target.plugin && source.plugin) {
       merged.plugin = Array.from(new Set([...target.plugin, ...source.plugin]))
     }
@@ -1204,7 +1211,6 @@ export namespace Config {
   }
 
   async function load(text: string, configFilepath: string) {
-    const original = text
     text = text.replace(/\{env:([^}]+)\}/g, (_, varName) => {
       return process.env[varName] || ""
     })
@@ -1275,8 +1281,7 @@ export namespace Config {
       if (!parsed.data.$schema) {
         parsed.data.$schema = "https://opencode.ai/config.json"
         // Write the $schema to the original text to preserve variables like {env:VAR}
-        const updated = original.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
-        await Bun.write(configFilepath, updated).catch(() => {})
+        await JsonFile.update(configFilepath, (draft) => { draft.$schema ??= "https://opencode.ai/config.json" }).catch(() => {})
       }
       const data = parsed.data
       if (data.plugin) {
@@ -1333,24 +1338,43 @@ export namespace Config {
     reload?: "dispose" | "refresh" | false
   }
 
+  let revision = 0
+  export function version() { return revision }
+
   export function refresh() {
+    revision++
     State.invalidate(Instance.directory, stateInit)
   }
 
   export function refreshAll() {
+    revision++
     State.invalidateAll(stateInit)
   }
 
   export async function update(config: Info, options: UpdateOptions = {}) {
-    const filepath = path.join(Instance.directory, "config.json")
-    const existing = await loadFile(filepath)
-    await Bun.write(filepath, JSON.stringify(mergeDeep(existing, config), null, 2))
+    if (process.env.NINE1BOT_CONFIG_PATH) {
+      const { updateNine1botConfig } = await import("./nine1bot")
+      await updateNine1botConfig((draft) => Object.assign(draft, mergeConfigConcatArrays(draft, config)))
+    } else {
+      const projectJsonc = path.join(Instance.directory, "opencode.jsonc")
+      const filepath = Flag.OPENCODE_DISABLE_PROJECT_CONFIG && Flag.OPENCODE_CONFIG
+        ? Flag.OPENCODE_CONFIG
+        : existsSync(projectJsonc) ? projectJsonc : path.join(Instance.directory, "opencode.json")
+      await JsonFile.update(filepath, (draft) => {
+        Object.assign(draft, mergeConfigConcatArrays(draft, config))
+        Info.parse(draft)
+      })
+    }
     const reload = options.reload ?? "dispose"
     if (reload === "dispose") {
       await Instance.dispose()
       return
     }
     if (reload === "refresh") refresh()
+  }
+
+  export async function updateMcp(name: string, config: Mcp | null) {
+    await update({ mcp: { [name]: config ?? { enabled: false } } }, { reload: "refresh" })
   }
 
   function globalConfigFile() {
@@ -1420,21 +1444,10 @@ export namespace Config {
 
   export async function updateGlobal(config: Info) {
     const filepath = globalConfigFile()
-    const before = await Bun.file(filepath)
-      .text()
-      .catch((err) => {
-        if (err.code === "ENOENT") return "{}"
-        throw new JsonError({ path: filepath }, { cause: err })
-      })
-
-    if (!filepath.endsWith(".jsonc")) {
-      const existing = parseConfig(before, filepath)
-      await Bun.write(filepath, JSON.stringify(mergeDeep(existing, config), null, 2))
-    } else {
-      const next = patchJsonc(before, config)
-      parseConfig(next, filepath)
-      await Bun.write(filepath, next)
-    }
+    await JsonFile.update(filepath, (draft) => {
+      Object.assign(draft, mergeConfigConcatArrays(draft, config))
+      Info.parse(draft)
+    })
 
     global.reset()
     await Instance.disposeAll()

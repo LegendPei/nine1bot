@@ -5,6 +5,8 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+const apiTarget = process.env.NINE1BOT_API_ORIGIN || 'http://127.0.0.1:4096'
+
 const webRoot = fileURLToPath(new URL('.', import.meta.url))
 const projectRoot = path.resolve(webRoot, '..')
 const packageJsonPath = path.join(projectRoot, 'packages/nine1bot/package.json')
@@ -44,23 +46,26 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/session': 'http://localhost:4096',
-      '/event': 'http://localhost:4096',
-      '/file': 'http://localhost:4096',
-      '/project': 'http://localhost:4096',
-      '/global': 'http://localhost:4096',
-      '/find': 'http://localhost:4096',
-      '/mcp': 'http://localhost:4096',
-      '/skill': 'http://localhost:4096',
-      '/provider': 'http://localhost:4096',
-      '/config': 'http://localhost:4096',
-      '/auth': 'http://localhost:4096',
-      '/webhooks': 'http://localhost:4096',
-      '/agent-terminal': 'http://localhost:4096',
-      '/browse': 'http://localhost:4096',
-      '/question': 'http://localhost:4096',
-      '/permission': 'http://localhost:4096',
-      '/preferences': 'http://localhost:4096',
+      '/access-auth': apiTarget,
+      '/nine1bot': apiTarget,
+      '/schedules': apiTarget,
+      '/session': apiTarget,
+      '/event': apiTarget,
+      '/file': apiTarget,
+      '/project': apiTarget,
+      '/global': apiTarget,
+      '/find': apiTarget,
+      '/mcp': apiTarget,
+      '/skill': apiTarget,
+      '/provider': apiTarget,
+      '/config': apiTarget,
+      '/auth': apiTarget,
+      '/webhooks': apiTarget,
+      '/agent-terminal': apiTarget,
+      '/browse': apiTarget,
+      '/question': apiTarget,
+      '/permission': apiTarget,
+      '/preferences': apiTarget,
     }
   }
 })

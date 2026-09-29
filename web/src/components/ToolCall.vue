@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { FileDown, File, Eye } from 'lucide-vue-next'
 import type { MessagePart } from '../api/client'
 import { useFilePreview } from '../composables/useFilePreview'
+import { useCollapse } from '../composables/use-collapse'
 import { getToolDisplayName } from '../utils/tool-names'
 
 // 附件类型
@@ -21,10 +22,17 @@ const props = defineProps<{
 
 const { openPreviewByPath } = useFilePreview()
 
-const isExpanded = ref(false)
+/* 输出区延迟挂载：收起时不占 DOM，展开时带 0fr → 1fr 的高度过渡 */
+const { mounted: bodyMounted, open: isExpanded, toggle } = useCollapse()
 
 const toolName = computed(() => props.tool.tool || 'unknown')
 const status = computed(() => props.tool.state?.status || 'pending')
+const statusLabel = computed(() => ({
+  pending: '等待中',
+  running: '运行中',
+  completed: '已完成',
+  error: '失败',
+} as Record<string, string>)[status.value] || status.value)
 
 const statusClass = computed(() => {
   switch (status.value) {
@@ -174,10 +182,19 @@ function formatSize(bytes: number): string {
 
 <template>
   <div class="tool-call">
-    <div class="tool-call-header" @click="isExpanded = !isExpanded">
-      <div class="tool-call-icon" :class="statusClass">
+    <div
+      class="tool-call-header"
+      role="button"
+      tabindex="0"
+      :aria-expanded="isExpanded"
+      :aria-label="`${displayName}${toolTarget ? ` ${toolTarget}` : ''}，${statusLabel}`"
+      @click="toggle"
+      @keydown.enter.prevent="toggle"
+      @keydown.space.prevent="toggle"
+    >
+      <div class="tool-call-icon" :class="statusClass" aria-hidden="true">
         <template v-if="status === 'running'">
-          <div class="loading-spinner"></div>
+          <span class="tool-pulse" aria-hidden="true"></span>
         </template>
         <template v-else-if="status === 'completed'">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
@@ -209,18 +226,24 @@ function formatSize(bytes: number): string {
       </span>
     </div>
 
-    <div v-if="isExpanded" class="tool-call-body">
-      <div v-if="tool.state?.input" class="detail-section">
-        <div class="detail-label">输入</div>
-        <pre>{{ fullInput }}</pre>
-      </div>
-      <div v-if="outputPreview" class="detail-section">
-        <div class="detail-label">输出</div>
-        <pre>{{ outputPreview }}</pre>
-      </div>
-      <div v-if="tool.state?.error" class="detail-section error">
-        <div class="detail-label">错误</div>
-        <pre class="error-text">{{ tool.state.error }}</pre>
+    <div v-if="bodyMounted" class="tool-collapse" :class="{ open: isExpanded }" :aria-hidden="!isExpanded">
+      <!-- 这层只负责裁剪，不许带 padding / border：0fr 行轨的下限是格子项的外尺寸，
+           内边距压不掉，收起时会剩一条露出正文顶端的缝。内边距放里面那层。 -->
+      <div class="tool-collapse-clip">
+        <div class="tool-call-body">
+          <div v-if="tool.state?.input" class="detail-section">
+            <div class="detail-label">输入</div>
+            <pre>{{ fullInput }}</pre>
+          </div>
+          <div v-if="outputPreview" class="detail-section">
+            <div class="detail-label">输出</div>
+            <pre>{{ outputPreview }}</pre>
+          </div>
+          <div v-if="tool.state?.error" class="detail-section error">
+            <div class="detail-label">错误</div>
+            <pre class="error-text">{{ tool.state.error }}</pre>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -268,6 +291,26 @@ function formatSize(bytes: number): string {
 </template>
 
 <style scoped>
+/* 0fr → 1fr：不用量高度就能把展开做成过渡，内容多长都对 */
+.tool-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--transition-normal);
+}
+
+.tool-collapse.open {
+  grid-template-rows: 1fr;
+}
+
+/* 0fr 只把行轨压成 0，压不掉格子项自己的 padding 和 border——行轨的下限取的是
+   格子项的「外尺寸」，min-height: 0 只管内容盒。所以格子项必须是一层光板：
+   .tool-call-body 直接当格子项的话，收起时会剩 16+16+1=33px 的一条缝，
+   里头还露出「输入」那行字的顶端。 */
+.tool-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .tool-call-target {
   flex: 1;
   font-family: var(--font-mono);

@@ -1,3 +1,4 @@
+import { checkAndReloadMcpConfig } from "../../mcp/hot-reload"
 import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
@@ -56,8 +57,9 @@ export const McpRoutes = lazy(() =>
       ),
       async (c) => {
         const { name, config } = c.req.valid("json")
-        const result = await MCP.add(name, config)
-        return c.json(result.status)
+        await Config.updateMcp(name, config)
+        await checkAndReloadMcpConfig(true)
+        return c.json(await MCP.status())
       },
     )
     .post(
@@ -243,7 +245,8 @@ export const McpRoutes = lazy(() =>
       validator("param", z.object({ name: z.string() })),
       async (c) => {
         const { name } = c.req.valid("param")
-        await MCP.remove(name)
+        await Config.updateMcp(name, null)
+        await checkAndReloadMcpConfig(true)
         return c.json({ success: true as const })
       },
     )

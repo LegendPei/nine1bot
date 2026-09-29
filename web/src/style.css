@@ -552,40 +552,60 @@ a:hover {
   background: var(--bg-tertiary);
 }
 
+/* 小号状态符号保留形状差异，颜色只是辅助识别。 */
 .tool-call-icon {
-  width: 20px;
-  height: 20px;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
+}
+
+.tool-call-icon svg {
+  display: block;
 }
 
 .tool-call-icon.pending {
-  background: var(--info-subtle);
-  color: var(--info);
+  color: var(--text-muted);
 }
 
 .tool-call-icon.running {
-  background: var(--warning-subtle);
-  color: var(--warning);
-  animation: pulse 1.5s infinite;
+  color: var(--accent);
 }
 
 .tool-call-icon.success {
-  background: var(--success-subtle);
   color: var(--success);
 }
 
 .tool-call-icon.error {
-  background: var(--error-subtle);
   color: var(--error);
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+/* 运行态的呼吸灯：一个点 + 一圈向外扩散的光。
+   原来是「转圈 spinner」套在「整块 opacity 闪」里，两种运动互相打架，
+   而且用的是 warning 黄——正在干活被读成出了问题。 */
+.tool-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: tool-breathe 1.35s var(--ease-smooth) infinite;
+}
+
+@keyframes tool-breathe {
+  0% {
+    transform: scale(0.85);
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.45);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 5px rgba(var(--accent-rgb), 0);
+  }
+  100% {
+    transform: scale(0.85);
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0);
+  }
 }
 
 .tool-call-name {
@@ -1233,6 +1253,8 @@ a:hover {
 }
 
 .markdown-content table {
+  display: block;
+  overflow-x: auto;
   width: 100%;
   margin: 1em 0;
   border-collapse: collapse;
@@ -1241,6 +1263,7 @@ a:hover {
 
 .markdown-content th,
 .markdown-content td {
+  min-width: 72px;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--border-default);
   text-align: left;
@@ -1250,6 +1273,9 @@ a:hover {
   background: var(--bg-secondary);
   font-weight: 600;
 }
+
+.markdown-content pre { position: relative; padding-top: 36px; }
+.copy-code { position: absolute; right: 8px; top: 6px; padding: 3px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-elevated); color: var(--text-muted); cursor: pointer; font: inherit; font-size: 11px; }
 
 .markdown-content tr:hover td {
   background: var(--bg-secondary);
@@ -1264,6 +1290,24 @@ a:hover {
 .markdown-content img {
   max-width: 100%;
   border-radius: var(--radius-md);
+}
+
+/* 流式输出时的打字光标：贴在最后一块的末尾，跟着文字走。
+   走伪元素而不是插一个 span——不额外动 DOM，也就不会干扰块级 diff。 */
+.markdown-content.is-streaming > :last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: md-caret 1.05s steps(2, start) infinite;
+}
+
+@keyframes md-caret {
+  50% { opacity: 0; }
 }
 
 /* === Loading States === */
@@ -1391,4 +1435,13 @@ a:hover {
     width: 95%;
     max-height: 90vh;
   }
+}
+
+/* Keep the composer anchored while a new conversation becomes active. */
+.chat-panel.empty-layout { align-items: stretch; justify-content: flex-start; }
+.empty-center-wrapper { flex: 1; min-height: 0; max-width: none; padding: 0; gap: 0; align-items: stretch; justify-content: flex-start; }
+.empty-center-wrapper .chat-viewport { min-height: 0; }
+.empty-center-wrapper .input-container { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }

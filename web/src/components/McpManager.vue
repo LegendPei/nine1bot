@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { McpServer, McpConfig } from '../api/client'
 
-defineProps<{
+const props = defineProps<{
   servers: McpServer[]
   loading: boolean
+  saveServer: (name: string, config: McpConfig) => Promise<void>
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +29,8 @@ const isSubmitting = ref(false)
 const editMode = ref<'form' | 'json'>('form')
 const jsonInput = ref('')
 const jsonError = ref('')
+const hasUnsavedChanges = computed(() => showForm.value && Boolean(formName.value || formCommand.value || formUrl.value || jsonInput.value))
+defineExpose({ hasUnsavedChanges, isSaving: isSubmitting })
 
 function getStatusBadge(status: string) {
   switch (status) {
@@ -81,6 +84,7 @@ function closeForm() {
 }
 
 async function submitForm() {
+  if (isSubmitting.value) return
   formError.value = ''
 
   if (!formName.value.trim()) {
@@ -118,7 +122,7 @@ async function submitForm() {
       }
     }
 
-    emit('add', formName.value.trim(), config)
+    await props.saveServer(formName.value.trim(), config)
     closeForm()
   } catch (e: any) {
     formError.value = e.message || '添加失败'
@@ -263,7 +267,8 @@ function validateServerName(name: string): string | null {
 }
 
 // JSON 模式提交
-function submitJson() {
+async function submitJson() {
+  if (isSubmitting.value) return
   jsonError.value = ''
 
   try {
@@ -309,10 +314,13 @@ function submitJson() {
       return
     }
 
-    emit('add', name, config)
+    isSubmitting.value = true
+    await props.saveServer(name, config)
     closeForm()
   } catch (e: any) {
     jsonError.value = '发生错误: ' + e.message
+  } finally {
+    isSubmitting.value = false
   }
 }
 

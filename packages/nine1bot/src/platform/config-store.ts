@@ -1,7 +1,7 @@
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { dirname } from 'path'
+import { readFile } from 'fs/promises'
+import { JsonFile } from '../../../../opencode/packages/opencode/src/util/json-file'
 import type { PlatformManagerConfig } from './manager'
-import { stripJsonComments, upsertTopLevelJsoncProperty } from '../config/jsonc'
+import { stripJsonComments } from '../config/jsonc'
 
 export class PlatformConfigPathMissingError extends Error {
   constructor() {
@@ -39,27 +39,9 @@ export async function writePlatformManagerConfig(
   platforms: PlatformManagerConfig,
   configPath = getPlatformConfigPath(),
 ): Promise<PlatformConfigDocument> {
-  const originalText = await readFile(configPath, 'utf-8').catch((error: any) => {
-    if (error?.code === 'ENOENT') return ''
-    throw error
-  })
-  const document = await readPlatformConfigDocument(configPath)
-  const normalizedPlatforms = normalizePlatforms(platforms)
-  const nextDocument: PlatformConfigDocument = {
-    ...document,
-    platforms: normalizedPlatforms,
-  }
-  await mkdir(dirname(configPath), { recursive: true })
-  await writeFile(
-    configPath,
-    upsertTopLevelJsoncProperty({
-      jsonc: originalText,
-      key: 'platforms',
-      value: normalizedPlatforms,
-    }),
-    'utf-8',
-  )
-  return nextDocument
+  return await JsonFile.update(configPath, (document) => {
+    document.platforms = normalizePlatforms(platforms)
+  }) as PlatformConfigDocument
 }
 
 function normalizePlatforms(input: unknown): PlatformManagerConfig {

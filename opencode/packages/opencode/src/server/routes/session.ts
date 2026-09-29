@@ -1,3 +1,6 @@
+import { Instance } from "../../project/instance"
+import { Project } from "../../project/project"
+import { RunLease } from "../../session/run-lease"
 import { Hono, type Context } from "hono"
 import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
@@ -535,29 +538,30 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const updates = c.req.valid("json")
 
-        // If directory is being updated, check if session has messages
-        if (updates.directory !== undefined) {
-          const messages = await Session.messages({ sessionID, limit: 1 })
-          if (messages.length > 0) {
-            return c.json({ error: "Cannot change directory after session has messages" }, 400)
+        const lease = updates.directory === undefined ? undefined : RunLease.reserve(sessionID)
+        try {
+          if (updates.directory !== undefined) {
+            const directory = await Instance.normalizeDirectory(updates.directory)
+            const stat = await fs.stat(directory).catch(() => undefined)
+            if (!stat?.isDirectory()) return c.json({ error: "工作目录不存在" }, 400)
+            const project = await Project.fromDirectory(directory)
+            const session = await Session.get(sessionID)
+            if (project.project.id !== session.projectID) {
+              return c.json({ error: "跨项目切换目录请新建会话，当前会话及草稿已保留" }, 400)
+            }
+            const messages = await Session.messages({ sessionID, limit: 1 })
+            if (messages.length > 0) return c.json({ error: "Cannot change directory after session has messages" }, 400)
+            updates.directory = directory
           }
-        }
-
-        const updatedSession = await Session.update(
-          sessionID,
-          (session) => {
-            if (updates.title !== undefined) {
-              session.title = updates.title
-            }
-            if (updates.directory !== undefined) {
-              session.directory = updates.directory
-            }
+          const updatedSession = await Session.update(sessionID, (session) => {
+            if (updates.title !== undefined) session.title = updates.title
+            if (updates.directory !== undefined) session.directory = updates.directory
             if (updates.time?.archived !== undefined) session.time.archived = updates.time.archived
-          },
-          { touch: false },
-        )
-
-        return c.json(updatedSession)
+          }, { touch: false })
+          return c.json(updatedSession)
+        } finally {
+          if (lease) RunLease.release(sessionID, lease.id)
+        }
       },
     )
     .post(
@@ -649,8 +653,7 @@ export const SessionRoutes = lazy(() =>
         }),
       ),
       async (c) => {
-        SessionPrompt.cancel(c.req.valid("param").sessionID)
-        return c.json(true)
+        return c.json(SessionPrompt.cancel(c.req.valid("param").sessionID))
       },
     )
     .post(

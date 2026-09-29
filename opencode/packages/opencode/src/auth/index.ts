@@ -1,6 +1,6 @@
 import path from "path"
 import { Global } from "../global"
-import fs from "fs/promises"
+import { JsonFile } from "../util/json-file"
 import z from "zod"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
@@ -60,8 +60,7 @@ export namespace Auth {
 
   // Helper to load auth from a file
   async function loadAuthFile(filePath: string): Promise<Record<string, Info>> {
-    const file = Bun.file(filePath)
-    const data = await file.json().catch(() => ({}) as Record<string, unknown>)
+    const { data } = await JsonFile.read(filePath)
     return Object.entries(data).reduce(
       (acc, [key, value]) => {
         const parsed = Info.safeParse(value)
@@ -83,46 +82,16 @@ export namespace Auth {
   }
 
   export async function set(key: string, info: Info) {
-    const filePath = getAuthFilePath()
-    const dir = path.dirname(filePath)
-
-    // Ensure directory exists
-    await fs.mkdir(dir, { recursive: true })
-
-    // Load current data from Nine1Bot auth file only (not merged)
-    const file = Bun.file(filePath)
-    const currentData = await file.json().catch(() => ({}) as Record<string, unknown>)
-    const data = Object.entries(currentData).reduce(
-      (acc, [k, value]) => {
-        const parsed = Info.safeParse(value)
-        if (parsed.success) acc[k] = parsed.data
-        return acc
-      },
-      {} as Record<string, Info>,
-    )
-
-    await Bun.write(file, JSON.stringify({ ...data, [key]: info }, null, 2))
-    await fs.chmod(filePath, 0o600)
+    await JsonFile.transaction([getAuthFilePath()], ([document]) => {
+      document.data[key] = Info.parse(info)
+      document.mode = 0o600
+    })
   }
 
   export async function remove(key: string) {
-    const filePath = getAuthFilePath()
-    const file = Bun.file(filePath)
-
-    // Load current data from Nine1Bot auth file only
-    const currentData = await file.json().catch(() => ({}) as Record<string, unknown>)
-    const data = Object.entries(currentData).reduce(
-      (acc, [k, value]) => {
-        const parsed = Info.safeParse(value)
-        if (parsed.success) acc[k] = parsed.data
-        return acc
-      },
-      {} as Record<string, Info>,
-    )
-
-    delete data[key]
-    await Bun.write(file, JSON.stringify(data, null, 2))
-    await fs.chmod(filePath, 0o600)
+    await JsonFile.update(getAuthFilePath(), (data) => {
+      delete data[key]
+    })
   }
 
   export async function importFromOpencode(): Promise<ImportResult> {
@@ -141,27 +110,27 @@ export namespace Auth {
 
     const raw = await sourceFile.json()
     const sourceEntries = typeof raw === "object" && raw !== null ? Object.entries(raw) : []
-    const current = await all()
 
     const imported: string[] = []
     const skippedExisting: string[] = []
     const skippedInvalid: string[] = []
 
-    for (const [providerID, value] of sourceEntries) {
-      const parsed = Info.safeParse(value)
-      if (!parsed.success) {
-        skippedInvalid.push(providerID)
-        continue
+    await JsonFile.transaction([getAuthFilePath()], ([document]) => {
+      document.mode = 0o600
+      for (const [providerID, value] of sourceEntries) {
+        const parsed = Info.safeParse(value)
+        if (!parsed.success) {
+          skippedInvalid.push(providerID)
+          continue
+        }
+        if (providerID in document.data) {
+          skippedExisting.push(providerID)
+          continue
+        }
+        document.data[providerID] = parsed.data
+        imported.push(providerID)
       }
-      if (providerID in current) {
-        skippedExisting.push(providerID)
-        continue
-      }
-
-      await set(providerID, parsed.data)
-      current[providerID] = parsed.data
-      imported.push(providerID)
-    }
+    })
 
     return {
       sourceFound: true,

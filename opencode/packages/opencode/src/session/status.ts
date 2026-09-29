@@ -41,21 +41,18 @@ export namespace SessionStatus {
     ),
   }
 
-  const state = Instance.state(() => {
-    const data: Record<string, Info> = {}
-    return data
-  })
+  const statuses = new Map<string, { projectID: string; status: Info }>()
 
-  export function get(sessionID: string) {
-    return (
-      state()[sessionID] ?? {
-        type: "idle",
-      }
-    )
+  export function get(sessionID: string): Info {
+    return statuses.get(sessionID)?.status ?? { type: "idle" }
   }
 
   export function list() {
-    return state()
+    return Object.fromEntries(
+      [...statuses]
+        .filter(([, value]) => value.projectID === Instance.project.id)
+        .map(([id, value]) => [id, value.status]),
+    )
   }
 
   export function set(sessionID: string, status: Info) {
@@ -68,9 +65,9 @@ export namespace SessionStatus {
       Bus.publish(Event.Idle, {
         sessionID,
       })
-      delete state()[sessionID]
+      statuses.delete(sessionID)
       return
     }
-    state()[sessionID] = status
+    statuses.set(sessionID, { projectID: Instance.project.id, status })
   }
 }

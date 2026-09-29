@@ -373,15 +373,14 @@ export namespace Project {
 
   export async function list() {
     const keys = await Storage.list(["project"])
-    const projects = await Promise.all(keys.map((x) => Storage.read<Info>(x).catch(() => undefined)))
-    const result: Info[] = []
-    for (const project of projects) {
-      if (!project) continue
+    const visible: Array<Info | undefined> = new Array(keys.length)
+    await work(16, keys.map((key, index) => ({ key, index })), async ({ key, index }) => {
+      const project = await Storage.read<Info>(key).catch(() => undefined)
+      if (!project) return
       const hidden = await readMeta(project.id).then((x) => x.hidden === true)
-      if (hidden) continue
-      result.push(normalizeProject(project))
-    }
-    return result
+      if (!hidden) visible[index] = normalizeProject(project)
+    })
+    return visible.filter((project): project is Info => project !== undefined)
   }
 
   export async function get(projectID: string) {
