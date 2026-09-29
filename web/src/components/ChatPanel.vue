@@ -20,7 +20,6 @@ const props = defineProps<{
   sessionError?: { message: string; dismissable?: boolean } | null
   currentDirectory?: string
   canChangeDirectory?: boolean
-  mode?: 'chat' | 'agent'
 }>()
 
 const emit = defineEmits<{
@@ -219,8 +218,8 @@ onUnmounted(() => {
           <span class="greeting-text">{{ greeting }}</span>
         </div>
 
-        <!-- Directory Selector (only in code mode, subtle, below greeting) -->
-        <div v-if="canChangeDirectory && mode === 'agent'" class="directory-selector-section">
+        <!-- Directory selector below greeting -->
+        <div v-if="canChangeDirectory" class="directory-selector-section">
           <button class="directory-btn" @click="openDirectoryPicker">
             <FolderOpen :size="16" />
             <span class="directory-btn-text">

@@ -4,9 +4,7 @@ import { useSession } from './composables/useSession'
 import { useSidebarLayout } from './composables/useSidebarLayout'
 import { useFiles } from './composables/useFiles'
 import { useSettings } from './composables/useSettings'
-import { useAppMode } from './composables/useAppMode'
 import { useClientSurface } from './composables/useClientSurface'
-import { useSessionMode } from './composables/useSessionMode'
 import { useProjects } from './composables/useProjects'
 import { useGlobalRecentSessions } from './composables/useGlobalRecentSessions'
 import { collectActivePageContext, type RequestPagePayload } from './api/page-context'
@@ -173,12 +171,6 @@ watch([insecureTransport, accessAuthenticated], ([insecure, authenticated]) => {
 // 主题在 App 根初始化一次：启动即应用 data-theme，不随设置面板卸载失效
 useTheme()
 
-// App mode (chat / agent)
-const { mode: appMode, setMode: setAppMode } = useAppMode()
-
-// Session ↔ mode mapping
-const { setMode: setSessionMode } = useSessionMode()
-
 // Projects
 const {
   projects,
@@ -242,10 +234,6 @@ const extensionRelayStatus = ref({
 })
 
 const sidebarSessions = computed(() => {
-  if (appMode.value !== 'agent') {
-    return sessions.value
-  }
-
   const merged = new Map<string, Session>()
   for (const session of globalRecentSessions.value) {
     merged.set(session.id, session)
@@ -262,18 +250,13 @@ const sidebarSessions = computed(() => {
 })
 
 const sidebarSessionsLoading = computed(() =>
-  sessionsLoading.value || (appMode.value === 'agent' && (projectsLoading.value || globalRecentSessionsLoading.value))
+  sessionsLoading.value || projectsLoading.value || globalRecentSessionsLoading.value
 )
 const sidebarSessionsError = computed(() =>
-  sessionsLoadError.value || (appMode.value === 'agent' && globalRecentSessionsLoadError.value)
+  sessionsLoadError.value || globalRecentSessionsLoadError.value
 )
 
-const searchRecentSessions = computed(() => {
-  if (appMode.value === 'agent') {
-    return sidebarSessions.value.slice(0, 300)
-  }
-  return sessions.value.slice(0, 300)
-})
+const searchRecentSessions = computed(() => sidebarSessions.value.slice(0, 300))
 
 // Empty state detection for centered layout
 const isEmptyState = computed(() =>
@@ -356,10 +339,10 @@ watch(sessionsLoadError, (failed) => {
 })
 
 function scheduleGlobalRecentsRetry() {
-  if (!authenticatedRuntimeStarted || appMode.value !== 'agent' || globalRecentsRetryTimer) return
+  if (!authenticatedRuntimeStarted || globalRecentsRetryTimer) return
   globalRecentsRetryTimer = setTimeout(async () => {
     globalRecentsRetryTimer = null
-    if (!authenticatedRuntimeStarted || appMode.value !== 'agent' || !globalRecentSessionsLoadError.value) return
+    if (!authenticatedRuntimeStarted || !globalRecentSessionsLoadError.value) return
     if (globalRecentSessionsLoading.value) {
       scheduleGlobalRecentsRetry()
       return
@@ -381,8 +364,8 @@ watch(globalRecentSessionsLoadError, (failed) => {
   else globalRecentsRetryDelayMs = 1500
 })
 
-async function refreshGlobalRecentsIfAgent() {
-  if (appMode.value !== 'agent') return
+async function refreshSidebarRecents() {
+  if (isBrowserExtension.value) return
   await refreshGlobalRecentSessions().catch((error) => {
     console.error('Failed to refresh global recent sessions:', error)
   })
@@ -598,16 +581,14 @@ async function startAuthenticatedRuntime() {
       console.error('Failed to load projects:', error)
       return false
     })
-    if (appMode.value === 'agent') {
-      startGlobalRecentPolling()
-      void projectsLoad.then((loaded) => {
-        if (generation !== authenticatedRuntimeGeneration || appMode.value !== 'agent') return
-        if (globalRecentSessionsLoading.value) return
-        return loadGlobalRecentSessions(loaded ? projects.value : undefined)
-      }).catch((error) => {
-        console.error('Failed to load global recent sessions:', error)
-      })
-    }
+    startGlobalRecentPolling()
+    void projectsLoad.then((loaded) => {
+      if (generation !== authenticatedRuntimeGeneration) return
+      if (globalRecentSessionsLoading.value) return
+      return loadGlobalRecentSessions(loaded ? projects.value : undefined)
+    }).catch((error) => {
+      console.error('Failed to load global recent sessions:', error)
+    })
   }
 
   // Model configuration can load while the history and current session settle.
@@ -689,37 +670,12 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   }
 }
 
-// A draft becomes a real session before isDraftSession is cleared. Selecting
-// existing history clears the draft flag first, so it must keep its saved mode.
-watch(currentSession, (newSession, oldSession) => {
-  if (newSession && !oldSession && isDraftSession.value) {
-    setSessionMode(newSession.id, appMode.value)
-  }
-}, { flush: 'sync' })
-
 // 监听当前目录变化，更新文件树工作目录
 watch(currentDirectory, (newDir) => {
   if (!authenticatedRuntimeStarted) return
   setFilesDirectory(newDir || undefined)
   void loadFiles('.')
   void loadProviders().then(loadConfig)
-})
-
-watch(appMode, (newMode) => {
-  if (!authenticatedRuntimeStarted) return
-  if (newMode === 'agent') {
-    if (globalRecentSessionsLoadError.value) scheduleGlobalRecentsRetry()
-    void refreshGlobalRecentSessions().catch((error) => {
-      console.error('Failed to refresh global recent sessions:', error)
-    })
-    startGlobalRecentPolling()
-    return
-  }
-  stopGlobalRecentPolling()
-  if (globalRecentsRetryTimer) {
-    clearTimeout(globalRecentsRetryTimer)
-    globalRecentsRetryTimer = null
-  }
 })
 
 async function handleSend(content: string, files?: Array<{ type: 'file'; mime: string; filename: string; url: string }>, planMode?: boolean, onResult?: (success: boolean) => void) {
@@ -767,16 +723,6 @@ function handleNewSession() {
   createSession(currentDirectory.value || '.')
 }
 
-// Mode switch handler — auto navigate to new chat
-function handleSwitchMode(newMode: 'chat' | 'agent') {
-  sidebarMobileOpen.value = false
-  setAppMode(newMode)
-  showProjectsPage.value = false
-  showMetricsPage.value = false
-  showAutomationsPage.value = false
-  createSession(currentDirectory.value || '.')
-}
-
 async function handleSelectProject(projectId: string) {
   sidebarMobileOpen.value = false
   if (!projectId) {
@@ -798,7 +744,7 @@ async function handleSelectProject(projectId: string) {
     createSession(directory)
   }
   await loadSessions()
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 function handleOpenProjects() {
@@ -874,7 +820,7 @@ async function handleCreateProject(name: string, instructions: string, directory
   showProjectsPage.value = false
   showAutomationsPage.value = false
   await loadSessions()
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 async function handleUpdateProject(projectId: string, updates: { name?: string; instructions?: string }, done?: () => void) {
@@ -910,7 +856,7 @@ function handleProjectNewSession(projectId: string) {
 
 async function handleDeleteProject(projectId: string) {
   await forgetProject(projectId)
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 async function handleProjectSelectSession(session: Session) {
@@ -937,12 +883,12 @@ async function handleAutomationSelectSession(session: Session) {
 
 async function handleDeleteSession(sessionId: string) {
   await deleteSession(sessionId)
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 async function handleRenameSession(sessionId: string, title: string) {
   await renameSession(sessionId, title)
-  await refreshGlobalRecentsIfAgent()
+  await refreshSidebarRecents()
 }
 
 // 处理消息部分删除
@@ -1167,7 +1113,6 @@ function handlePromptSelect(prompt: string) {
       :isDraftSession="isDraftSession"
       :files="files"
       :filesLoading="filesLoading"
-      :mode="appMode"
       :projects="projects"
       :currentProjectId="currentProject?.id || null"
       :currentDirectory="currentDirectory"
@@ -1188,7 +1133,6 @@ function handlePromptSelect(prompt: string) {
       @open-settings="openSettings"
       @open-search="showSearch = true"
       @change-directory="changeDirectory"
-      @switch-mode="handleSwitchMode"
       @select-project="handleSelectProject"
       @open-projects="handleOpenProjects"
       @open-metrics="handleOpenMetrics"
@@ -1269,7 +1213,6 @@ function handlePromptSelect(prompt: string) {
               :sessionError="sessionError"
               :currentDirectory="currentDirectory"
               :canChangeDirectory="canChangeDirectory()"
-              :mode="appMode"
               @question-answered="(id, answers) => answerQuestion(id, answers)"
               @question-rejected="rejectQuestion"
               @permission-responded="respondPermission"
@@ -1290,7 +1233,6 @@ function handlePromptSelect(prompt: string) {
               :providers="providers"
               :currentProvider="currentProvider"
               :currentModel="currentModel"
-              :mode="appMode"
               @send="handleSend"
               @abort="abortCurrentSession"
               @select-model="handleSelectModel"

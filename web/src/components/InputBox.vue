@@ -15,7 +15,6 @@ const props = defineProps<{
   providers?: Provider[]
   currentProvider?: string
   currentModel?: string
-  mode?: 'chat' | 'agent'
 }>()
 
 const emit = defineEmits<{
@@ -334,16 +333,14 @@ function formatSize(bytes: number): string {
                 <Minimize2 :size="16" />
                 <span>压缩会话</span>
               </button>
-              <template v-if="mode === 'agent'">
-                <div class="plus-menu-divider"></div>
-                <button class="plus-menu-item" :class="{ active: isPlanMode }" @click="togglePlanMode">
-                  <ClipboardList :size="16" />
-                  <span>Plan 模式</span>
-                  <span v-if="isPlanMode" class="plus-menu-check">
-                    <Check :size="14" />
-                  </span>
-                </button>
-              </template>
+              <div class="plus-menu-divider"></div>
+              <button class="plus-menu-item" :class="{ active: isPlanMode }" @click="togglePlanMode">
+                <ClipboardList :size="16" />
+                <span>Plan 模式</span>
+                <span v-if="isPlanMode" class="plus-menu-check">
+                  <Check :size="14" />
+                </span>
+              </button>
             </div>
           </div>
 

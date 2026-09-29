@@ -3,12 +3,10 @@ import { ref, computed } from 'vue'
 import { groupSessionsByProject } from '../utils/session-groups'
 import {
   PanelLeftClose, PanelLeft, MessageSquare, Plus, Search,
-  FolderOpen, Code2, Sparkles, Pencil, Trash2, X, Check,
-  Loader2, Square, ChevronRight, User, Settings, MessageCircle, EllipsisVertical, BarChart3, Webhook
+  FolderOpen, Sparkles, Pencil, Trash2, X, Check,
+  Loader2, Square, ChevronRight, User, Settings, EllipsisVertical, BarChart3, Webhook
 } from 'lucide-vue-next'
 import type { Session, FileItem } from '../api/client'
-import type { AppMode } from '../composables/useAppMode'
-import { useSessionMode } from '../composables/useSessionMode'
 import { useUserProfile } from '../composables/useUserProfile'
 
 export interface ProjectInfo {
@@ -39,7 +37,6 @@ const props = defineProps<{
   isDraftSession: boolean
   files: FileItem[]
   filesLoading: boolean
-  mode: AppMode
   // Projects
   projects: ProjectInfo[]
   currentProjectId: string | null
@@ -66,15 +63,11 @@ const emit = defineEmits<{
   'open-settings': []
   'open-search': []
   'change-directory': [directory: string]
-  'switch-mode': [mode: AppMode]
   'select-project': [projectId: string]
   'open-projects': []
   'open-metrics': []
   'open-automations': []
 }>()
-
-// Session mode mapping
-const { getMode } = useSessionMode()
 
 // User profile
 const { profile, brandLogo } = useUserProfile()
@@ -91,19 +84,8 @@ const deletingSession = ref<SidebarSession | null>(null)
 
 // Right-click context menu
 const contextMenu = ref<{ x: number; y: number; session: SidebarSession } | null>(null)
-// Sessions filtered by current mode
-const filteredSessions = computed(() => {
-  // Show sessions matching current mode, or untagged (legacy) sessions
-  return props.sessions.filter(s => {
-    const sessionMode = getMode(s.id)
-    return sessionMode === props.mode || sessionMode === undefined
-  })
-})
-
 const collapsedProjects = ref<Record<string, boolean>>({})
-const sessionGroups = computed(() => props.mode === 'agent'
-  ? groupSessionsByProject(filteredSessions.value, props.projects)
-  : [{ id: 'recents', name: '', directory: '', projectId: undefined, sessions: filteredSessions.value }])
+const sessionGroups = computed(() => groupSessionsByProject(props.sessions, props.projects))
 
 function cancelRename() {
   renamingSession.value = null
@@ -228,7 +210,7 @@ function contextMenuDelete() {
     <!-- Recents Section -->
     <div class="sidebar-section" v-if="!collapsed">
       <div class="section-header" @click="showRecents = !showRecents">
-        <span class="section-label">{{ mode === 'agent' ? '项目' : '最近会话' }}</span>
+        <span class="section-label">项目</span>
         <ChevronRight :size="14" class="section-chevron" :class="{ expanded: showRecents }" />
       </div>
 
@@ -243,7 +225,7 @@ function contextMenuDelete() {
         </div>
 
         <section v-for="group in sessionGroups" :key="group.id" class="project-session-group">
-          <div v-if="mode === 'agent'" class="project-group-heading">
+          <div class="project-group-heading">
             <button class="project-group-toggle" :aria-expanded="!collapsedProjects[group.id]" :title="group.directory" @click="collapsedProjects[group.id] = !collapsedProjects[group.id]">
               <ChevronRight :size="12" :class="{ expanded: !collapsedProjects[group.id] }" />
               <FolderOpen :size="16" />
@@ -252,8 +234,8 @@ function contextMenuDelete() {
             </button>
             <button v-if="group.projectId" class="mini-btn project-new" :title="'在 ' + group.name + ' 中新建会话'" @click="emit('project-new-session', group.projectId)"><Plus :size="14" /></button>
           </div>
-          <div v-show="!collapsedProjects[group.id]" :class="{ 'project-session-children': mode === 'agent' }">
-        <!-- Filtered Sessions by Mode -->
+          <div v-show="!collapsedProjects[group.id]" class="project-session-children">
+        <!-- Sessions in this project -->
         <div
           v-for="session in group.sessions"
           :key="session.id"
@@ -290,58 +272,17 @@ function contextMenuDelete() {
           </div>
         </div>
 
-          <div v-if="mode === 'agent' && !group.sessions.length" class="project-empty">暂无会话</div>
+          <div v-if="!group.sessions.length" class="project-empty">暂无会话</div>
           </div>
         </section>
-        <!-- Empty state when no sessions match current mode -->
-        <div v-if="filteredSessions.length === 0 && (sessionsLoading || sessionsLoadError || !isDraftSession)" class="empty-state section-empty">
+        <!-- Empty session list -->
+        <div v-if="sessions.length === 0 && (sessionsLoading || sessionsLoadError || !isDraftSession)" class="empty-state section-empty">
           {{ sessionsLoading ? '正在加载会话...' : sessionsLoadError ? '加载失败，正在重试...' : '暂无会话' }}
         </div>
       </div>
     </div>
 
-    <!-- Spacer to push mode switch + footer to bottom -->
     <div class="sidebar-spacer"></div>
-
-    <!-- Mode Switcher -->
-    <div class="mode-switcher" v-if="!collapsed">
-      <button
-        class="mode-btn"
-        :class="{ active: mode === 'chat' }"
-        @click="emit('switch-mode', 'chat')"
-      >
-        <MessageCircle :size="16" />
-        <span>Chat</span>
-      </button>
-      <button
-        class="mode-btn"
-        :class="{ active: mode === 'agent' }"
-        @click="emit('switch-mode', 'agent')"
-      >
-        <Code2 :size="16" />
-        <span>Agent</span>
-      </button>
-    </div>
-
-    <!-- Collapsed Mode Switcher -->
-    <div class="mode-switcher mode-switcher-collapsed" v-if="collapsed">
-      <button
-        class="nav-item-icon"
-        :class="{ active: mode === 'chat' }"
-        @click="emit('switch-mode', 'chat')"
-        title="Chat 模式"
-      >
-        <MessageCircle :size="18" />
-      </button>
-      <button
-        class="nav-item-icon"
-        :class="{ active: mode === 'agent' }"
-        @click="emit('switch-mode', 'agent')"
-        title="Agent 模式"
-      >
-        <Code2 :size="18" />
-      </button>
-    </div>
 
     <!-- User Profile Footer -->
     <div class="sidebar-footer" v-if="!collapsed">
@@ -724,52 +665,6 @@ function contextMenuDelete() {
 .sidebar-spacer {
   flex: 0;
   min-height: var(--space-sm);
-}
-
-/* === Mode Switcher === */
-.mode-switcher {
-  display: flex;
-  gap: 4px;
-  padding: var(--space-xs) var(--space-sm);
-  margin: 0 var(--space-sm);
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-md);
-}
-
-.mode-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: var(--font-sans);
-  font-size: var(--text-13);
-  font-weight: 500;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-}
-
-.mode-btn:hover {
-  color: var(--text-primary);
-}
-
-.mode-btn.active {
-  background: var(--bg-composer);
-  color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-.mode-switcher-collapsed {
-  flex-direction: column;
-  align-items: center;
-  background: transparent;
-  margin: 0;
-  padding: var(--space-xs) 0;
 }
 
 /* === User Profile Footer (base .sidebar-footer lives in global style.css) === */
