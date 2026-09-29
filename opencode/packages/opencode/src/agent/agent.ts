@@ -423,7 +423,8 @@ export namespace Agent {
     return JSON.stringify({
       directory: Instance.directory,
       worktree: Instance.worktree,
-      config: RuntimeSourceRegistry.version(),
+      config: Config.version(),
+      sources: RuntimeSourceRegistry.version(),
     })
   }
 

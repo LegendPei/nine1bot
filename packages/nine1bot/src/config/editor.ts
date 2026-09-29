@@ -1,24 +1,19 @@
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { dirname } from 'path'
-import { applyEdits, modify, type FormattingOptions } from 'jsonc-parser'
-
-const formattingOptions: FormattingOptions = {
-  insertSpaces: true,
-  tabSize: 2,
-  eol: '\n',
-}
+import { JsonFile } from '../../../../opencode/packages/opencode/src/util/json-file'
 
 export async function updateConfigValue(
   configPath: string,
   path: Array<string | number>,
   value: unknown,
 ): Promise<void> {
-  await mkdir(dirname(configPath), { recursive: true })
-  const source = await readFile(configPath, 'utf8').catch((error) => {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return '{}\n'
-    throw error
+  await JsonFile.update(configPath, (draft) => {
+    let parent: any = draft
+    for (let index = 0; index < path.length - 1; index++) {
+      const key = path[index]!
+      parent[key] ??= typeof path[index + 1] === 'number' ? [] : {}
+      parent = parent[key]
+    }
+    const key = path[path.length - 1]!
+    if (value === undefined) delete parent[key]
+    else parent[key] = value
   })
-  const edits = modify(source, path, value, { formattingOptions })
-  const updated = applyEdits(source, edits)
-  await writeFile(configPath, updated.endsWith('\n') ? updated : `${updated}\n`, 'utf8')
 }

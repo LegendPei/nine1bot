@@ -1,10 +1,10 @@
 import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
-import { readFile, writeFile } from "fs/promises"
-import { parse as parseJsonc } from "jsonc-parser"
 import { Config } from "../../config/config"
 import { Provider } from "../../provider/provider"
+import { JsonFile } from "../../util/json-file"
+import { updateNine1botConfig } from "../../config/nine1bot"
 import { mapValues } from "remeda"
 import { errors } from "../error"
 import { Log } from "../../util/log"
@@ -39,55 +39,13 @@ const CustomProviderSchema = z.object({
 
 const CustomProviderIDSchema = z.string().regex(/^[a-z0-9][a-z0-9-_]{1,63}$/)
 
-async function readNine1botConfig(configPath: string): Promise<Record<string, any>> {
-  const text = await readFile(configPath, "utf-8")
-  return (parseJsonc(text) || {}) as Record<string, any>
+async function readNine1botConfig(configPath: string) {
+  return (await JsonFile.read(configPath)).data
 }
 
-async function writeNine1botConfig(configPath: string, nextConfig: Record<string, any>) {
-  await writeFile(configPath, JSON.stringify(nextConfig, null, 2))
-}
-
-async function patchOpencodeRuntimeConfig(patch: Record<string, any>) {
-  const opConfigPath = process.env.OPENCODE_CONFIG || ""
-  if (!opConfigPath) return
-  const opText = await readFile(opConfigPath, "utf-8").catch(() => "{}")
-  const opConfig = (parseJsonc(opText) || {}) as Record<string, any>
-  Object.assign(opConfig, patch)
-  await writeFile(opConfigPath, JSON.stringify(opConfig, null, 2))
-}
-
-function protocolToNpm(protocol: "openai" | "anthropic") {
-  return protocol === "anthropic" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"
-}
-
-function mapCustomProvidersToOpencode(customProviders: Record<string, any>) {
-  const mapped: Record<string, any> = {}
-  for (const [providerId, provider] of Object.entries(customProviders || {})) {
-    mapped[providerId] = {
-      name: provider.name,
-      npm: protocolToNpm(provider.protocol),
-      api: provider.baseURL,
-      options: {
-        baseURL: provider.baseURL,
-        ...(provider.options || {}),
-      },
-      models: Object.fromEntries(
-        (provider.models || []).map((model: any) => [
-          model.id,
-          {
-            id: model.id,
-            name: model.name || model.id,
-            provider: {
-              npm: protocolToNpm(provider.protocol),
-            },
-          },
-        ]),
-      ),
-    }
-  }
-  return mapped
-}
+const Nine1botPatch = Config.Info.extend({
+  customProviders: z.record(CustomProviderIDSchema, CustomProviderSchema).optional(),
+}).strict()
 
 export const ConfigRoutes = lazy(() =>
   new Hono()
@@ -135,7 +93,7 @@ export const ConfigRoutes = lazy(() =>
         const config = c.req.valid("json")
         await Config.update(config, { reload: "refresh" })
         Provider.refresh()
-        return c.json(config)
+        return c.json(await Config.get())
       },
     )
     .get(
@@ -186,33 +144,14 @@ export const ConfigRoutes = lazy(() =>
         return c.json({ error: e.message }, 500)
       }
     })
-    .patch("/nine1bot", async (c) => {
+    .patch("/nine1bot", validator("json", Nine1botPatch), async (c) => {
       const configPath = process.env.NINE1BOT_CONFIG_PATH || ""
       if (!configPath) {
         return c.json({ error: "No config path" }, 404)
       }
       try {
-        const body = await c.req.json()
-        // 1. 写入 nine1bot.config.jsonc（持久化，重启后生效）
-        const existing = await readNine1botConfig(configPath)
-        const mergedConfig = { ...existing, ...body }
-        await writeNine1botConfig(configPath, mergedConfig)
-        // 2. 更新 OPENCODE_CONFIG 临时文件（运行时配置源，Instance 重建后读取）
-        const runtimePatch = { ...body }
-        if (runtimePatch.customProviders) {
-          const previousCustomProviders = existing.customProviders || {}
-          const nextCustomProviders = mergedConfig.customProviders || {}
-          const mapped = mapCustomProvidersToOpencode(nextCustomProviders)
-          delete runtimePatch.customProviders
-          const currentProvider = (await Config.get()).provider || {}
-          const preserved = Object.fromEntries(
-            Object.entries(currentProvider).filter(([providerId]) => !(providerId in previousCustomProviders)),
-          )
-          runtimePatch.provider = { ...preserved, ...mapped }
-        }
-        await patchOpencodeRuntimeConfig(runtimePatch)
-        Config.refreshAll()
-        Provider.refreshAll()
+        const body = c.req.valid("json")
+        await updateNine1botConfig((draft) => Object.assign(draft, body))
         return c.json({ success: true })
       } catch (e: any) {
         return c.json({ error: e.message }, 500)
@@ -225,34 +164,34 @@ export const ConfigRoutes = lazy(() =>
         return c.json({ error: e.message }, 500)
       }
     })
-    .patch(
-      "/nine1bot/browser-extension",
-      validator("json", BrowserExtensionConfigPatch),
-      async (c) => {
-        try {
-          const patch = c.req.valid("json")
-          const registeredTools = patch.registeredTools === null || patch.registeredTools === undefined
+    .patch("/nine1bot/browser-extension", validator("json", BrowserExtensionConfigPatch), async (c) => {
+      try {
+        const patch = c.req.valid("json")
+        const registeredTools =
+          patch.registeredTools === null || patch.registeredTools === undefined
             ? patch.registeredTools
             : [...new Set(patch.registeredTools.map((toolID) => toolID.trim()).filter(Boolean))]
-          if (registeredTools) RuntimeToolRegistry.assertUserSelectable(registeredTools)
-          const config = await patchBrowserExtensionConfig({
-            ...patch,
-            ...(registeredTools !== undefined ? { registeredTools } : {}),
-          })
-          Config.refresh()
-          Provider.refresh()
-          return c.json(config)
-        } catch (e: any) {
-          if (e instanceof RuntimeToolSelectionError) {
-            return c.json({
+        if (registeredTools) RuntimeToolRegistry.assertUserSelectable(registeredTools)
+        const config = await patchBrowserExtensionConfig({
+          ...patch,
+          ...(registeredTools !== undefined ? { registeredTools } : {}),
+        })
+        Config.refresh()
+        Provider.refresh()
+        return c.json(config)
+      } catch (e: any) {
+        if (e instanceof RuntimeToolSelectionError) {
+          return c.json(
+            {
               error: "Some registered tools cannot be saved as browser defaults.",
               invalid: e.invalid,
-            }, 400)
-          }
-          return c.json({ error: e.message }, e.message === "No config path" ? 404 : 500)
+            },
+            400,
+          )
         }
-      },
-    )
+        return c.json({ error: e.message }, e.message === "No config path" ? 404 : 500)
+      }
+    })
     .get("/nine1bot/custom-providers", async (c) => {
       const configPath = process.env.NINE1BOT_CONFIG_PATH || ""
       if (!configPath) {
@@ -282,21 +221,9 @@ export const ConfigRoutes = lazy(() =>
         try {
           const id = c.req.valid("param").id
           const body = c.req.valid("json")
-          const existing = await readNine1botConfig(configPath)
-          const currentProviders = existing.customProviders || {}
-          const customProviders = { ...currentProviders, [id]: body }
-          await writeNine1botConfig(configPath, { ...existing, customProviders })
-
-          const mapped = mapCustomProvidersToOpencode(customProviders)
-          const current = await Config.get()
-          await patchOpencodeRuntimeConfig({
-            provider: {
-              ...(current.provider || {}),
-              ...mapped,
-            },
+          await updateNine1botConfig((draft) => {
+            draft.customProviders = { ...draft.customProviders, [id]: body }
           })
-          Config.refreshAll()
-          Provider.refreshAll()
           return c.json({ success: true })
         } catch (e: any) {
           return c.json({ error: e.message }, 500)
@@ -318,23 +245,9 @@ export const ConfigRoutes = lazy(() =>
         }
         try {
           const id = c.req.valid("param").id
-          const existing = await readNine1botConfig(configPath)
-          const customProviders = { ...(existing.customProviders || {}) }
-          delete customProviders[id]
-          await writeNine1botConfig(configPath, { ...existing, customProviders })
-
-          const mapped = mapCustomProvidersToOpencode(customProviders)
-          const current = await Config.get()
-          const preserved = Object.fromEntries(
-            Object.entries(current.provider || {}).filter(([providerId]) => !(providerId in (existing.customProviders || {}))),
-          )
-          const nextProvider = {
-            ...preserved,
-            ...mapped,
-          }
-          await patchOpencodeRuntimeConfig({ provider: nextProvider })
-          Config.refreshAll()
-          Provider.refreshAll()
+          await updateNine1botConfig((draft) => {
+            delete draft.customProviders?.[id]
+          })
           return c.json({ success: true })
         } catch (e: any) {
           return c.json({ error: e.message }, 500)
