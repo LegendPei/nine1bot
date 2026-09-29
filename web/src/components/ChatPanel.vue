@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed, onUnmounted } from 'vue'
+import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue'
 import { readChatViewport, saveChatViewport } from '../composables/chat-viewport'
+import { isAtBottom, isTypingTarget, nextFollowing, UP_KEYS } from '../composables/scroll-follow'
 import { ArrowDown, FolderOpen } from 'lucide-vue-next'
 import type { Message, QuestionRequest, PermissionRequest } from '../api/client'
 import MessageItem from './MessageItem.vue'
@@ -112,6 +113,9 @@ let scrollFrame: number | undefined
 let initialPosition = true
 let programmatic = false
 let resizeObserver: ResizeObserver | undefined
+/* 算滚动方向用的基线。程序化写入之后也要同步，否则下一次真实滚动会拿旧值算方向。 */
+let lastTop = 0
+let touchY = 0
 let restored = readChatViewport(props.sessionId)
 function savePosition(id = props.sessionId) {
   if (!scrollContainer.value || initialPosition) return
@@ -129,21 +133,58 @@ function scheduleScrollToBottom() {
       el.scrollTop = following.value ? el.scrollHeight : restored?.top ?? 0
       initialPosition = false
     } else if (following.value) el.scrollTop = el.scrollHeight
+    lastTop = el.scrollTop
     requestAnimationFrame(() => { programmatic = false })
   })
 }
 function handleScroll() {
   const el = scrollContainer.value
-  if (!el || initialPosition || programmatic) return
-  following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+  if (!el) return
+  if (initialPosition || programmatic) {
+    lastTop = el.scrollTop
+    return
+  }
+  const delta = el.scrollTop - lastTop
+  lastTop = el.scrollTop
+  following.value = nextFollowing(following.value, delta, isAtBottom(el))
   savePosition()
+}
+/** 明确的上翻意图（滚轮 / 触摸 / 键盘）：不等滚动落地就松手 */
+function releaseFollow() {
+  if (!following.value) return
+  following.value = false
+  savePosition()
+}
+function handleWheel(event: WheelEvent) {
+  if (event.deltaY < 0) releaseFollow()
+}
+function handleTouchStart(event: TouchEvent) {
+  touchY = event.touches[0]?.clientY ?? 0
+}
+function handleTouchMove(event: TouchEvent) {
+  const y = event.touches[0]?.clientY ?? touchY
+  // 手指往下拖 = 内容往上走 = 想看前面的内容
+  if (y - touchY > 2) releaseFollow()
+  touchY = y
+}
+/* 键位要挂在 window 上：消息流没有 tabindex，焦点通常在 body，事件不会冒到它身上 */
+function handleKeydown(event: KeyboardEvent) {
+  if (!UP_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(document.activeElement)) return
+  const el = scrollContainer.value
+  // 不可见（并行会话里的另一路）或根本不能滚，就别抢滚动条
+  if (!el || !el.clientHeight || el.scrollHeight <= el.clientHeight) return
+  releaseFollow()
 }
 function jumpToLatest() {
   following.value = true
   restored = undefined
   initialPosition = false
   const el = scrollContainer.value
-  if (el) el.scrollTop = el.scrollHeight
+  if (el) {
+    el.scrollTop = el.scrollHeight
+    lastTop = el.scrollTop
+  }
   savePosition()
 }
 async function loadEarlier() {
@@ -156,6 +197,7 @@ async function loadEarlier() {
   visibleCount.value += 40
   await nextTick()
   el.scrollTop = top + el.scrollHeight - height
+  lastTop = el.scrollTop
   requestAnimationFrame(() => { programmatic = false; savePosition() })
 }
 watch(() => props.sessionId, (id, oldId) => {
@@ -177,8 +219,10 @@ watch(messageContent, element => {
   resizeObserver = new ResizeObserver(scheduleScrollToBottom)
   resizeObserver.observe(element)
 }, { flush: 'post' })
+onMounted(() => window.addEventListener('keydown', handleKeydown))
 onUnmounted(() => {
   savePosition()
+  window.removeEventListener('keydown', handleKeydown)
   resizeObserver?.disconnect()
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
 })
@@ -186,7 +230,14 @@ onUnmounted(() => {
 
 <template>
   <div class="chat-viewport">
-  <div class="chat-messages custom-scrollbar" ref="scrollContainer" @scroll.passive="handleScroll">
+  <div
+    class="chat-messages custom-scrollbar"
+    ref="scrollContainer"
+    @scroll.passive="handleScroll"
+    @wheel.passive="handleWheel"
+    @touchstart.passive="handleTouchStart"
+    @touchmove.passive="handleTouchMove"
+  >
     <div v-if="loadError" class="history-error" role="alert">
       <span>{{ loadError }}</span>
       <button class="btn btn-sm btn-ghost" @click="emit('retry')">重试加载</button>
