@@ -310,7 +310,24 @@ onUnmounted(() => {
   .scroll-actions { right: 8px; bottom: 8px; }
 }
 
-.history-error { display: flex; align-items: center; gap: 12px; margin: 16px auto; padding: 12px 16px; max-width: var(--input-max-width); color: var(--error); background: var(--error-subtle); border-radius: var(--radius-md); }
+.history-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px auto;
+  padding: 12px 16px;
+  max-width: var(--input-max-width);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-13);
+  line-height: 1.6;
+}
+.history-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.history-error > button { flex-shrink: 0; }
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -446,9 +463,9 @@ onUnmounted(() => {
   max-width: var(--input-max-width);
   margin: var(--space-md) auto;
   padding: var(--space-md);
-  background: var(--error-subtle);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -468,9 +485,11 @@ onUnmounted(() => {
 }
 
 .error-message {
-  font-size: 0.875rem;
-  line-height: 1.5;
+  font-size: var(--text-13);
+  line-height: 1.65;
   color: var(--text-primary);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .error-actions {
