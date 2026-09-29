@@ -37,6 +37,12 @@ export namespace Config {
   // Custom merge function that concatenates array fields instead of replacing them
   function mergeConfigConcatArrays(target: Info, source: Info): Info {
     const merged = mergeDeep(target, source)
+    for (const [name, entry] of Object.entries(source.mcp ?? {})) {
+      if (!("type" in entry) && entry.enabled === false) {
+        merged.mcp ??= {}
+        merged.mcp[name] = { enabled: false }
+      }
+    }
     if (target.plugin && source.plugin) {
       merged.plugin = Array.from(new Set([...target.plugin, ...source.plugin]))
     }
@@ -1348,14 +1354,14 @@ export namespace Config {
   export async function update(config: Info, options: UpdateOptions = {}) {
     if (process.env.NINE1BOT_CONFIG_PATH) {
       const { updateNine1botConfig } = await import("./nine1bot")
-      await updateNine1botConfig((draft) => Object.assign(draft, mergeDeep(draft, config)))
+      await updateNine1botConfig((draft) => Object.assign(draft, mergeConfigConcatArrays(draft, config)))
     } else {
       const projectJsonc = path.join(Instance.directory, "opencode.jsonc")
       const filepath = Flag.OPENCODE_DISABLE_PROJECT_CONFIG && Flag.OPENCODE_CONFIG
         ? Flag.OPENCODE_CONFIG
         : existsSync(projectJsonc) ? projectJsonc : path.join(Instance.directory, "opencode.json")
       await JsonFile.update(filepath, (draft) => {
-        Object.assign(draft, mergeDeep(draft, config))
+        Object.assign(draft, mergeConfigConcatArrays(draft, config))
         Info.parse(draft)
       })
     }
@@ -1365,6 +1371,10 @@ export namespace Config {
       return
     }
     if (reload === "refresh") refresh()
+  }
+
+  export async function updateMcp(name: string, config: Mcp | null) {
+    await update({ mcp: { [name]: config ?? { enabled: false } } }, { reload: "refresh" })
   }
 
   function globalConfigFile() {
@@ -1435,7 +1445,7 @@ export namespace Config {
   export async function updateGlobal(config: Info) {
     const filepath = globalConfigFile()
     await JsonFile.update(filepath, (draft) => {
-      Object.assign(draft, mergeDeep(draft, config))
+      Object.assign(draft, mergeConfigConcatArrays(draft, config))
       Info.parse(draft)
     })
 

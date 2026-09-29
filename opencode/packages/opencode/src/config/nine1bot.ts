@@ -17,6 +17,12 @@ export async function updateNine1botConfig(edit: (data: JsonFile.Object) => void
     Config.Info.parse(after)
     if (generated) {
       JsonFile.applyDiff(generated.data, before, after)
+      for (const [name, entry] of Object.entries(after.mcp ?? {})) {
+        if (entry && typeof entry === "object" && !("type" in entry) && "enabled" in entry && entry.enabled === false) {
+          generated.data.mcp ??= {}
+          generated.data.mcp[name] = { enabled: false }
+        }
+      }
       Config.Info.parse(generated.data)
     }
   })

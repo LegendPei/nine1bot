@@ -125,6 +125,7 @@ describe("configuration persistence and invalidation", () => {
     expect(saved.status).toBe(200)
     expect(after.provider?.["project-only"]).toBeUndefined()
     expect(after.provider?.["global-audit"]).toBeDefined()
+    expect(after.provider?.audit).toBeDefined()
   })
   test("invalid config is rejected before either file is modified", async () => {
     const f = await setup()

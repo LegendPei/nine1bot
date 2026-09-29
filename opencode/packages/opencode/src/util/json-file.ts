@@ -45,8 +45,8 @@ export namespace JsonFile {
     for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
       if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue
       if (!(key in after)) delete target[key]
-      else if (isObject(before[key]) && isObject(after[key]) && isObject(target[key])) {
-        applyDiff(target[key], before[key], after[key])
+      else if ((isObject(before[key]) || before[key] === undefined) && isObject(after[key]) && isObject(target[key])) {
+        applyDiff(target[key], before[key] ?? {}, after[key])
       } else target[key] = structuredClone(after[key])
     }
   }
