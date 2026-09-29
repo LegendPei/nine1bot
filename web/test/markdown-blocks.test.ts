@@ -67,6 +67,16 @@ describe('createMarkdownBlockRenderer', () => {
     expect(linked[0]).toContain('href="https://example.com"')
   })
 
+  it('updates an existing reference when its destination or title changes', () => {
+    const renderBlocks = createMarkdownBlockRenderer()
+    const before = renderBlocks('见 [文档][d]。\n\n[d]: https://a.example "旧标题"')
+    const after = renderBlocks('见 [文档][d]。\n\n[d]: https://b.example "新标题"')
+    expect(before[0]).toContain('href="https://a.example"')
+    expect(after[0]).toContain('href="https://b.example"')
+    expect(after[0]).toContain('title="新标题"')
+    expect(after[0]).not.toContain('a.example')
+  })
+
   it('lets sanitize rewrite every emitted block', () => {
     const seen: string[] = []
     const renderBlocks = createMarkdownBlockRenderer({

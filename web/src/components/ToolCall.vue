@@ -27,6 +27,12 @@ const { mounted: bodyMounted, open: isExpanded, toggle } = useCollapse()
 
 const toolName = computed(() => props.tool.tool || 'unknown')
 const status = computed(() => props.tool.state?.status || 'pending')
+const statusLabel = computed(() => ({
+  pending: '等待中',
+  running: '运行中',
+  completed: '已完成',
+  error: '失败',
+} as Record<string, string>)[status.value] || status.value)
 
 const statusClass = computed(() => {
   switch (status.value) {
@@ -181,11 +187,12 @@ function formatSize(bytes: number): string {
       role="button"
       tabindex="0"
       :aria-expanded="isExpanded"
+      :aria-label="`${displayName}${toolTarget ? ` ${toolTarget}` : ''}，${statusLabel}`"
       @click="toggle"
       @keydown.enter.prevent="toggle"
       @keydown.space.prevent="toggle"
     >
-      <div class="tool-call-icon" :class="statusClass">
+      <div class="tool-call-icon" :class="statusClass" aria-hidden="true">
         <template v-if="status === 'running'">
           <span class="tool-pulse" aria-hidden="true"></span>
         </template>

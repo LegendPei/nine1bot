@@ -48,9 +48,9 @@ export function createMarkdownBlockRenderer(options: BlockRendererOptions = {}) 
       return [`<p>${escapeHtml(source)}</p>`]
     }
 
-    /* 引用式定义是文档级的：同一段原文在定义到达前后应当渲染成不同结果，
-       所以把定义表并进缓存键，没有定义时它是空串、不产生任何影响。 */
-    const scope = Object.keys(tokens.links ?? {}).sort().join(',')
+    /* 引用式定义是文档级的：定义新增或目标地址、标题变化时，同一 token
+       都要重新渲染。只缓存引用名会让旧链接一直留在页面上。 */
+    const scope = JSON.stringify(Object.entries(tokens.links ?? {}).sort(([a], [b]) => a.localeCompare(b)))
     const next = new Map<string, string>()
     const blocks: MarkdownBlocks = []
 

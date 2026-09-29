@@ -18,32 +18,37 @@ export function useCollapse(closeDelay = CLOSE_DELAY) {
   const mounted = ref(false)
   /** 是否处于展开态（驱动 0fr / 1fr） */
   const open = ref(false)
+  /** 点击意图先于动画生效；连续点击时不能用尚未更新的 open 判断。 */
+  let desiredOpen = false
+  let revision = 0
   let timer: ReturnType<typeof setTimeout> | undefined
 
   async function set(next: boolean) {
+    desiredOpen = next
+    const current = ++revision
     if (timer) {
       clearTimeout(timer)
       timer = undefined
     }
     if (next) {
-      if (!mounted.value) {
-        mounted.value = true
-        await nextTick()
-        await afterPaint()
-      }
+      if (!mounted.value) mounted.value = true
+      await nextTick()
+      await afterPaint()
+      if (current !== revision || !desiredOpen) return
       open.value = true
       return
     }
     open.value = false
     timer = setTimeout(() => {
       timer = undefined
-      if (!open.value) mounted.value = false
+      if (current === revision && !desiredOpen) mounted.value = false
     }, closeDelay)
   }
 
   onUnmounted(() => {
+    revision++
     if (timer) clearTimeout(timer)
   })
 
-  return { mounted, open, set, toggle: () => set(!open.value) }
+  return { mounted, open, set, toggle: () => set(!desiredOpen) }
 }

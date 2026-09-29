@@ -552,41 +552,34 @@ a:hover {
   background: var(--bg-tertiary);
 }
 
-/* 状态点：8px 小色点，不是带勾/叉字形的 20px 徽章。一行工具调用的主角是名字和
-   目标路径，状态只要扫一眼能认出就够了——连续几十次调用叠起来时，一整列徽章方块
-   会把视线全抢过去。两版并排比过之后留了这版。 */
+/* 小号状态符号保留形状差异，颜色只是辅助识别。 */
 .tool-call-icon {
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
-  border-radius: var(--radius-full);
-  background: var(--border-default);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* 勾、叉、圆圈这些字形塞进 8px 只会糊成一团，状态全部交给颜色 */
 .tool-call-icon svg {
-  display: none;
+  display: block;
 }
 
 .tool-call-icon.pending {
-  background: var(--border-default);
+  color: var(--text-muted);
 }
 
-/* 运行态把底色让给 .tool-pulse，只留 currentColor 给那颗呼吸的点 */
 .tool-call-icon.running {
-  background: transparent;
   color: var(--accent);
 }
 
 .tool-call-icon.success {
-  background: color-mix(in srgb, var(--success) 60%, transparent);
+  color: var(--success);
 }
 
 .tool-call-icon.error {
-  background: var(--error);
+  color: var(--error);
 }
 
 /* 运行态的呼吸灯：一个点 + 一圈向外扩散的光。
